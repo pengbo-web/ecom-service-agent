@@ -35,9 +35,19 @@ cp .env.example .env
 # 4. 构建知识库索引（RAG 检索需要，首次运行一次即可）
 python -m app.scripts.build_kb_index
 
-# 5. 启动对话
+# 5. 启动对话（CLI 模式）
 python main.py
 ```
+
+**或启动 Web 服务（流式对话页，推荐演示用）：**
+
+```bash
+python run_api.py
+# 浏览器打开 http://127.0.0.1:8000/
+```
+
+Web 页面会实时展示 Agent 的 ReAct 思考过程（思考 → 调用工具 → 观察 → 回复），
+底部显示意图 / 置信度 / 是否转人工。
 
 启动后直接输入问题即可，试试这些：
 
