@@ -1,1 +1,117 @@
-<!doctype html><title>placeholder</title>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>智能客服「小夕」</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 0 auto; padding: 16px; background:#f7f7f8; }
+  h1 { font-size: 18px; }
+  #log { display:flex; flex-direction:column; gap:12px; margin-bottom:16px; }
+  .msg { padding:10px 14px; border-radius:12px; max-width:80%; white-space:pre-wrap; }
+  .user { align-self:flex-end; background:#4f7cff; color:#fff; }
+  .bot { align-self:flex-start; background:#fff; border:1px solid #e5e5e5; }
+  .trace { align-self:flex-start; font-size:12px; color:#666; background:#f0f0f2; border-radius:8px; padding:6px 10px; max-width:80%; }
+  .trace summary { cursor:pointer; }
+  .badge { display:inline-block; font-size:12px; color:#555; margin-top:6px; }
+  #bar { display:flex; gap:8px; position:sticky; bottom:0; background:#f7f7f8; padding:8px 0; }
+  #inp { flex:1; padding:10px; border:1px solid #ccc; border-radius:8px; }
+  button { padding:10px 16px; border:none; border-radius:8px; background:#4f7cff; color:#fff; cursor:pointer; }
+  button:disabled { opacity:.5; }
+</style>
+</head>
+<body>
+  <h1>并夕夕 · 智能客服「小夕」<button id="reset" style="float:right;background:#888;">重置</button></h1>
+  <div id="log"></div>
+  <div id="bar">
+    <input id="inp" placeholder="试试：我的订单还没发货，怎么回事？" autocomplete="off" />
+    <button id="send">发送</button>
+  </div>
+<script>
+const SESSION_ID = "web-" + Math.random().toString(36).slice(2, 10);
+const log = document.getElementById("log");
+const inp = document.getElementById("inp");
+const sendBtn = document.getElementById("send");
+
+function addMsg(text, cls) {
+  const d = document.createElement("div");
+  d.className = "msg " + cls;
+  d.textContent = text;
+  log.appendChild(d);
+  window.scrollTo(0, document.body.scrollHeight);
+  return d;
+}
+
+function newTrace() {
+  const wrap = document.createElement("details");
+  wrap.className = "trace"; wrap.open = true;
+  const s = document.createElement("summary");
+  s.textContent = "🧠 Agent 思考过程";
+  wrap.appendChild(s);
+  log.appendChild(wrap);
+  return wrap;
+}
+
+function traceLine(trace, text) {
+  const p = document.createElement("div");
+  p.textContent = text;
+  trace.appendChild(p);
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+async function send() {
+  const message = inp.value.trim();
+  if (!message) return;
+  inp.value = ""; sendBtn.disabled = true;
+  addMsg(message, "user");
+  const trace = newTrace();
+
+  const resp = await fetch("/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: SESSION_ID, message }),
+  });
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const frames = buf.split("\n\n");
+    buf = frames.pop();
+    for (const frame of frames) {
+      if (!frame.startsWith("data: ")) continue;
+      const ev = JSON.parse(frame.slice(6));
+      if (ev.type === "thought") traceLine(trace, "💭 " + ev.content);
+      else if (ev.type === "tool_call") traceLine(trace, "🔧 调用 " + ev.name + "(" + JSON.stringify(ev.args) + ")");
+      else if (ev.type === "tool_result") traceLine(trace, "📋 " + ev.content.slice(0, 200));
+      else if (ev.type === "reply") {
+        trace.open = false;
+        addMsg(ev.content, "bot");
+      } else if (ev.type === "metadata") {
+        const b = document.createElement("div");
+        b.className = "badge";
+        b.textContent = `[意图: ${ev.intent} | 置信度: ${(ev.confidence*100).toFixed(0)}% | 转人工: ${ev.requires_human ? "是" : "否"}]`;
+        log.appendChild(b);
+      } else if (ev.type === "error") {
+        addMsg("⚠️ 出错了：" + ev.message, "bot");
+      }
+    }
+  }
+  sendBtn.disabled = false; inp.focus();
+}
+
+sendBtn.onclick = send;
+inp.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+document.getElementById("reset").onclick = async () => {
+  await fetch("/api/session/reset", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: SESSION_ID }),
+  });
+  log.innerHTML = "";
+};
+</script>
+</body>
+</html>
