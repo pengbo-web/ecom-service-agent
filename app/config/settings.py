@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     eval_use_judge: bool = True  # 是否启用 LLM-as-judge（质量/幻觉/过程合理性）
     eval_pass_threshold: float = 0.6  # 单维度通过阈值（judge 归一化到 0-1 后比较）
 
+    # API 服务（Web 流式对话）
+    api_host: str = "127.0.0.1"
+    api_port: int = 8010  # 默认 8010，避开常被占用的 8000
+
     # 多轮对话管理
     session_path: str = "app/sessions/session.json"
     history_threshold: int = 10  # 消息压缩策略通常为上下文达到一定的token数，例如claude code通常为达到最大上下文窗口的70%左右，此处简略为原始消息条数超过10轮
