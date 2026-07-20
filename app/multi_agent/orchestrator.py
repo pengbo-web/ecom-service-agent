@@ -105,7 +105,7 @@ class MultiAgentOrchestrator:
         self.memory_manager.update_short_term(self.raw_messages[-6:])
 
         self.raw_messages.append(
-            {"role": "assistant", "content": result.model_dump_json(ensure_ascii=False)}
+            {"role": "assistant", "content": result.model_dump_json()}
         )
 
         if len(self.raw_messages) > self.history_threshold:
