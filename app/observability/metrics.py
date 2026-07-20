@@ -32,6 +32,8 @@ def compute_metrics(store) -> dict:
         1 for s in guard_spans if s.get("meta") and '"action": "sanitize"' in s["meta"]
     )
 
+    hitl_spans = [s for s in spans if s["kind"] == "hitl"]
+
     intent_dist: dict = {}
     for t in traces:
         key = t["intent"] or "unknown"
@@ -53,5 +55,7 @@ def compute_metrics(store) -> dict:
         "guard_blocks": guard_blocks,
         "guard_sanitizes": guard_sanitizes,
         "block_rate": (guard_blocks / total) if total else 0.0,
+        "handoffs": len(hitl_spans),
+        "escalation_rate": (len(hitl_spans) / total) if total else 0.0,
         "intent_distribution": intent_dist,
     }
