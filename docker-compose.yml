@@ -1,0 +1,12 @@
+services:
+  ecom-agent:
+    build: .
+    ports:
+      - "8010:8010"
+    env_file:
+      - .env
+    environment:
+      - API_HOST=0.0.0.0        # 容器内需监听 0.0.0.0 才能被宿主访问
+    volumes:
+      - ./app/sessions:/app/app/sessions   # 会话/DB/Trace 持久化
+    restart: unless-stopped
