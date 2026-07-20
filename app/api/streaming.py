@@ -39,7 +39,7 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
               "follow_up_question": result.follow_up_question})
         if hitl is not None:
             reasons = hitl.evaluate(result.intent.value, result.confidence,
-                                    result.requires_human)
+                                    result.requires_human, user_input=user_input)
             if reasons:
                 recent = list(getattr(agent, "raw_messages", []))[-6:]
                 hid = hitl.escalate(session_id, user_input, reply,

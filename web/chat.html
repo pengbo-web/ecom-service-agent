@@ -45,6 +45,7 @@
     <div class="tabs">
       <div class="tab active" id="tab-chat" onclick="switchTab('chat')">💬 聊天</div>
       <div class="tab" id="tab-dash" onclick="switchTab('dash')">📊 看板</div>
+      <div class="tab" id="tab-seat" onclick="switchTab('seat')">🎧 坐席</div>
     </div>
   </header>
 
@@ -73,15 +74,27 @@
     <div id="detail"></div>
   </section>
 
+  <!-- 坐席视图 -->
+  <section id="seat-view" hidden>
+    <div class="card" style="margin-bottom:12px">
+      <button onclick="toggleTakeover()">切换本会话 人工/自动</button>
+      <span id="takeover-state" style="margin-left:10px;color:#555">当前：自动（AI 回复）</span>
+    </div>
+    <h3>待接管会话 <button onclick="loadSeat()" style="padding:4px 10px">刷新</button></h3>
+    <div id="seat-list"></div>
+  </section>
+
 <script>
 /* ---------- 标签切换 ---------- */
 function switchTab(which) {
-  const isChat = which === "chat";
-  document.getElementById("chat-view").hidden = !isChat;
-  document.getElementById("dash-view").hidden = isChat;
-  document.getElementById("tab-chat").classList.toggle("active", isChat);
-  document.getElementById("tab-dash").classList.toggle("active", !isChat);
-  if (!isChat) loadDash();  // 每次切到看板自动刷新
+  document.getElementById("chat-view").hidden = which !== "chat";
+  document.getElementById("dash-view").hidden = which !== "dash";
+  document.getElementById("seat-view").hidden = which !== "seat";
+  document.getElementById("tab-chat").classList.toggle("active", which === "chat");
+  document.getElementById("tab-dash").classList.toggle("active", which === "dash");
+  document.getElementById("tab-seat").classList.toggle("active", which === "seat");
+  if (which === "dash") loadDash();
+  if (which === "seat") loadSeat();
 }
 
 /* ---------- 聊天 ---------- */
@@ -144,6 +157,7 @@ async function send() {
         const ev = JSON.parse(frame.slice(6));
         if (ev.type === "thought") traceLine(trace, "💭 " + ev.content);
         else if (ev.type === "guard") traceLine(trace, "🛡️ 护栏[" + ev.stage + "/" + ev.action + "] " + (ev.reason || ""));
+        else if (ev.type === "handoff") { traceLine(trace, "🎧 已转人工，原因：" + (ev.reasons||[]).join("、")); addMsg("🎧 该问题已为您转接人工客服，请稍候。", "bot"); }
         else if (ev.type === "tool_call") traceLine(trace, "🔧 调用 " + ev.name + "(" + JSON.stringify(ev.args) + ")");
         else if (ev.type === "tool_result") traceLine(trace, "📋 " + ev.content.slice(0, 200));
         else if (ev.type === "reply") { trace.open = false; addMsg(ev.content, "bot"); }
@@ -188,6 +202,8 @@ async function loadDash() {
     card("护栏拦截", m.guard_blocks),
     card("拦截率", (m.block_rate*100).toFixed(1) + "%"),
     card("脱敏次数", m.guard_sanitizes),
+    card("转人工数", m.handoffs),
+    card("转人工率", (m.escalation_rate*100).toFixed(1) + "%"),
     card("Prompt tokens", m.total_prompt_tokens),
     card("Completion tokens", m.total_completion_tokens),
     card("估算成本", "$" + m.est_cost_usd),
@@ -224,6 +240,29 @@ async function detail(id) {
   ).join("\n");
   document.getElementById("detail").innerHTML =
     `<h3>调用链 ${id}</h3><pre>用户: ${t.user_input}\n意图: ${t.intent} 状态: ${t.status}\n\n${spans}</pre>`;
+}
+
+/* ---------- 坐席 ---------- */
+async function loadSeat() {
+  const list = await (await fetch("/api/handoffs")).json();
+  const box = document.getElementById("seat-list");
+  box.innerHTML = list.length ? list.map(h => `
+    <div class="card" style="margin-bottom:8px">
+      <div><b>会话 ${h.session_id}</b> · 意图 ${h.intent||'-'} · ${h.created_at||''}</div>
+      <div style="color:#c0392b;font-size:13px">原因：${(h.reasons||[]).join("、")}</div>
+      <div style="font-size:13px;color:#555">用户：${(h.payload&&h.payload.user_input)||''}</div>
+      <div style="font-size:13px;color:#555">Agent：${(h.payload&&h.payload.reply)||''}</div>
+      <button style="margin-top:6px;padding:4px 10px" onclick="resolveHandoff('${h.handoff_id}')">标记已解决</button>
+    </div>`).join("") : "<p style='color:#888'>暂无待接管会话</p>";
+}
+async function resolveHandoff(id) {
+  await fetch("/api/handoffs/" + id + "/resolve", { method: "POST" });
+  loadSeat();
+}
+async function toggleTakeover() {
+  const r = await (await fetch("/api/session/" + SESSION_ID + "/takeover", { method: "POST" })).json();
+  document.getElementById("takeover-state").textContent =
+    r.mode === "manual" ? "当前：人工接管中（Agent 已暂停）" : "当前：自动（AI 回复）";
 }
 
 /* 支持 /dashboard 或 #dash 直接进看板 */

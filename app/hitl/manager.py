@@ -12,9 +12,11 @@ class HitlManager:
         self.confidence_threshold = confidence_threshold
         self.sensitive_intents = sensitive_intents
 
-    def evaluate(self, intent: str, confidence: float, requires_human: bool) -> list:
+    def evaluate(self, intent: str, confidence: float, requires_human: bool,
+                 user_input: str = "") -> list:
         return should_escalate(intent, confidence, requires_human,
-                               self.confidence_threshold, self.sensitive_intents)
+                               self.confidence_threshold, self.sensitive_intents,
+                               user_input=user_input)
 
     def escalate(self, session_id, user_input, reply, intent, confidence,
                  reasons, recent_context=None) -> str:
