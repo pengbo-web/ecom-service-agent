@@ -10,8 +10,8 @@
 
 | # | 借鉴点 | 价值 | 工作量 | 落到我们哪个模块 |
 |---|--------|------|--------|-----------------|
-
-| 2 | **Agent 生命周期 Hook 体系(可插拔)** | ⭐⭐⭐| 1 | **模型 fallback + 熔断 + 错误分类重试** | ⭐⭐⭐ 高 | 中 | 新增 `app/resilience/` 或并入 W3.5 加固 | 高 | 中高 | 重构 `app/api/streaming.py` + 护栏/HITL/可观测 |
+| 1 | **模型 fallback + 熔断 + 错误分类重试** | ⭐⭐⭐ 高 | 中 | 新增 `app/resilience/` 或并入 W3.5 加固 |
+| 2 | **Agent 生命周期 Hook 体系(可插拔)** | ⭐⭐⭐ 高 | 中高 | 重构 `app/api/streaming.py` + 护栏/HITL/可观测 |
 | 3 | **历史裁剪的"协议合法性"保证** | ⭐⭐ 中高 | 低 | `app/agent/chat.py` 的 `_compress_history` / `_build_messages` |
 | 4 | **Skill 声明式依赖检测 + 渐进加载** | ⭐⭐ 中 | 低 | `app/agent/skills/loader.py` |
 | 5 | **配置 `${ENV}` 占位 + schema 迁移 + 缺省补齐** | ⭐⭐ 中 | 低 | `app/config/settings.py` |
