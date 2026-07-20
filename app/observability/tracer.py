@@ -89,6 +89,14 @@ class Tracer:
                 meta={"stage": event.get("stage"), "action": event.get("action"),
                       "reason": event.get("reason")},
             ))
+        elif etype == "handoff":
+            now = self._now()
+            trace.spans.append(Span(
+                span_id=self._id(), trace_id=trace.trace_id,
+                name="handoff", kind="hitl",
+                started_at=now, ended_at=now, latency_ms=0.0,
+                meta={"reasons": event.get("reasons", [])},
+            ))
 
 
 def _parse_success(content) -> Optional[bool]:

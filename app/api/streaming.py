@@ -10,7 +10,8 @@ _SENTINEL = object()
 
 
 def run_agent_streaming(agent, user_input: str, tracer=None,
-                        session_id: str = "", guard_pipeline=None) -> Iterator[dict]:
+                        session_id: str = "", guard_pipeline=None,
+                        hitl=None) -> Iterator[dict]:
     q: "queue.Queue" = queue.Queue()
 
     def _blocked_flow(sink, gr) -> str:
@@ -36,6 +37,15 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
               "confidence": result.confidence,
               "requires_human": result.requires_human,
               "follow_up_question": result.follow_up_question})
+        if hitl is not None:
+            reasons = hitl.evaluate(result.intent.value, result.confidence,
+                                    result.requires_human)
+            if reasons:
+                recent = list(getattr(agent, "raw_messages", []))[-6:]
+                hid = hitl.escalate(session_id, user_input, reply,
+                                    result.intent.value, result.confidence,
+                                    reasons, recent_context=recent)
+                sink({"type": "handoff", "reasons": reasons, "handoff_id": hid})
         return result.intent.value
 
     def _drive(sink) -> str:
