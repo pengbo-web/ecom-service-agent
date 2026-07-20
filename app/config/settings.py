@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     eval_dataset_path: str = "app/evaluation/cases.json"
     eval_use_judge: bool = True  # 是否启用 LLM-as-judge（质量/幻觉/过程合理性）
     eval_pass_threshold: float = 0.6  # 单维度通过阈值（judge 归一化到 0-1 后比较）
+    eval_baseline_path: str = "app/evaluation/baseline.json"  # 回归基线
+    eval_regression_tolerance: float = 0.05  # 单指标允许的最大回退幅度
 
     # API 服务（Web 流式对话）
     api_host: str = "127.0.0.1"

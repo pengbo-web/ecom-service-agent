@@ -30,6 +30,9 @@ from openai import OpenAI  # noqa: E402
 from app.config.settings import settings  # noqa: E402
 from app.evaluation.dataset import load_dataset  # noqa: E402
 from app.evaluation.evaluator import Evaluator  # noqa: E402
+from app.evaluation.regression import (  # noqa: E402
+    compare_to_baseline, save_baseline, load_baseline,
+)
 from app.evaluation.sandbox import Sandbox  # noqa: E402
 
 
@@ -104,6 +107,10 @@ def main():
         help="只跑代码规则指标，不调 LLM judge（快、便宜）",
     )
     parser.add_argument("--output", default=None, help="将完整报告写入 JSON 文件")
+    parser.add_argument("--save-baseline", action="store_true",
+                        help="将本次评估 summary 存为回归基线")
+    parser.add_argument("--regression", action="store_true",
+                        help="与基线对比，掉点超过容差则以非零码退出（CI 门禁）")
     args = parser.parse_args()
 
     dataset_path = ROOT / args.dataset if not Path(args.dataset).is_absolute() else Path(args.dataset)
@@ -140,6 +147,30 @@ def main():
 
     print("\n[3/3] 生成评估报告...")
     _print_report(report)
+
+    baseline_path = ROOT / settings.eval_baseline_path
+    if args.save_baseline:
+        save_baseline(report["summary"], baseline_path)
+        print(f"\n✅ 已保存回归基线: {baseline_path}")
+
+    if args.regression:
+        baseline = load_baseline(baseline_path)
+        if baseline is None:
+            print(f"\n⚠️  无基线可比（先跑 --save-baseline）: {baseline_path}")
+        else:
+            cmp = compare_to_baseline(report["summary"], baseline,
+                                      settings.eval_regression_tolerance)
+            print("\n" + "=" * 78)
+            print("  回归门禁（vs 基线）")
+            print("=" * 78)
+            for d in cmp["diffs"]:
+                flag = "❌ 回退" if d["regressed"] else "✅"
+                print(f"  {d['metric']:<20} 基线 {d['baseline']:.3f} → 本次 "
+                      f"{d['current']:.3f}  (Δ {d['delta']:+.3f}) {flag}")
+            if cmp["regressed"]:
+                print("\n❌ 检测到质量回退，评估门禁未通过。")
+                sys.exit(1)
+            print("\n✅ 未见回退，评估门禁通过。")
 
     if args.output:
         out_path = ROOT / args.output if not Path(args.output).is_absolute() else Path(args.output)
