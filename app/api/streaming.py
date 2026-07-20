@@ -1,38 +1,56 @@
-"""把阻塞式 agent.chat() 桥接成可被 SSE 消费的事件生成器（W2：可选接入 tracer）。"""
+"""把阻塞式 agent.chat() 桥接成 SSE 事件生成器（W2 tracer + W3 guardrails 可选）。"""
 
 import queue
 import threading
 from typing import Iterator
 
+from app.guardrails.base import SAFE_FALLBACK
+
 _SENTINEL = object()
 
 
 def run_agent_streaming(agent, user_input: str, tracer=None,
-                        session_id: str = "") -> Iterator[dict]:
-    """在后台线程运行 agent.chat()，把过程事件 + 最终结果按序 yield 出来。
-
-    tracer 非空时：整次请求包一条 Trace，工具事件配对成 span，
-    LLM 调用经 TracingClient 采集 token/延迟。tracer 为空时行为与 W1 一致。
-    """
+                        session_id: str = "", guard_pipeline=None) -> Iterator[dict]:
     q: "queue.Queue" = queue.Queue()
 
-    def _run(sink):
+    def _blocked_flow(sink, gr) -> str:
+        """输入被护栏拦截：短路，不调用 Agent。返回 intent 供 trace 记录。"""
+        sink({"type": "guard", "stage": "input", "action": "block",
+              "guard": gr.guard, "reason": gr.reason})
+        sink({"type": "reply", "content": SAFE_FALLBACK})
+        sink({"type": "metadata", "intent": "blocked", "confidence": 1.0,
+              "requires_human": False, "follow_up_question": None})
+        return "blocked"
+
+    def _normal_flow(sink) -> str:
+        """正常调用 Agent，并对输出跑护栏。返回 intent。"""
         result = agent.chat(user_input)
-        sink({"type": "reply", "content": result.reply})
-        sink({
-            "type": "metadata",
-            "intent": result.intent.value,
-            "confidence": result.confidence,
-            "requires_human": result.requires_human,
-            "follow_up_question": result.follow_up_question,
-        })
-        return result
+        reply = result.reply
+        if guard_pipeline is not None:
+            reply, out_results = guard_pipeline.check_output(reply)
+            for gr in out_results:
+                sink({"type": "guard", "stage": "output", "action": gr.action,
+                      "guard": gr.guard, "reason": gr.reason})
+        sink({"type": "reply", "content": reply})
+        sink({"type": "metadata", "intent": result.intent.value,
+              "confidence": result.confidence,
+              "requires_human": result.requires_human,
+              "follow_up_question": result.follow_up_question})
+        return result.intent.value
+
+    def _drive(sink) -> str:
+        """返回 intent 字符串；抛错时上层处理。"""
+        if guard_pipeline is not None:
+            gin = guard_pipeline.check_input(user_input)
+            if gin.action == "block":
+                return _blocked_flow(sink, gin)
+        return _normal_flow(sink)
 
     def worker():
         if tracer is None:
             agent.event_sink = q.put
             try:
-                _run(q.put)
+                _drive(q.put)
             except Exception as e:  # noqa: BLE001
                 q.put({"type": "error", "message": str(e)})
             finally:
@@ -40,7 +58,6 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                 q.put(_SENTINEL)
             return
 
-        # 接入 tracer 分支
         from app.observability.client_proxy import TracingClient
 
         def sink(ev):
@@ -54,13 +71,12 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                 if real_client is not None:
                     agent.client = TracingClient(real_client, tracer)
                 try:
-                    result = _run(sink)
-                    trace.intent = result.intent.value
+                    trace.intent = _drive(sink)
                 finally:
                     agent.event_sink = None
                     if real_client is not None:
                         agent.client = real_client
-        except Exception as e:  # noqa: BLE001 —— start_trace 已记录 error 状态
+        except Exception as e:  # noqa: BLE001
             q.put({"type": "error", "message": str(e)})
         finally:
             q.put(_SENTINEL)

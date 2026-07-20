@@ -80,6 +80,15 @@ class Tracer:
             sp.latency_ms = (sp.ended_at - sp.started_at) * 1000.0
             sp.success = _parse_success(event.get("content"))
             trace.spans.append(sp)
+        elif etype == "guard":
+            now = self._now()
+            trace.spans.append(Span(
+                span_id=self._id(), trace_id=trace.trace_id,
+                name=f"guard:{event.get('guard')}", kind="guard",
+                started_at=now, ended_at=now, latency_ms=0.0,
+                meta={"stage": event.get("stage"), "action": event.get("action"),
+                      "reason": event.get("reason")},
+            ))
 
 
 def _parse_success(content) -> Optional[bool]:
