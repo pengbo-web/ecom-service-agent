@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     hitl_db_path: str = "app/sessions/hitl.db"
     manual_mode_timeout: int = 3600   # 人工接管超时（秒），超时自动回落自动模式
 
+    # 生产加固（W3.5）
+    admin_token: str = ""              # 管理接口令牌；空=本地不鉴权
+    rate_limit_per_min: int = 20       # 每会话每分钟最大请求数
+    daily_request_budget: int = 500    # 每日全局请求上限（成本兜底）
+    fast_path_enabled: bool = True     # 规则快路径（高频简单意图秒回）
+
     # 多轮对话管理
     session_path: str = "app/sessions/session.json"
     history_threshold: int = 10  # 消息压缩策略通常为上下文达到一定的token数，例如claude code通常为达到最大上下文窗口的70%左右，此处简略为原始消息条数超过10轮
