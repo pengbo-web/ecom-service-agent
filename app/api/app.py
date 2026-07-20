@@ -61,8 +61,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return compute_metrics(store)
 
     @app.get("/api/traces")
-    def traces(limit: int = 20):
-        return store.recent_traces(limit=limit)
+    def traces(limit: int = 20, session_id: Optional[str] = None):
+        return store.recent_traces(limit=limit, session_id=session_id)
 
     @app.get("/api/traces/{trace_id}")
     def trace_detail(trace_id: str):

@@ -65,7 +65,11 @@
     <h3>意图分布</h3>
     <div id="intents"></div>
     <h3>最近请求（点行看调用链）</h3>
-    <table id="traces"><thead><tr><th>时间(相对)</th><th>意图</th><th>状态</th><th>延迟(ms)</th><th>tokens</th></tr></thead><tbody></tbody></table>
+    <div style="margin-bottom:8px;font-size:13px;color:#555">
+      <label><input type="checkbox" id="only-mine" checked onchange="loadDash()"> 只看本会话</label>
+      <span id="sid-label" style="margin-left:8px;color:#888"></span>
+    </div>
+    <table id="traces"><thead><tr><th>时间(相对)</th><th>会话</th><th>意图</th><th>状态</th><th>延迟(ms)</th><th>tokens</th></tr></thead><tbody></tbody></table>
     <div id="detail"></div>
   </section>
 
@@ -81,7 +85,11 @@ function switchTab(which) {
 }
 
 /* ---------- 聊天 ---------- */
-const SESSION_ID = "web-" + Math.random().toString(36).slice(2, 10);
+const SESSION_ID = (function () {
+  let s = localStorage.getItem("xiaoxi_sid");
+  if (!s) { s = "web-" + Math.random().toString(36).slice(2, 10); localStorage.setItem("xiaoxi_sid", s); }
+  return s;
+})();
 const log = document.getElementById("log");
 const inp = document.getElementById("inp");
 const sendBtn = document.getElementById("send");
@@ -182,11 +190,21 @@ async function loadDash() {
   ].join("");
   document.getElementById("intents").innerHTML =
     Object.entries(m.intent_distribution).map(([k,v]) => `<span class="card" style="display:inline-block;margin:4px">${k}: <b>${v}</b></span>`).join("");
-  const traces = await (await fetch("/api/traces?limit=30")).json();
+
+  const onlyMine = document.getElementById("only-mine").checked;
+  document.getElementById("sid-label").textContent = "本会话 ID: " + SESSION_ID;
+  let url = "/api/traces?limit=50";
+  if (onlyMine) url += "&session_id=" + encodeURIComponent(SESSION_ID);
+  const traces = await (await fetch(url)).json();
   const tb = document.querySelector("#traces tbody");
+  if (!traces.length) {
+    tb.innerHTML = `<tr><td colspan="6" style="color:#888">暂无记录${onlyMine ? "（本会话还没对话，去「聊天」发一条试试）" : ""}</td></tr>`;
+    return;
+  }
   tb.innerHTML = traces.map(t => `
     <tr style="cursor:pointer" onclick="detail('${t.trace_id}')">
       <td>${t.started_at.toFixed(0)}</td>
+      <td title="${t.session_id||''}">${(t.session_id||'-').slice(0,12)}</td>
       <td>${t.intent || "-"}</td>
       <td class="${t.status==='ok'?'ok':'err'}">${t.status}</td>
       <td>${t.latency_ms.toFixed(0)}</td>

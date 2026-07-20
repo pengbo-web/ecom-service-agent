@@ -86,12 +86,18 @@ class TraceStore:
         finally:
             conn.close()
 
-    def recent_traces(self, limit: int = 20) -> list[dict]:
+    def recent_traces(self, limit: int = 20, session_id: Optional[str] = None) -> list[dict]:
         conn = self.connect()
         try:
-            rows = conn.execute(
-                "SELECT * FROM traces ORDER BY started_at DESC LIMIT ?", (limit,)
-            ).fetchall()
+            if session_id:
+                rows = conn.execute(
+                    "SELECT * FROM traces WHERE session_id = ? "
+                    "ORDER BY started_at DESC LIMIT ?", (session_id, limit)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM traces ORDER BY started_at DESC LIMIT ?", (limit,)
+                ).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()

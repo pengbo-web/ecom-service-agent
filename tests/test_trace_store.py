@@ -36,3 +36,14 @@ def test_recent_traces(tmp_path):
     assert len(rows) == 1
     assert rows[0]["trace_id"] == "t1"
     assert rows[0]["status"] == "ok"
+
+
+def test_recent_traces_filter_by_session(tmp_path):
+    store = TraceStore(str(tmp_path / "tr.db"))
+    store.init_schema()
+    store.save_trace(Trace("t1", "sessA", "a", "greeting", 1.0, 1.1, 100.0, "ok", None, []))
+    store.save_trace(Trace("t2", "sessB", "b", "order_query", 2.0, 2.1, 100.0, "ok", None, []))
+    only_a = store.recent_traces(limit=10, session_id="sessA")
+    assert len(only_a) == 1
+    assert only_a[0]["trace_id"] == "t1"
+    assert len(store.recent_traces(limit=10)) == 2
