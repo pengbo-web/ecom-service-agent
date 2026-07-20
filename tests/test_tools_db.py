@@ -1,0 +1,70 @@
+import pytest
+
+from app.db import Database, set_db
+from app.db.seed import seed_from_mock
+
+
+@pytest.fixture(autouse=True)
+def _use_temp_db(tmp_path):
+    d = Database(str(tmp_path / "t.db"))
+    d.init_schema()
+    seed_from_mock(d)
+    set_db(d)
+    return d
+
+
+def test_query_order_hits_db():
+    from app.agent.tools.order import query_order
+    r = query_order("ORD-20240115-001")
+    assert r["success"] is True
+    assert r["order"]["items"][0]["sku"] == "SHOE-270-BK-42"
+
+
+def test_query_order_missing():
+    from app.agent.tools.order import query_order
+    r = query_order("NOPE")
+    assert r["success"] is False
+
+
+def test_query_product_by_id():
+    from app.agent.tools.product import query_product
+    r = query_product("ELEC-APP-002")
+    assert r["success"] is True
+    assert r["products"][0]["name"] == "Apple AirPods Pro 2"
+
+
+def test_query_product_by_keyword():
+    from app.agent.tools.product import query_product
+    r = query_product("运动鞋")
+    assert r["success"] is True
+    assert any("运动鞋" in p["category"] or "运动鞋" in p["name"] for p in r["products"])
+
+
+def test_query_logistics():
+    from app.agent.tools.logistics import query_logistics
+    r = query_logistics("ORD-20240115-001")
+    assert r["success"] is True
+    assert r["logistics"]["carrier"] == "顺丰速运"
+
+
+def test_list_user_orders():
+    from app.agent.tools.user_orders import list_user_orders
+    from app.agent.tools.mock_data import ORDERS
+    r = list_user_orders()
+    assert r["success"] is True
+    assert r["count"] == len(ORDERS)
+
+
+def test_apply_refund_mutates_db():
+    from app.agent.tools.refund import apply_refund
+    from app.agent.tools.order import query_order
+    r = apply_refund("ORD-20240115-001", "尺码不合适")
+    assert r["success"] is True
+    # 退款后再查订单，状态已变（真实数据流动）
+    assert query_order("ORD-20240115-001")["order"]["status"] == "refund_processing"
+
+
+def test_apply_refund_already_processing():
+    from app.agent.tools.refund import apply_refund
+    r = apply_refund("ORD-20240118-004", "x")  # 该订单初始即 refund_processing
+    assert r["success"] is False

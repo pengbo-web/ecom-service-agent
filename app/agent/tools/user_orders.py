@@ -1,4 +1,4 @@
-from app.agent.tools.mock_data import ORDERS
+from app.db import get_db
 
 STATUS_LABELS = {
     "pending": "待发货",
@@ -18,6 +18,6 @@ def list_user_orders() -> dict:
             "total": o["total"],
             "created_at": o["created_at"],
         }
-        for o in ORDERS.values()
+        for o in get_db().list_orders()
     ]
     return {"success": True, "count": len(orders), "orders": orders}

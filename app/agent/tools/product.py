@@ -1,6 +1,6 @@
 import random
 
-from app.agent.tools.mock_data import PRODUCTS
+from app.db import get_db
 
 
 def _match_score(product: dict, keywords: list[str]) -> int:
@@ -30,14 +30,16 @@ def _generate_mock_product(keyword: str) -> dict:
 
 def query_product(keyword: str) -> dict:
     """根据商品名称关键词或商品ID查询商品信息，包括价格、库存、规格等。"""
-    if keyword in PRODUCTS:
-        return {"success": True, "products": [PRODUCTS[keyword]]}
+    db = get_db()
+    exact = db.get_product(keyword)
+    if exact:
+        return {"success": True, "products": [exact]}
 
     keywords = [kw.lower() for kw in keyword.split() if kw.strip()]
     if not keywords:
         keywords = [keyword.lower()]
 
-    scored = [(p, _match_score(p, keywords)) for p in PRODUCTS.values()]
+    scored = [(p, _match_score(p, keywords)) for p in db.all_products()]
     results = [p for p, score in scored if score > 0]
 
     if not results:
