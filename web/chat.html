@@ -115,36 +115,43 @@ async function send() {
   inp.value = ""; sendBtn.disabled = true;
   addMsg(message, "user");
   const trace = newTrace();
-  const resp = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ session_id: SESSION_ID, message }),
-  });
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const frames = buf.split("\n\n");
-    buf = frames.pop();
-    for (const frame of frames) {
-      if (!frame.startsWith("data: ")) continue;
-      const ev = JSON.parse(frame.slice(6));
-      if (ev.type === "thought") traceLine(trace, "💭 " + ev.content);
-      else if (ev.type === "tool_call") traceLine(trace, "🔧 调用 " + ev.name + "(" + JSON.stringify(ev.args) + ")");
-      else if (ev.type === "tool_result") traceLine(trace, "📋 " + ev.content.slice(0, 200));
-      else if (ev.type === "reply") { trace.open = false; addMsg(ev.content, "bot"); }
-      else if (ev.type === "metadata") {
-        const b = document.createElement("div");
-        b.className = "badge";
-        b.textContent = `[意图: ${ev.intent} | 置信度: ${(ev.confidence*100).toFixed(0)}% | 转人工: ${ev.requires_human ? "是" : "否"}]`;
-        log.appendChild(b);
-      } else if (ev.type === "error") { addMsg("⚠️ 出错了：" + ev.message, "bot"); }
+  try {
+    const resp = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: SESSION_ID, message }),
+    });
+    if (!resp.ok) throw new Error("服务返回 " + resp.status);
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const frames = buf.split("\n\n");
+      buf = frames.pop();
+      for (const frame of frames) {
+        if (!frame.startsWith("data: ")) continue;
+        const ev = JSON.parse(frame.slice(6));
+        if (ev.type === "thought") traceLine(trace, "💭 " + ev.content);
+        else if (ev.type === "tool_call") traceLine(trace, "🔧 调用 " + ev.name + "(" + JSON.stringify(ev.args) + ")");
+        else if (ev.type === "tool_result") traceLine(trace, "📋 " + ev.content.slice(0, 200));
+        else if (ev.type === "reply") { trace.open = false; addMsg(ev.content, "bot"); }
+        else if (ev.type === "metadata") {
+          const b = document.createElement("div");
+          b.className = "badge";
+          b.textContent = `[意图: ${ev.intent} | 置信度: ${(ev.confidence*100).toFixed(0)}% | 转人工: ${ev.requires_human ? "是" : "否"}]`;
+          log.appendChild(b);
+        } else if (ev.type === "error") { addMsg("⚠️ 出错了：" + ev.message, "bot"); }
+      }
     }
+  } catch (err) {
+    traceLine(trace, "❌ 请求失败");
+    addMsg("⚠️ 连接服务失败：" + err.message + "\n请确认后端已启动（python run_api.py），刷新页面后重试。", "bot");
+  } finally {
+    sendBtn.disabled = false; inp.focus();
   }
-  sendBtn.disabled = false; inp.focus();
 }
 sendBtn.onclick = send;
 inp.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
