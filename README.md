@@ -35,6 +35,9 @@ cp .env.example .env
 # 4. 构建知识库索引（RAG 检索需要，首次运行一次即可）
 python -m app.scripts.build_kb_index
 
+# 4.5 构建真实业务数据库（订单/商品/物流，首次运行一次即可）
+python -m app.scripts.init_db
+
 # 5. 启动对话（CLI 模式）
 python main.py
 ```
