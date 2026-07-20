@@ -1,16 +1,20 @@
-from app.agent.tools.mock_data import ORDERS
+from app.db import get_db
 
 
 def apply_refund(order_id: str, reason: str) -> dict:
     """为指定订单申请退款，需提供退款原因。"""
-    order = ORDERS.get(order_id)
+    db = get_db()
+    order = db.get_order(order_id)
     if not order:
         return {"success": False, "error": f"未找到订单 {order_id}，请核实订单号"}
 
     if order["status"] == "refund_processing":
         return {"success": False, "error": "该订单已有退款申请正在处理中，请耐心等待"}
 
-    if order["status"] == "pending":
+    was_pending = order["status"] == "pending"
+    db.set_refund(order_id, reason)
+
+    if was_pending:
         return {
             "success": True,
             "message": (

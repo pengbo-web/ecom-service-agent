@@ -1,0 +1,9 @@
+{
+  "total": 10,
+  "passed": 5,
+  "pass_rate": 0.5,
+  "avg_process_score": 0.84375,
+  "avg_result_score": 0.8166666666666667,
+  "total_tokens": 61844,
+  "avg_tokens_per_case": 6184.4
+}

@@ -1,5 +1,5 @@
 import json
-from typing import Optional
+from typing import Callable, Optional
 
 from openai import OpenAI
 
@@ -57,6 +57,9 @@ class EcomAgent:
         self.raw_messages: list[dict] = []
         self.summary: Optional[str] = None
 
+        # 事件发射器：默认 None（走控制台打印）；服务层可替换为队列写入等
+        self.event_sink: Optional[Callable[[dict], None]] = None
+
         loaded = load_session(self.session_path)
         if loaded:
             self.summary = loaded["summary"]
@@ -79,7 +82,7 @@ class EcomAgent:
         self.memory_manager.update_short_term(self.raw_messages[-6:])
 
         self.raw_messages.append(
-            {"role": "assistant", "content": result.model_dump_json(ensure_ascii=False)}
+            {"role": "assistant", "content": result.model_dump_json()}
         )
 
         if len(self.raw_messages) > self.history_threshold:
@@ -122,7 +125,7 @@ class EcomAgent:
             assistant_msg = choice.message
 
             if assistant_msg.content:
-                self._print_thought(assistant_msg.content)
+                self._emit({"type": "thought", "content": assistant_msg.content})
 
             if not assistant_msg.tool_calls:
                 content = assistant_msg.content or ""
@@ -147,9 +150,9 @@ class EcomAgent:
                 func_name = tc.function.name
                 func_args = json.loads(tc.function.arguments)
 
-                self._print_action(func_name, func_args)
+                self._emit({"type": "tool_call", "name": func_name, "args": func_args})
                 result_str = self.tool_manager.execute_tool(func_name, func_args)
-                self._print_observation(result_str)
+                self._emit({"type": "tool_result", "content": result_str})
 
                 self.raw_messages.append({
                     "role": "tool",
@@ -261,13 +264,21 @@ class EcomAgent:
             f"({len(new_summary)} 字)]\n"
         )
 
-    def _print_thought(self, text: str) -> None:
-        print(f"\n💭 [思考] {text}")
+    def _emit(self, event: dict) -> None:
+        """发射一个过程事件。默认打印到控制台；有 event_sink 时交给 sink。"""
+        if self.event_sink is not None:
+            self.event_sink(event)
+        else:
+            self._render_to_console(event)
 
-    def _print_action(self, func_name: str, func_args: dict) -> None:
-        args_str = ", ".join(f"{k}={v!r}" for k, v in func_args.items())
-        print(f"🔧 [调用工具] {func_name}({args_str})")
-
-    def _print_observation(self, result: str) -> None:
-        display = result if len(result) <= 300 else result[:300] + "..."
-        print(f"📋 [工具结果] {display}")
+    def _render_to_console(self, event: dict) -> None:
+        etype = event.get("type")
+        if etype == "thought":
+            print(f"\n💭 [思考] {event['content']}")
+        elif etype == "tool_call":
+            args_str = ", ".join(f"{k}={v!r}" for k, v in event["args"].items())
+            print(f"🔧 [调用工具] {event['name']}({args_str})")
+        elif etype == "tool_result":
+            result = event["content"]
+            display = result if len(result) <= 300 else result[:300] + "..."
+            print(f"📋 [工具结果] {display}")

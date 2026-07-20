@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.git/
+.idea/
+app/sessions/
+docs/
+tests/
+*.md
+.superpowers/

@@ -1,0 +1,31 @@
+"""按天请求预算，成本兜底（防刷爆 API Key）。"""
+
+import time
+
+
+class CostGuard:
+    def __init__(self, max_requests_per_day: int, now=time.time):
+        self.max = max_requests_per_day
+        self._now = now
+        self._day = None
+        self._count = 0
+
+    def _today(self) -> int:
+        return int(self._now() // 86400)
+
+    def _roll(self) -> None:
+        d = self._today()
+        if d != self._day:
+            self._day = d
+            self._count = 0
+
+    def allow(self) -> bool:
+        self._roll()
+        if self._count >= self.max:
+            return False
+        self._count += 1
+        return True
+
+    def spent(self) -> int:
+        self._roll()
+        return self._count

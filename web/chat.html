@@ -1,0 +1,364 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>智能客服「小夕」</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 0 auto; padding: 16px; background:#f7f7f8; color:#222; }
+  header { display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  h1 { font-size: 18px; margin: 0; }
+  .tabs { display:flex; gap:8px; margin-left:auto; }
+  .tab { padding:6px 14px; border:1px solid #ddd; border-radius:20px; background:#fff; cursor:pointer; font-size:14px; }
+  .tab.active { background:#4f7cff; color:#fff; border-color:#4f7cff; }
+  section { margin-top:16px; }
+  [hidden] { display:none !important; }
+
+  /* 聊天 */
+  #log { display:flex; flex-direction:column; gap:12px; margin-bottom:16px; }
+  .msg { padding:10px 14px; border-radius:12px; max-width:80%; white-space:pre-wrap; }
+  .user { align-self:flex-end; background:#4f7cff; color:#fff; }
+  .bot { align-self:flex-start; background:#fff; border:1px solid #e5e5e5; }
+  .trace { align-self:flex-start; font-size:12px; color:#666; background:#f0f0f2; border-radius:8px; padding:6px 10px; max-width:80%; }
+  .trace summary { cursor:pointer; }
+  .badge { display:inline-block; font-size:12px; color:#555; margin-top:6px; }
+  #bar { display:flex; gap:8px; position:sticky; bottom:0; background:#f7f7f8; padding:8px 0; }
+  #inp { flex:1; padding:10px; border:1px solid #ccc; border-radius:8px; }
+  button { padding:10px 16px; border:none; border-radius:8px; background:#4f7cff; color:#fff; cursor:pointer; }
+  button:disabled { opacity:.5; }
+
+  /* 看板 */
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:20px; }
+  .card { background:#fff; border:1px solid #e5e5e5; border-radius:10px; padding:14px; }
+  .card .label { font-size:12px; color:#888; }
+  .card .value { font-size:22px; font-weight:600; margin-top:4px; }
+  table { width:100%; border-collapse:collapse; background:#fff; border-radius:10px; overflow:hidden; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid #eee; font-size:13px; }
+  th { background:#fafafa; }
+  .ok { color:#12864b; } .err { color:#c0392b; }
+  pre { background:#f0f0f2; padding:10px; border-radius:8px; overflow:auto; font-size:12px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>并夕夕 · 智能客服「小夕」</h1>
+    <div class="tabs">
+      <div class="tab active" id="tab-chat" onclick="switchTab('chat')">💬 聊天</div>
+      <div class="tab" id="tab-dash" onclick="switchTab('dash')">📊 看板</div>
+      <div class="tab" id="tab-seat" onclick="switchTab('seat')">🎧 坐席</div>
+      <div class="tab" id="tab-eval" onclick="switchTab('eval')">🧪 评估</div>
+    </div>
+  </header>
+
+  <!-- 聊天视图 -->
+  <section id="chat-view">
+    <div style="text-align:right;margin-bottom:8px"><button id="reset" style="background:#888;padding:6px 12px">重置对话</button></div>
+    <div id="log"></div>
+    <div id="bar">
+      <input id="inp" placeholder="试试：我的订单还没发货，怎么回事？" autocomplete="off" />
+      <button id="send">发送</button>
+    </div>
+  </section>
+
+  <!-- 看板视图 -->
+  <section id="dash-view" hidden>
+    <div style="text-align:right;margin-bottom:8px"><button onclick="loadDash()" style="padding:6px 12px">刷新</button></div>
+    <div class="cards" id="cards"></div>
+    <h3>意图分布</h3>
+    <div id="intents"></div>
+    <h3>最近请求（点行看调用链）</h3>
+    <div style="margin-bottom:8px;font-size:13px;color:#555">
+      <label><input type="checkbox" id="only-mine" checked onchange="loadDash()"> 只看本会话</label>
+      <span id="sid-label" style="margin-left:8px;color:#888"></span>
+    </div>
+    <table id="traces"><thead><tr><th>时间(相对)</th><th>会话</th><th>意图</th><th>状态</th><th>延迟(ms)</th><th>tokens</th></tr></thead><tbody></tbody></table>
+    <div id="detail"></div>
+  </section>
+
+  <!-- 坐席视图 -->
+  <section id="seat-view" hidden>
+    <div class="card" style="margin-bottom:12px">
+      <button onclick="toggleTakeover()">切换本会话 人工/自动</button>
+      <span id="takeover-state" style="margin-left:10px;color:#555">当前：自动（AI 回复）</span>
+    </div>
+    <h3>待接管会话 <button onclick="loadSeat()" style="padding:4px 10px">刷新</button></h3>
+    <div id="seat-list"></div>
+  </section>
+
+  <!-- 评估视图 -->
+  <section id="eval-view" hidden>
+    <h3>回流：线上问题 → 候选测试用例
+      <button onclick="doReflow()" style="padding:4px 10px">回流一次</button></h3>
+    <div id="reflow-box" style="color:#888;font-size:13px">点「回流一次」从线上 Trace 生成候选用例（免费、秒回）。</div>
+
+    <h3 style="margin-top:20px">评估回归门禁</h3>
+    <div class="card" style="margin-bottom:10px">
+      <div id="baseline-box" style="font-size:13px;color:#555">基线：加载中…</div>
+      <button onclick="runEval()" id="eval-btn" style="margin-top:8px">▶ 一键跑评估</button>
+      <span style="margin-left:8px;color:#c0392b;font-size:12px">⚠️ 会真调大模型、约 1-2 分钟、消耗 token</span>
+    </div>
+    <div id="eval-box" style="font-size:13px"></div>
+  </section>
+
+<script>
+/* ---------- 标签切换 ---------- */
+function switchTab(which) {
+  document.getElementById("chat-view").hidden = which !== "chat";
+  document.getElementById("dash-view").hidden = which !== "dash";
+  document.getElementById("seat-view").hidden = which !== "seat";
+  document.getElementById("eval-view").hidden = which !== "eval";
+  document.getElementById("tab-chat").classList.toggle("active", which === "chat");
+  document.getElementById("tab-dash").classList.toggle("active", which === "dash");
+  document.getElementById("tab-seat").classList.toggle("active", which === "seat");
+  document.getElementById("tab-eval").classList.toggle("active", which === "eval");
+  if (which === "dash") loadDash();
+  if (which === "seat") loadSeat();
+  if (which === "eval") { loadBaseline(); pollEvalStatus(); }
+}
+
+/* ---------- 聊天 ---------- */
+const SESSION_ID = (function () {
+  let s = localStorage.getItem("xiaoxi_sid");
+  if (!s) { s = "web-" + Math.random().toString(36).slice(2, 10); localStorage.setItem("xiaoxi_sid", s); }
+  return s;
+})();
+// 管理类请求携带令牌（本地默认空=不鉴权；启用时 localStorage.setItem("admin_token","...")）
+const ADMIN_TOKEN = localStorage.getItem("admin_token") || "";
+function adminFetch(url, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers, ADMIN_TOKEN ? { "X-Admin-Token": ADMIN_TOKEN } : {});
+  return fetch(url, opts);
+}
+const log = document.getElementById("log");
+const inp = document.getElementById("inp");
+const sendBtn = document.getElementById("send");
+
+function addMsg(text, cls) {
+  const d = document.createElement("div");
+  d.className = "msg " + cls;
+  d.textContent = text;
+  log.appendChild(d);
+  window.scrollTo(0, document.body.scrollHeight);
+  return d;
+}
+function newTrace() {
+  const wrap = document.createElement("details");
+  wrap.className = "trace"; wrap.open = true;
+  const s = document.createElement("summary");
+  s.textContent = "🧠 Agent 思考过程";
+  wrap.appendChild(s);
+  log.appendChild(wrap);
+  return wrap;
+}
+function traceLine(trace, text) {
+  const p = document.createElement("div");
+  p.textContent = text;
+  trace.appendChild(p);
+  window.scrollTo(0, document.body.scrollHeight);
+}
+async function send() {
+  const message = inp.value.trim();
+  if (!message) return;
+  inp.value = ""; sendBtn.disabled = true;
+  addMsg(message, "user");
+  const trace = newTrace();
+  try {
+    const resp = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: SESSION_ID, message }),
+    });
+    if (!resp.ok) throw new Error("服务返回 " + resp.status);
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const frames = buf.split("\n\n");
+      buf = frames.pop();
+      for (const frame of frames) {
+        if (!frame.startsWith("data: ")) continue;
+        const ev = JSON.parse(frame.slice(6));
+        if (ev.type === "thought") traceLine(trace, "💭 " + ev.content);
+        else if (ev.type === "guard") traceLine(trace, "🛡️ 护栏[" + ev.stage + "/" + ev.action + "] " + (ev.reason || ""));
+        else if (ev.type === "handoff") { traceLine(trace, "🎧 已转人工，原因：" + (ev.reasons||[]).join("、")); addMsg("🎧 该问题已为您转接人工客服，请稍候。", "bot"); }
+        else if (ev.type === "tool_call") traceLine(trace, "🔧 调用 " + ev.name + "(" + JSON.stringify(ev.args) + ")");
+        else if (ev.type === "tool_result") traceLine(trace, "📋 " + ev.content.slice(0, 200));
+        else if (ev.type === "reply") { trace.open = false; addMsg(ev.content, "bot"); }
+        else if (ev.type === "metadata") {
+          const b = document.createElement("div");
+          b.className = "badge";
+          b.textContent = `[意图: ${ev.intent} | 置信度: ${(ev.confidence*100).toFixed(0)}% | 转人工: ${ev.requires_human ? "是" : "否"}]`;
+          log.appendChild(b);
+        } else if (ev.type === "error") { addMsg("⚠️ 出错了：" + ev.message, "bot"); }
+      }
+    }
+  } catch (err) {
+    traceLine(trace, "❌ 请求失败");
+    addMsg("⚠️ 连接服务失败：" + err.message + "\n请确认后端已启动（python run_api.py），刷新页面后重试。", "bot");
+  } finally {
+    sendBtn.disabled = false; inp.focus();
+  }
+}
+sendBtn.onclick = send;
+inp.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+document.getElementById("reset").onclick = async () => {
+  await adminFetch("/api/session/reset", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: SESSION_ID }),
+  });
+  log.innerHTML = "";
+};
+
+/* ---------- 看板 ---------- */
+function card(label, value) {
+  return `<div class="card"><div class="label">${label}</div><div class="value">${value}</div></div>`;
+}
+async function loadDash() {
+  const m = await (await adminFetch("/api/metrics")).json();
+  document.getElementById("cards").innerHTML = [
+    card("总请求数", m.total_traces),
+    card("错误率", (m.error_rate*100).toFixed(1) + "%"),
+    card("延迟 P50", m.latency_p50_ms.toFixed(0) + " ms"),
+    card("延迟 P95", m.latency_p95_ms.toFixed(0) + " ms"),
+    card("工具成功率", (m.tool_success_rate*100).toFixed(1) + "%"),
+    card("工具调用数", m.tool_calls),
+    card("护栏拦截", m.guard_blocks),
+    card("拦截率", (m.block_rate*100).toFixed(1) + "%"),
+    card("脱敏次数", m.guard_sanitizes),
+    card("转人工数", m.handoffs),
+    card("转人工率", (m.escalation_rate*100).toFixed(1) + "%"),
+    card("Prompt tokens", m.total_prompt_tokens),
+    card("Completion tokens", m.total_completion_tokens),
+    card("估算成本", "$" + m.est_cost_usd),
+  ].join("");
+  document.getElementById("intents").innerHTML =
+    Object.entries(m.intent_distribution).map(([k,v]) => `<span class="card" style="display:inline-block;margin:4px">${k}: <b>${v}</b></span>`).join("");
+
+  const onlyMine = document.getElementById("only-mine").checked;
+  document.getElementById("sid-label").textContent = "本会话 ID: " + SESSION_ID;
+  let url = "/api/traces?limit=50";
+  if (onlyMine) url += "&session_id=" + encodeURIComponent(SESSION_ID);
+  const traces = await (await adminFetch(url)).json();
+  const tb = document.querySelector("#traces tbody");
+  if (!traces.length) {
+    tb.innerHTML = `<tr><td colspan="6" style="color:#888">暂无记录${onlyMine ? "（本会话还没对话，去「聊天」发一条试试）" : ""}</td></tr>`;
+    return;
+  }
+  tb.innerHTML = traces.map(t => `
+    <tr style="cursor:pointer" onclick="detail('${t.trace_id}')">
+      <td>${t.started_at.toFixed(0)}</td>
+      <td title="${t.session_id||''}">${(t.session_id||'-').slice(0,12)}</td>
+      <td>${t.intent || "-"}</td>
+      <td class="${t.status==='ok'?'ok':'err'}">${t.status}</td>
+      <td>${t.latency_ms.toFixed(0)}</td>
+      <td>${(t.prompt_tokens||0)}+${(t.completion_tokens||0)}</td>
+    </tr>`).join("");
+}
+async function detail(id) {
+  const t = await (await adminFetch("/api/traces/" + id)).json();
+  const spans = (t.spans||[]).map(s =>
+    `  [${s.kind}] ${s.name}  ${s.latency_ms.toFixed(0)}ms` +
+    (s.success===null?"":(s.success?" ✅":" ❌")) +
+    (s.prompt_tokens?`  tok:${s.prompt_tokens}+${s.completion_tokens}`:"")
+  ).join("\n");
+  document.getElementById("detail").innerHTML =
+    `<h3>调用链 ${id}</h3><pre>用户: ${t.user_input}\n意图: ${t.intent} 状态: ${t.status}\n\n${spans}</pre>`;
+}
+
+/* ---------- 坐席 ---------- */
+async function loadSeat() {
+  const list = await (await adminFetch("/api/handoffs")).json();
+  const box = document.getElementById("seat-list");
+  box.innerHTML = list.length ? list.map(h => `
+    <div class="card" style="margin-bottom:8px">
+      <div><b>会话 ${h.session_id}</b> · 意图 ${h.intent||'-'} · ${h.created_at||''}</div>
+      <div style="color:#c0392b;font-size:13px">原因：${(h.reasons||[]).join("、")}</div>
+      <div style="font-size:13px;color:#555">用户：${(h.payload&&h.payload.user_input)||''}</div>
+      <div style="font-size:13px;color:#555">Agent：${(h.payload&&h.payload.reply)||''}</div>
+      <button style="margin-top:6px;padding:4px 10px" onclick="resolveHandoff('${h.handoff_id}')">标记已解决</button>
+    </div>`).join("") : "<p style='color:#888'>暂无待接管会话</p>";
+}
+async function resolveHandoff(id) {
+  await adminFetch("/api/handoffs/" + id + "/resolve", { method: "POST" });
+  loadSeat();
+}
+async function toggleTakeover() {
+  const r = await (await adminFetch("/api/session/" + SESSION_ID + "/takeover", { method: "POST" })).json();
+  document.getElementById("takeover-state").textContent =
+    r.mode === "manual" ? "当前：人工接管中（Agent 已暂停）" : "当前：自动（AI 回复）";
+}
+
+/* ---------- 评估 ---------- */
+async function doReflow() {
+  const box = document.getElementById("reflow-box");
+  box.textContent = "回流中…";
+  const r = await (await adminFetch("/api/reflow", { method: "POST" })).json();
+  if (!r.count) { box.innerHTML = "<span style='color:#888'>暂无问题 Trace（先去聊几句会触发拦截/转人工的消息）。</span>"; return; }
+  box.innerHTML = `<div style="margin-bottom:6px">共回流 <b>${r.count}</b> 条候选用例：</div>` +
+    r.cases.map(c => `<div class="card" style="margin-bottom:6px">
+      <div><b>${c.id}</b></div>
+      <div style="color:#555">输入：${(c.turns||[]).join(" / ")}</div>
+      <div style="color:#888">期望：${[
+        c.expected_intent ? "意图=" + c.expected_intent : "",
+        c.expected_requires_human ? "需转人工" : "",
+        c.expected_tools ? "工具=" + c.expected_tools.join(",") : "",
+      ].filter(Boolean).join(" · ") || "(仅固化输入)"}</div>
+    </div>`).join("");
+}
+async function loadBaseline() {
+  const b = await (await adminFetch("/api/eval/baseline")).json();
+  const box = document.getElementById("baseline-box");
+  if (!b || !Object.keys(b).length) { box.textContent = "基线：尚未建立（跑一次评估后自动展示）"; return; }
+  box.innerHTML = `基线：通过率 <b>${((b.pass_rate||0)*100).toFixed(0)}%</b> · ` +
+    `过程 ${((b.avg_process_score||0)*100).toFixed(0)}% · 结果 ${((b.avg_result_score||0)*100).toFixed(0)}% · ` +
+    `token ${b.total_tokens||0}`;
+}
+let evalPollTimer = null;
+async function runEval() {
+  if (!confirm("跑评估会真调大模型、约 1-2 分钟、消耗 token（约 6 万）。确认开始？")) return;
+  document.getElementById("eval-btn").disabled = true;
+  await adminFetch("/api/eval/run", { method: "POST" });
+  pollEvalStatus();
+}
+async function pollEvalStatus() {
+  const s = await (await adminFetch("/api/eval/status")).json();
+  const box = document.getElementById("eval-box");
+  const btn = document.getElementById("eval-btn");
+  if (s.status === "running") {
+    box.innerHTML = "⏳ 评估进行中…（在沙箱重跑测试集，请稍候）";
+    btn.disabled = true;
+    if (evalPollTimer) clearTimeout(evalPollTimer);
+    evalPollTimer = setTimeout(pollEvalStatus, 3000);
+    return;
+  }
+  btn.disabled = false;
+  if (s.status === "error") { box.innerHTML = "❌ 评估出错：" + s.error; return; }
+  if (s.status === "done" && s.result) {
+    const m = s.result.summary, reg = s.result.regression;
+    let html = `<div class="card"><b>本次结果</b>：通过率 ${((m.pass_rate||0)*100).toFixed(0)}% · ` +
+      `过程 ${((m.avg_process_score||0)*100).toFixed(0)}% · 结果 ${((m.avg_result_score||0)*100).toFixed(0)}% · token ${m.total_tokens||0}</div>`;
+    if (reg) {
+      html += `<div class="card" style="margin-top:8px"><b>回归门禁</b>：` +
+        (reg.regressed ? "<span class='err'>❌ 检测到质量回退</span>" : "<span class='ok'>✅ 未见回退</span>") + "<br>" +
+        reg.diffs.map(d => `${d.metric}: ${d.baseline.toFixed(2)} → ${d.current.toFixed(2)} (Δ ${d.delta>=0?'+':''}${d.delta.toFixed(2)}) ${d.regressed?'❌':'✅'}`).join("<br>") +
+        "</div>";
+    } else {
+      html += "<div style='color:#888;margin-top:6px'>（无基线可比，本次结果可作为首个基线参考）</div>";
+    }
+    box.innerHTML = html;
+    loadBaseline();
+  } else {
+    box.innerHTML = "<span style='color:#888'>尚未跑过评估。</span>";
+  }
+}
+
+/* 支持 /dashboard 或 #dash 直接进看板 */
+if (location.pathname.startsWith("/dashboard") || location.hash === "#dash") {
+  switchTab("dash");
+}
+</script>
+</body>
+</html>

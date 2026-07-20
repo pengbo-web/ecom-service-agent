@@ -44,6 +44,36 @@ class Settings(BaseSettings):
     eval_dataset_path: str = "app/evaluation/cases.json"
     eval_use_judge: bool = True  # 是否启用 LLM-as-judge（质量/幻觉/过程合理性）
     eval_pass_threshold: float = 0.6  # 单维度通过阈值（judge 归一化到 0-1 后比较）
+    eval_baseline_path: str = "app/evaluation/baseline.json"  # 回归基线
+    eval_regression_tolerance: float = 0.05  # 单指标允许的最大回退幅度
+
+    # API 服务（Web 流式对话）
+    api_host: str = "127.0.0.1"
+    api_port: int = 8010  # 默认 8010，避开常被占用的 8000
+
+    # 真实数据层（W1.5）
+    db_path: str = "app/sessions/ecom.db"
+
+    # 可观测性（W2）
+    obs_enabled: bool = True
+    trace_db_path: str = "app/sessions/traces.db"
+    price_per_1k_prompt: float = 0.0015      # 成本估算（美元/1k tokens，仅参考）
+    price_per_1k_completion: float = 0.002
+
+    # 安全护栏（W3）
+    guardrails_enabled: bool = True
+
+    # 人机协作 HITL（W3）
+    hitl_enabled: bool = True
+    hitl_confidence_threshold: float = 0.6
+    hitl_db_path: str = "app/sessions/hitl.db"
+    manual_mode_timeout: int = 3600   # 人工接管超时（秒），超时自动回落自动模式
+
+    # 生产加固（W3.5）
+    admin_token: str = ""              # 管理接口令牌；空=本地不鉴权
+    rate_limit_per_min: int = 20       # 每会话每分钟最大请求数
+    daily_request_budget: int = 500    # 每日全局请求上限（成本兜底）
+    fast_path_enabled: bool = True     # 规则快路径（高频简单意图秒回）
 
     # 多轮对话管理
     session_path: str = "app/sessions/session.json"

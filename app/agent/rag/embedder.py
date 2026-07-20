@@ -18,7 +18,7 @@ class Embedder:
         api_key: str,
         base_url: str,
         model: str = "text-embedding-3-small",
-        batch_size: int = 64,
+        batch_size: int = 10,  # DashScope text-embedding-v3 单批上限为 10
     ):
         self._client = OpenAI(api_key=api_key, base_url=base_url)
         self._model = model
