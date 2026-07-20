@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     # 安全护栏（W3）
     guardrails_enabled: bool = True
 
+    # 人机协作 HITL（W3）
+    hitl_enabled: bool = True
+    hitl_confidence_threshold: float = 0.6
+    hitl_db_path: str = "app/sessions/hitl.db"
+    manual_mode_timeout: int = 3600   # 人工接管超时（秒），超时自动回落自动模式
+
     # 多轮对话管理
     session_path: str = "app/sessions/session.json"
     history_threshold: int = 10  # 消息压缩策略通常为上下文达到一定的token数，例如claude code通常为达到最大上下文窗口的70%左右，此处简略为原始消息条数超过10轮
