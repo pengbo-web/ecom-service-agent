@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     price_per_1k_prompt: float = 0.0015      # 成本估算（美元/1k tokens，仅参考）
     price_per_1k_completion: float = 0.002
 
+    # 安全护栏（W3）
+    guardrails_enabled: bool = True
+
     # 多轮对话管理
     session_path: str = "app/sessions/session.json"
     history_threshold: int = 10  # 消息压缩策略通常为上下文达到一定的token数，例如claude code通常为达到最大上下文窗口的70%左右，此处简略为原始消息条数超过10轮
