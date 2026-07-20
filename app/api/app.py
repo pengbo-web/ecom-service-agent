@@ -16,11 +16,17 @@ from app.hardening.auth import make_admin_auth
 from app.hardening.cost_guard import CostGuard
 from app.hardening.fast_path import match_fast_path
 from app.hardening.rate_limit import RateLimiter
+from app.evaluation.regression import load_baseline
+from app.evaluation.runner import EvalRunner
+from app.evaluation.run_service import run_evaluation
+from app.evaluation.trace_to_case import collect_reflow_cases
 from app.hitl.manager import HitlManager
 from app.hitl.manual_mode import ManualMode
 from app.hitl.queue import HandoffQueue
 from app.observability import TraceStore, Tracer
 from app.observability.metrics import compute_metrics
+
+_ROOT = Path(__file__).resolve().parents[2]
 
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 
@@ -32,7 +38,8 @@ def _sse_frame(event: dict) -> str:
 def create_app(session_manager: Optional[SessionManager] = None,
                trace_store: Optional[TraceStore] = None,
                hitl: Optional[HitlManager] = None,
-               admin_token: Optional[str] = None) -> FastAPI:
+               admin_token: Optional[str] = None,
+               eval_runner: Optional[EvalRunner] = None) -> FastAPI:
     app = FastAPI(title="Ecom Service Agent API")
     manager = session_manager or SessionManager()
 
@@ -56,6 +63,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
     cost_guard = CostGuard(settings.daily_request_budget)
     _admin_token = admin_token if admin_token is not None else settings.admin_token
     admin_auth = make_admin_auth(_admin_token)
+
+    _baseline_path = _ROOT / settings.eval_baseline_path
+    _mode = "multi" if settings.multi_agent_enabled else "single"
+    if eval_runner is None:
+        eval_runner = EvalRunner(
+            eval_fn=lambda: run_evaluation(mode=_mode, use_judge=False),
+            baseline_path=_baseline_path,
+            tolerance=settings.eval_regression_tolerance,
+        )
 
     def _reply_stream(text: str):
         def gen():
@@ -133,6 +149,23 @@ def create_app(session_manager: Optional[SessionManager] = None,
         if hitl is None:
             return {"mode": "auto"}
         return {"mode": hitl.manual_mode.toggle(session_id)}
+
+    @app.post("/api/reflow", dependencies=[Depends(admin_auth)])
+    def reflow(limit: int = 200):
+        cases = collect_reflow_cases(store, limit=limit) if store else []
+        return {"count": len(cases), "cases": cases}
+
+    @app.get("/api/eval/baseline", dependencies=[Depends(admin_auth)])
+    def eval_baseline():
+        return load_baseline(eval_runner.baseline_path) or {}
+
+    @app.post("/api/eval/run", dependencies=[Depends(admin_auth)])
+    def eval_run():
+        return eval_runner.start()
+
+    @app.get("/api/eval/status", dependencies=[Depends(admin_auth)])
+    def eval_status():
+        return eval_runner.status()
 
     @app.get("/", response_class=HTMLResponse)
     def index():

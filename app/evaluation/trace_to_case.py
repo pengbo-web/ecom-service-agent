@@ -11,6 +11,16 @@ def is_problem_trace(trace: dict) -> bool:
     return False
 
 
+def collect_reflow_cases(store, limit: int = 200) -> list:
+    """从 TraceStore 拉取问题 Trace 并转成候选评估用例。CLI 与 API 共用。"""
+    cases = []
+    for row in store.recent_traces(limit=limit):
+        full = store.get_trace(row["trace_id"])
+        if full and is_problem_trace(full):
+            cases.append(trace_to_case(full))
+    return cases
+
+
 def trace_to_case(trace: dict) -> dict:
     tid = str(trace.get("trace_id", ""))[:8]
     user_input = trace.get("user_input", "")

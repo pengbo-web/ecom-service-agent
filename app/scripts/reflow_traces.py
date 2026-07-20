@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.observability.store import TraceStore  # noqa: E402
-from app.evaluation.trace_to_case import trace_to_case, is_problem_trace  # noqa: E402
+from app.evaluation.trace_to_case import collect_reflow_cases  # noqa: E402
 
 
 def main():
@@ -22,12 +22,7 @@ def main():
     args = ap.parse_args()
 
     store = TraceStore()
-    recent = store.recent_traces(limit=args.limit)
-    cases = []
-    for row in recent:
-        full = store.get_trace(row["trace_id"])
-        if full and is_problem_trace(full):
-            cases.append(trace_to_case(full))
+    cases = collect_reflow_cases(store, limit=args.limit)
 
     out = ROOT / args.out if not Path(args.out).is_absolute() else Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

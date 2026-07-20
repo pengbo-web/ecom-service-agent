@@ -46,6 +46,7 @@
       <div class="tab active" id="tab-chat" onclick="switchTab('chat')">💬 聊天</div>
       <div class="tab" id="tab-dash" onclick="switchTab('dash')">📊 看板</div>
       <div class="tab" id="tab-seat" onclick="switchTab('seat')">🎧 坐席</div>
+      <div class="tab" id="tab-eval" onclick="switchTab('eval')">🧪 评估</div>
     </div>
   </header>
 
@@ -84,17 +85,35 @@
     <div id="seat-list"></div>
   </section>
 
+  <!-- 评估视图 -->
+  <section id="eval-view" hidden>
+    <h3>回流：线上问题 → 候选测试用例
+      <button onclick="doReflow()" style="padding:4px 10px">回流一次</button></h3>
+    <div id="reflow-box" style="color:#888;font-size:13px">点「回流一次」从线上 Trace 生成候选用例（免费、秒回）。</div>
+
+    <h3 style="margin-top:20px">评估回归门禁</h3>
+    <div class="card" style="margin-bottom:10px">
+      <div id="baseline-box" style="font-size:13px;color:#555">基线：加载中…</div>
+      <button onclick="runEval()" id="eval-btn" style="margin-top:8px">▶ 一键跑评估</button>
+      <span style="margin-left:8px;color:#c0392b;font-size:12px">⚠️ 会真调大模型、约 1-2 分钟、消耗 token</span>
+    </div>
+    <div id="eval-box" style="font-size:13px"></div>
+  </section>
+
 <script>
 /* ---------- 标签切换 ---------- */
 function switchTab(which) {
   document.getElementById("chat-view").hidden = which !== "chat";
   document.getElementById("dash-view").hidden = which !== "dash";
   document.getElementById("seat-view").hidden = which !== "seat";
+  document.getElementById("eval-view").hidden = which !== "eval";
   document.getElementById("tab-chat").classList.toggle("active", which === "chat");
   document.getElementById("tab-dash").classList.toggle("active", which === "dash");
   document.getElementById("tab-seat").classList.toggle("active", which === "seat");
+  document.getElementById("tab-eval").classList.toggle("active", which === "eval");
   if (which === "dash") loadDash();
   if (which === "seat") loadSeat();
+  if (which === "eval") { loadBaseline(); pollEvalStatus(); }
 }
 
 /* ---------- 聊天 ---------- */
@@ -270,6 +289,70 @@ async function toggleTakeover() {
   const r = await (await adminFetch("/api/session/" + SESSION_ID + "/takeover", { method: "POST" })).json();
   document.getElementById("takeover-state").textContent =
     r.mode === "manual" ? "当前：人工接管中（Agent 已暂停）" : "当前：自动（AI 回复）";
+}
+
+/* ---------- 评估 ---------- */
+async function doReflow() {
+  const box = document.getElementById("reflow-box");
+  box.textContent = "回流中…";
+  const r = await (await adminFetch("/api/reflow", { method: "POST" })).json();
+  if (!r.count) { box.innerHTML = "<span style='color:#888'>暂无问题 Trace（先去聊几句会触发拦截/转人工的消息）。</span>"; return; }
+  box.innerHTML = `<div style="margin-bottom:6px">共回流 <b>${r.count}</b> 条候选用例：</div>` +
+    r.cases.map(c => `<div class="card" style="margin-bottom:6px">
+      <div><b>${c.id}</b></div>
+      <div style="color:#555">输入：${(c.turns||[]).join(" / ")}</div>
+      <div style="color:#888">期望：${[
+        c.expected_intent ? "意图=" + c.expected_intent : "",
+        c.expected_requires_human ? "需转人工" : "",
+        c.expected_tools ? "工具=" + c.expected_tools.join(",") : "",
+      ].filter(Boolean).join(" · ") || "(仅固化输入)"}</div>
+    </div>`).join("");
+}
+async function loadBaseline() {
+  const b = await (await adminFetch("/api/eval/baseline")).json();
+  const box = document.getElementById("baseline-box");
+  if (!b || !Object.keys(b).length) { box.textContent = "基线：尚未建立（跑一次评估后自动展示）"; return; }
+  box.innerHTML = `基线：通过率 <b>${((b.pass_rate||0)*100).toFixed(0)}%</b> · ` +
+    `过程 ${((b.avg_process_score||0)*100).toFixed(0)}% · 结果 ${((b.avg_result_score||0)*100).toFixed(0)}% · ` +
+    `token ${b.total_tokens||0}`;
+}
+let evalPollTimer = null;
+async function runEval() {
+  if (!confirm("跑评估会真调大模型、约 1-2 分钟、消耗 token（约 6 万）。确认开始？")) return;
+  document.getElementById("eval-btn").disabled = true;
+  await adminFetch("/api/eval/run", { method: "POST" });
+  pollEvalStatus();
+}
+async function pollEvalStatus() {
+  const s = await (await adminFetch("/api/eval/status")).json();
+  const box = document.getElementById("eval-box");
+  const btn = document.getElementById("eval-btn");
+  if (s.status === "running") {
+    box.innerHTML = "⏳ 评估进行中…（在沙箱重跑测试集，请稍候）";
+    btn.disabled = true;
+    if (evalPollTimer) clearTimeout(evalPollTimer);
+    evalPollTimer = setTimeout(pollEvalStatus, 3000);
+    return;
+  }
+  btn.disabled = false;
+  if (s.status === "error") { box.innerHTML = "❌ 评估出错：" + s.error; return; }
+  if (s.status === "done" && s.result) {
+    const m = s.result.summary, reg = s.result.regression;
+    let html = `<div class="card"><b>本次结果</b>：通过率 ${((m.pass_rate||0)*100).toFixed(0)}% · ` +
+      `过程 ${((m.avg_process_score||0)*100).toFixed(0)}% · 结果 ${((m.avg_result_score||0)*100).toFixed(0)}% · token ${m.total_tokens||0}</div>`;
+    if (reg) {
+      html += `<div class="card" style="margin-top:8px"><b>回归门禁</b>：` +
+        (reg.regressed ? "<span class='err'>❌ 检测到质量回退</span>" : "<span class='ok'>✅ 未见回退</span>") + "<br>" +
+        reg.diffs.map(d => `${d.metric}: ${d.baseline.toFixed(2)} → ${d.current.toFixed(2)} (Δ ${d.delta>=0?'+':''}${d.delta.toFixed(2)}) ${d.regressed?'❌':'✅'}`).join("<br>") +
+        "</div>";
+    } else {
+      html += "<div style='color:#888;margin-top:6px'>（无基线可比，本次结果可作为首个基线参考）</div>";
+    }
+    box.innerHTML = html;
+    loadBaseline();
+  } else {
+    box.innerHTML = "<span style='color:#888'>尚未跑过评估。</span>";
+  }
 }
 
 /* 支持 /dashboard 或 #dash 直接进看板 */
