@@ -24,6 +24,14 @@ def compute_metrics(store) -> dict:
     tool_spans = [s for s in spans if s["kind"] == "tool"]
     tool_ok = sum(1 for s in tool_spans if s["success"] == 1)
 
+    guard_spans = [s for s in spans if s["kind"] == "guard"]
+    guard_blocks = sum(
+        1 for s in guard_spans if s.get("meta") and '"action": "block"' in s["meta"]
+    )
+    guard_sanitizes = sum(
+        1 for s in guard_spans if s.get("meta") and '"action": "sanitize"' in s["meta"]
+    )
+
     intent_dist: dict = {}
     for t in traces:
         key = t["intent"] or "unknown"
@@ -42,5 +50,8 @@ def compute_metrics(store) -> dict:
         "est_cost_usd": round(est_cost, 4),
         "tool_calls": len(tool_spans),
         "tool_success_rate": (tool_ok / len(tool_spans)) if tool_spans else 0.0,
+        "guard_blocks": guard_blocks,
+        "guard_sanitizes": guard_sanitizes,
+        "block_rate": (guard_blocks / total) if total else 0.0,
         "intent_distribution": intent_dist,
     }

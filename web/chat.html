@@ -143,6 +143,7 @@ async function send() {
         if (!frame.startsWith("data: ")) continue;
         const ev = JSON.parse(frame.slice(6));
         if (ev.type === "thought") traceLine(trace, "💭 " + ev.content);
+        else if (ev.type === "guard") traceLine(trace, "🛡️ 护栏[" + ev.stage + "/" + ev.action + "] " + (ev.reason || ""));
         else if (ev.type === "tool_call") traceLine(trace, "🔧 调用 " + ev.name + "(" + JSON.stringify(ev.args) + ")");
         else if (ev.type === "tool_result") traceLine(trace, "📋 " + ev.content.slice(0, 200));
         else if (ev.type === "reply") { trace.open = false; addMsg(ev.content, "bot"); }
@@ -184,6 +185,9 @@ async function loadDash() {
     card("延迟 P95", m.latency_p95_ms.toFixed(0) + " ms"),
     card("工具成功率", (m.tool_success_rate*100).toFixed(1) + "%"),
     card("工具调用数", m.tool_calls),
+    card("护栏拦截", m.guard_blocks),
+    card("拦截率", (m.block_rate*100).toFixed(1) + "%"),
+    card("脱敏次数", m.guard_sanitizes),
     card("Prompt tokens", m.total_prompt_tokens),
     card("Completion tokens", m.total_completion_tokens),
     card("估算成本", "$" + m.est_cost_usd),

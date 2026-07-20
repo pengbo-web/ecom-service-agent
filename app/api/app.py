@@ -11,6 +11,7 @@ from app.api.schemas import ChatRequest, ResetRequest
 from app.api.session_manager import SessionManager
 from app.api.streaming import run_agent_streaming
 from app.config.settings import settings
+from app.guardrails.pipeline import build_default_pipeline
 from app.observability import TraceStore, Tracer
 from app.observability.metrics import compute_metrics
 
@@ -33,6 +34,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
         store.init_schema()
         tracer = Tracer(store)
 
+    guard_pipeline = build_default_pipeline() if settings.guardrails_enabled else None
+
     @app.get("/api/health")
     def health():
         return {"status": "ok"}
@@ -45,7 +48,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
         def event_stream():
             with lock:  # 同一会话串行处理，避免并发踩状态
                 for event in run_agent_streaming(
-                    agent, req.message, tracer=tracer, session_id=req.session_id
+                    agent, req.message, tracer=tracer,
+                    session_id=req.session_id, guard_pipeline=guard_pipeline,
                 ):
                     yield _sse_frame(event)
 
