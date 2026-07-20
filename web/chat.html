@@ -103,6 +103,13 @@ const SESSION_ID = (function () {
   if (!s) { s = "web-" + Math.random().toString(36).slice(2, 10); localStorage.setItem("xiaoxi_sid", s); }
   return s;
 })();
+// 管理类请求携带令牌（本地默认空=不鉴权；启用时 localStorage.setItem("admin_token","...")）
+const ADMIN_TOKEN = localStorage.getItem("admin_token") || "";
+function adminFetch(url, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({}, opts.headers, ADMIN_TOKEN ? { "X-Admin-Token": ADMIN_TOKEN } : {});
+  return fetch(url, opts);
+}
 const log = document.getElementById("log");
 const inp = document.getElementById("inp");
 const sendBtn = document.getElementById("send");
@@ -179,7 +186,7 @@ async function send() {
 sendBtn.onclick = send;
 inp.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
 document.getElementById("reset").onclick = async () => {
-  await fetch("/api/session/reset", {
+  await adminFetch("/api/session/reset", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: SESSION_ID }),
   });
@@ -191,7 +198,7 @@ function card(label, value) {
   return `<div class="card"><div class="label">${label}</div><div class="value">${value}</div></div>`;
 }
 async function loadDash() {
-  const m = await (await fetch("/api/metrics")).json();
+  const m = await (await adminFetch("/api/metrics")).json();
   document.getElementById("cards").innerHTML = [
     card("总请求数", m.total_traces),
     card("错误率", (m.error_rate*100).toFixed(1) + "%"),
@@ -215,7 +222,7 @@ async function loadDash() {
   document.getElementById("sid-label").textContent = "本会话 ID: " + SESSION_ID;
   let url = "/api/traces?limit=50";
   if (onlyMine) url += "&session_id=" + encodeURIComponent(SESSION_ID);
-  const traces = await (await fetch(url)).json();
+  const traces = await (await adminFetch(url)).json();
   const tb = document.querySelector("#traces tbody");
   if (!traces.length) {
     tb.innerHTML = `<tr><td colspan="6" style="color:#888">暂无记录${onlyMine ? "（本会话还没对话，去「聊天」发一条试试）" : ""}</td></tr>`;
@@ -232,7 +239,7 @@ async function loadDash() {
     </tr>`).join("");
 }
 async function detail(id) {
-  const t = await (await fetch("/api/traces/" + id)).json();
+  const t = await (await adminFetch("/api/traces/" + id)).json();
   const spans = (t.spans||[]).map(s =>
     `  [${s.kind}] ${s.name}  ${s.latency_ms.toFixed(0)}ms` +
     (s.success===null?"":(s.success?" ✅":" ❌")) +
@@ -244,7 +251,7 @@ async function detail(id) {
 
 /* ---------- 坐席 ---------- */
 async function loadSeat() {
-  const list = await (await fetch("/api/handoffs")).json();
+  const list = await (await adminFetch("/api/handoffs")).json();
   const box = document.getElementById("seat-list");
   box.innerHTML = list.length ? list.map(h => `
     <div class="card" style="margin-bottom:8px">
@@ -256,11 +263,11 @@ async function loadSeat() {
     </div>`).join("") : "<p style='color:#888'>暂无待接管会话</p>";
 }
 async function resolveHandoff(id) {
-  await fetch("/api/handoffs/" + id + "/resolve", { method: "POST" });
+  await adminFetch("/api/handoffs/" + id + "/resolve", { method: "POST" });
   loadSeat();
 }
 async function toggleTakeover() {
-  const r = await (await fetch("/api/session/" + SESSION_ID + "/takeover", { method: "POST" })).json();
+  const r = await (await adminFetch("/api/session/" + SESSION_ID + "/takeover", { method: "POST" })).json();
   document.getElementById("takeover-state").textContent =
     r.mode === "manual" ? "当前：人工接管中（Agent 已暂停）" : "当前：自动（AI 回复）";
 }
