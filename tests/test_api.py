@@ -41,13 +41,14 @@ def test_health():
 
 def test_chat_streams_events():
     client, _ = _client()
-    resp = client.post("/api/chat", json={"session_id": "s1", "message": "你好"})
+    # 用非快路径消息，确保走完整 Agent 流程（"你好"会命中规则快路径）
+    resp = client.post("/api/chat", json={"session_id": "s1", "message": "查一下订单"})
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
     events = _parse_sse(resp.text)
     types = [e["type"] for e in events]
     assert types == ["thought", "reply", "metadata", "done"]
-    assert events[1]["content"] == "收到：你好"
+    assert events[1]["content"] == "收到：查一下订单"
 
 
 def test_reset_endpoint():
