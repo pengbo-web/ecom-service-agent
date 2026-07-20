@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 from openai import OpenAI  # noqa: E402
 
 from app.config.settings import settings  # noqa: E402
+from app.utils.console import enable_utf8_stdout  # noqa: E402
 from app.evaluation.dataset import load_dataset  # noqa: E402
 from app.evaluation.evaluator import Evaluator  # noqa: E402
 from app.evaluation.regression import (  # noqa: E402
@@ -88,6 +89,7 @@ def _print_report(report: dict) -> None:
 
 
 def main():
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="运行 Agent 评估体系")
     parser.add_argument(
         "--dataset", default=settings.eval_dataset_path,

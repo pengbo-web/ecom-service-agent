@@ -1,6 +1,7 @@
 from app.agent.chat import EcomAgent
 from app.config.settings import settings
 from app.schemas.response import IntentType
+from app.utils.console import enable_utf8_stdout
 
 # 意图类型的中文映射
 INTENT_LABELS = {
@@ -17,6 +18,7 @@ INTENT_LABELS = {
 
 
 def main():
+    enable_utf8_stdout()
     if settings.multi_agent_enabled:
         from app.multi_agent.orchestrator import MultiAgentOrchestrator
         agent = MultiAgentOrchestrator()
