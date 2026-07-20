@@ -76,7 +76,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard():
-        html = (_WEB_DIR / "dashboard.html").read_text(encoding="utf-8")
+        # 看板已合并进单页应用；/dashboard 作为别名，前端会自动切到看板标签
+        html = (_WEB_DIR / "chat.html").read_text(encoding="utf-8")
         return HTMLResponse(content=html)
 
     return app

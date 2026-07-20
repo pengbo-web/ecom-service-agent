@@ -5,8 +5,16 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>智能客服「小夕」</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 720px; margin: 0 auto; padding: 16px; background:#f7f7f8; }
-  h1 { font-size: 18px; }
+  body { font-family: system-ui, sans-serif; max-width: 860px; margin: 0 auto; padding: 16px; background:#f7f7f8; color:#222; }
+  header { display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  h1 { font-size: 18px; margin: 0; }
+  .tabs { display:flex; gap:8px; margin-left:auto; }
+  .tab { padding:6px 14px; border:1px solid #ddd; border-radius:20px; background:#fff; cursor:pointer; font-size:14px; }
+  .tab.active { background:#4f7cff; color:#fff; border-color:#4f7cff; }
+  section { margin-top:16px; }
+  [hidden] { display:none !important; }
+
+  /* 聊天 */
   #log { display:flex; flex-direction:column; gap:12px; margin-bottom:16px; }
   .msg { padding:10px 14px; border-radius:12px; max-width:80%; white-space:pre-wrap; }
   .user { align-self:flex-end; background:#4f7cff; color:#fff; }
@@ -18,16 +26,61 @@
   #inp { flex:1; padding:10px; border:1px solid #ccc; border-radius:8px; }
   button { padding:10px 16px; border:none; border-radius:8px; background:#4f7cff; color:#fff; cursor:pointer; }
   button:disabled { opacity:.5; }
+
+  /* 看板 */
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:20px; }
+  .card { background:#fff; border:1px solid #e5e5e5; border-radius:10px; padding:14px; }
+  .card .label { font-size:12px; color:#888; }
+  .card .value { font-size:22px; font-weight:600; margin-top:4px; }
+  table { width:100%; border-collapse:collapse; background:#fff; border-radius:10px; overflow:hidden; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid #eee; font-size:13px; }
+  th { background:#fafafa; }
+  .ok { color:#12864b; } .err { color:#c0392b; }
+  pre { background:#f0f0f2; padding:10px; border-radius:8px; overflow:auto; font-size:12px; }
 </style>
 </head>
 <body>
-  <h1>并夕夕 · 智能客服「小夕」<button id="reset" style="float:right;background:#888;">重置</button></h1>
-  <div id="log"></div>
-  <div id="bar">
-    <input id="inp" placeholder="试试：我的订单还没发货，怎么回事？" autocomplete="off" />
-    <button id="send">发送</button>
-  </div>
+  <header>
+    <h1>并夕夕 · 智能客服「小夕」</h1>
+    <div class="tabs">
+      <div class="tab active" id="tab-chat" onclick="switchTab('chat')">💬 聊天</div>
+      <div class="tab" id="tab-dash" onclick="switchTab('dash')">📊 看板</div>
+    </div>
+  </header>
+
+  <!-- 聊天视图 -->
+  <section id="chat-view">
+    <div style="text-align:right;margin-bottom:8px"><button id="reset" style="background:#888;padding:6px 12px">重置对话</button></div>
+    <div id="log"></div>
+    <div id="bar">
+      <input id="inp" placeholder="试试：我的订单还没发货，怎么回事？" autocomplete="off" />
+      <button id="send">发送</button>
+    </div>
+  </section>
+
+  <!-- 看板视图 -->
+  <section id="dash-view" hidden>
+    <div style="text-align:right;margin-bottom:8px"><button onclick="loadDash()" style="padding:6px 12px">刷新</button></div>
+    <div class="cards" id="cards"></div>
+    <h3>意图分布</h3>
+    <div id="intents"></div>
+    <h3>最近请求（点行看调用链）</h3>
+    <table id="traces"><thead><tr><th>时间(相对)</th><th>意图</th><th>状态</th><th>延迟(ms)</th><th>tokens</th></tr></thead><tbody></tbody></table>
+    <div id="detail"></div>
+  </section>
+
 <script>
+/* ---------- 标签切换 ---------- */
+function switchTab(which) {
+  const isChat = which === "chat";
+  document.getElementById("chat-view").hidden = !isChat;
+  document.getElementById("dash-view").hidden = isChat;
+  document.getElementById("tab-chat").classList.toggle("active", isChat);
+  document.getElementById("tab-dash").classList.toggle("active", !isChat);
+  if (!isChat) loadDash();  // 每次切到看板自动刷新
+}
+
+/* ---------- 聊天 ---------- */
 const SESSION_ID = "web-" + Math.random().toString(36).slice(2, 10);
 const log = document.getElementById("log");
 const inp = document.getElementById("inp");
@@ -41,7 +94,6 @@ function addMsg(text, cls) {
   window.scrollTo(0, document.body.scrollHeight);
   return d;
 }
-
 function newTrace() {
   const wrap = document.createElement("details");
   wrap.className = "trace"; wrap.open = true;
@@ -51,27 +103,23 @@ function newTrace() {
   log.appendChild(wrap);
   return wrap;
 }
-
 function traceLine(trace, text) {
   const p = document.createElement("div");
   p.textContent = text;
   trace.appendChild(p);
   window.scrollTo(0, document.body.scrollHeight);
 }
-
 async function send() {
   const message = inp.value.trim();
   if (!message) return;
   inp.value = ""; sendBtn.disabled = true;
   addMsg(message, "user");
   const trace = newTrace();
-
   const resp = await fetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: SESSION_ID, message }),
   });
-
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -87,22 +135,17 @@ async function send() {
       if (ev.type === "thought") traceLine(trace, "💭 " + ev.content);
       else if (ev.type === "tool_call") traceLine(trace, "🔧 调用 " + ev.name + "(" + JSON.stringify(ev.args) + ")");
       else if (ev.type === "tool_result") traceLine(trace, "📋 " + ev.content.slice(0, 200));
-      else if (ev.type === "reply") {
-        trace.open = false;
-        addMsg(ev.content, "bot");
-      } else if (ev.type === "metadata") {
+      else if (ev.type === "reply") { trace.open = false; addMsg(ev.content, "bot"); }
+      else if (ev.type === "metadata") {
         const b = document.createElement("div");
         b.className = "badge";
         b.textContent = `[意图: ${ev.intent} | 置信度: ${(ev.confidence*100).toFixed(0)}% | 转人工: ${ev.requires_human ? "是" : "否"}]`;
         log.appendChild(b);
-      } else if (ev.type === "error") {
-        addMsg("⚠️ 出错了：" + ev.message, "bot");
-      }
+      } else if (ev.type === "error") { addMsg("⚠️ 出错了：" + ev.message, "bot"); }
     }
   }
   sendBtn.disabled = false; inp.focus();
 }
-
 sendBtn.onclick = send;
 inp.addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
 document.getElementById("reset").onclick = async () => {
@@ -112,6 +155,52 @@ document.getElementById("reset").onclick = async () => {
   });
   log.innerHTML = "";
 };
+
+/* ---------- 看板 ---------- */
+function card(label, value) {
+  return `<div class="card"><div class="label">${label}</div><div class="value">${value}</div></div>`;
+}
+async function loadDash() {
+  const m = await (await fetch("/api/metrics")).json();
+  document.getElementById("cards").innerHTML = [
+    card("总请求数", m.total_traces),
+    card("错误率", (m.error_rate*100).toFixed(1) + "%"),
+    card("延迟 P50", m.latency_p50_ms.toFixed(0) + " ms"),
+    card("延迟 P95", m.latency_p95_ms.toFixed(0) + " ms"),
+    card("工具成功率", (m.tool_success_rate*100).toFixed(1) + "%"),
+    card("工具调用数", m.tool_calls),
+    card("Prompt tokens", m.total_prompt_tokens),
+    card("Completion tokens", m.total_completion_tokens),
+    card("估算成本", "$" + m.est_cost_usd),
+  ].join("");
+  document.getElementById("intents").innerHTML =
+    Object.entries(m.intent_distribution).map(([k,v]) => `<span class="card" style="display:inline-block;margin:4px">${k}: <b>${v}</b></span>`).join("");
+  const traces = await (await fetch("/api/traces?limit=30")).json();
+  const tb = document.querySelector("#traces tbody");
+  tb.innerHTML = traces.map(t => `
+    <tr style="cursor:pointer" onclick="detail('${t.trace_id}')">
+      <td>${t.started_at.toFixed(0)}</td>
+      <td>${t.intent || "-"}</td>
+      <td class="${t.status==='ok'?'ok':'err'}">${t.status}</td>
+      <td>${t.latency_ms.toFixed(0)}</td>
+      <td>${(t.prompt_tokens||0)}+${(t.completion_tokens||0)}</td>
+    </tr>`).join("");
+}
+async function detail(id) {
+  const t = await (await fetch("/api/traces/" + id)).json();
+  const spans = (t.spans||[]).map(s =>
+    `  [${s.kind}] ${s.name}  ${s.latency_ms.toFixed(0)}ms` +
+    (s.success===null?"":(s.success?" ✅":" ❌")) +
+    (s.prompt_tokens?`  tok:${s.prompt_tokens}+${s.completion_tokens}`:"")
+  ).join("\n");
+  document.getElementById("detail").innerHTML =
+    `<h3>调用链 ${id}</h3><pre>用户: ${t.user_input}\n意图: ${t.intent} 状态: ${t.status}\n\n${spans}</pre>`;
+}
+
+/* 支持 /dashboard 或 #dash 直接进看板 */
+if (location.pathname.startsWith("/dashboard") || location.hash === "#dash") {
+  switchTab("dash");
+}
 </script>
 </body>
 </html>
