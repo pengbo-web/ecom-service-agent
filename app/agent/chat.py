@@ -9,12 +9,13 @@ from app.config.settings import settings
 from app.prompts.customer_service import SYSTEM_PROMPT
 from app.schemas.response import CustomerServiceResponse, IntentType
 from app.agent.tools.manager import ToolManager
+from app.agent.tools.bargain import set_current_session
 
 
 class EcomAgent:
     """电商客服 Agent —— 第八期：Skill 可复用能力模块"""
 
-    def __init__(self, session_path: Optional[str] = None):
+    def __init__(self, session_path: Optional[str] = None, session_id: Optional[str] = None):
         self.client = OpenAI(
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
@@ -22,6 +23,7 @@ class EcomAgent:
         self.model = settings.model_name
         self.temperature = settings.temperature
         self.session_path = session_path or settings.session_path
+        self.session_id = session_id
         self.history_threshold = settings.history_threshold
         self.history_keep_recent = settings.history_keep_recent
         self.max_react_steps = settings.max_react_steps
@@ -73,6 +75,7 @@ class EcomAgent:
 
     def chat(self, user_input: str) -> CustomerServiceResponse:
         """处理用户输入：ReAct 循环 → 结构化提取 → 返回结果"""
+        set_current_session(self.session_id)
         self.raw_messages.append({"role": "user", "content": user_input})
 
         final_text = self._react_loop()
