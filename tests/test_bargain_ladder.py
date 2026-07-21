@@ -62,3 +62,27 @@ def test_suggested_never_below_floor():
     for rounds in range(0, 8):
         r = compute_offer(1000.0, 800.0, buyer_offer=1.0, rounds=rounds)
         assert r["suggested_price"] >= 800.0
+    # counter 分支也不破底：买家出价略高于底价、低于阶梯价
+    for rounds in range(0, 8):
+        r = compute_offer(1000.0, 800.0, buyer_offer=801.0, rounds=rounds)
+        assert r["suggested_price"] >= 800.0
+
+
+def test_boundary_offer_equals_ladder_accepts():
+    # B 恰等于首轮阶梯价 900 → accept@900（accept 与 counter 的临界）
+    r = compute_offer(1000.0, 800.0, buyer_offer=900.0, rounds=0)
+    assert r["decision"] == "accept"
+    assert r["suggested_price"] == 900.0
+
+
+def test_boundary_offer_equals_list_price_accepts():
+    r = compute_offer(1000.0, 800.0, buyer_offer=1000.0, rounds=0)
+    assert r["decision"] == "accept"
+    assert r["suggested_price"] == 1000.0
+
+
+def test_boundary_offer_equals_floor_counters():
+    # B 恰等于底价 800（< 阶梯价 900）→ counter@900，不成交
+    r = compute_offer(1000.0, 800.0, buyer_offer=800.0, rounds=0)
+    assert r["decision"] == "counter"
+    assert r["suggested_price"] == 900.0
