@@ -1,9 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Brain, Wrench, ClipboardList, ShieldAlert, ChevronDown, ChevronRight } from "lucide-react";
 import type { SSEEvent } from "@/lib/sse";
 
 export function AgentActivity({ events, defaultOpen = false }: { events: SSEEvent[]; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen);
+  // 跟随 defaultOpen 变化：流式中展开，收到回复后自动折叠（用户仍可手动切换）
+  useEffect(() => { setOpen(defaultOpen); }, [defaultOpen]);
   if (!events.length) return null;
   return (
     <div className="my-1.5 rounded-lg border bg-secondary/50 text-xs">
