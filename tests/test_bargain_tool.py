@@ -71,3 +71,19 @@ def test_disabled_returns_error(db, monkeypatch):
     monkeypatch.setattr(settings, "bargain_enabled", False)
     r = negotiate_price("P1", 950.0)
     assert r["success"] is False
+
+
+def test_stateless_when_no_session(db):
+    # 未绑定会话：仍可用，rounds 从 0 起（round==1），且不落库
+    set_current_session(None)
+    r = negotiate_price("P1", 950.0)
+    assert r["success"] is True
+    assert r["round"] == 1
+    assert db.get_bargain_state("t1", "P1") is None  # 无 session 时不写状态
+
+
+def test_floor_never_leaked_in_output(db):
+    # 安全不变量：底价绝不出现在返回中；rationale 提示存在
+    r = negotiate_price("P1", 820.0)
+    assert "floor" not in r
+    assert "rationale" in r
