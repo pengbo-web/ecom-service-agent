@@ -178,6 +178,48 @@ class ResilientChatClient:
 **效果验证**:两轮 e2e——轮1 need_confirm(状态仍 shipped),轮2"确认,退款吧"事件流为 `tool_call→tool_result→reply`(**无 thought、不经 LLM**),状态 → refund_processing。与 consent 门互补:门保证不越权,重放保证必执行。
 **测试**:`tests/test_pending.py`、`tests/test_streaming_replay.py`;全量离线 218 绿。
 
+**两轮时序**:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 用户
+    participant API as /api/chat<br/>(streaming)
+    participant M as Agent + 模型<br/>(ReAct)
+    participant G as consent 门
+    participant P as pending 挂起表
+    participant DB as 工具 / DB
+
+    Note over U,DB: 轮1 —— 发起退款(未确认,不执行)
+    U->>API: "我要退款 ORD-001,尺码不合适"
+    API->>API: is_confirmation? 否 → 授权集 = ∅
+    API->>M: chat()  在 consent_scope(∅) 内
+    M->>DB: 调用 apply_refund(order, reason)
+    DB->>G: is_allowed("refund")?
+    G-->>DB: 否(未授权)
+    DB-->>M: need_confirm(附确认问题)
+    M-->>P: 记住挂起动作(apply_refund + 真实参数)
+    M-->>API: 转达"请确认是否退款?"
+    API-->>U: "请确认是否退款?" (订单仍 shipped)
+
+    Note over U,DB: 轮2 —— 确认(服务端确定性重放,不经模型)
+    U->>API: "确认,退款吧"
+    API->>API: is_confirmation? 是
+    API->>P: 有挂起动作吗?
+    P-->>API: 有(apply_refund + 参数)
+    API->>DB: consent_scope(RISK) 内重放 apply_refund(原参数)
+    DB->>G: is_allowed("refund")?
+    G-->>DB: 是(本轮授权)
+    DB->>DB: 执行退款 shipped → refund_processing
+    DB-->>API: success=true
+    API->>P: 清除挂起(防二次确认重复执行)
+    API-->>U: "✅ 退款申请已提交"
+    Note right of API: 全程无 thought 事件、不调 LLM<br/>→ 确认后 100% 执行
+```
+
+- **轮1 关键**:consent 门默认拒绝 → 不越权;挂起表记下真实参数备用。
+- **轮2 关键**:命中挂起 → 服务端**直接重放**,绕开模型是否重调工具的不确定性。
+
 ### 4.1 空回复重试 / 畸形工具调用降级 ✅(已完成 2026-07-21)
 
 **改动文件**:`app/agent/chat.py::_react_loop`。抽出 `_llm_create`(统一带/不带 tools 调用)、`_answer_without_tools`(无工具兜底)、`_parse_tool_calls`(解析并判畸形)。
