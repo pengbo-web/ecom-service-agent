@@ -52,3 +52,24 @@ def test_reset_calls_agent_reset_and_drops_instance():
     assert a.reset_called is True
     # reset 后再取应是新实例
     assert mgr.get_or_create("s1") is not a
+
+
+def test_default_factory_derives_session_id(tmp_path):
+    mgr = SessionManager(base_dir=str(tmp_path))
+    agent = mgr.get_or_create("sess-xyz")
+    # 默认工厂应把 session_id 透传给 EcomAgent
+    assert getattr(agent, "session_id", None) == "sess-xyz"
+
+
+def test_reset_clears_bargain_state(tmp_path):
+    from app.db.database import Database
+    from app.db import set_db
+    db = Database(db_path=str(tmp_path / "t.db"))
+    db.init_schema()
+    set_db(db)
+    db.bump_bargain_state("s1", "P1", 900.0)
+
+    mgr = SessionManager(agent_factory=lambda p: FakeAgent(p), base_dir=str(tmp_path))
+    mgr.get_or_create("s1")
+    mgr.reset("s1")
+    assert db.get_bargain_state("s1", "P1") is None

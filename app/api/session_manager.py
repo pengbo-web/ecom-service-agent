@@ -6,7 +6,7 @@ from pathlib import Path
 
 def _default_factory(session_path: str):
     from app.agent.chat import EcomAgent
-    return EcomAgent(session_path=session_path)
+    return EcomAgent(session_path=session_path, session_id=Path(session_path).stem)
 
 
 class SessionManager:
@@ -37,3 +37,8 @@ class SessionManager:
             agent = self._agents.pop(session_id, None)
         if agent is not None and hasattr(agent, "reset"):
             agent.reset()
+        try:
+            from app.db import get_db
+            get_db().clear_bargain_state(session_id)
+        except Exception:
+            pass
