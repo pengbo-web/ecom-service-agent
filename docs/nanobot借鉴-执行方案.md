@@ -252,6 +252,8 @@ sequenceDiagram
 
 **跳过(过度工程)**:git 版本化、dream-log、离线 cron 反思、Dream 文件编辑引擎——"每用户封顶 50 条"规模下不必要。
 
+**巩固触发(真实客服场景,非手动)**:CLI 退出即 `agent.close()` 巩固;Web 无"会话结束"信号,用**空闲超时**近似——`SessionManager` 记录每会话最后活跃时间,后台守护线程(`start_reaper`)每 `reaper_interval`(默认 120s)扫一次,空闲超 `session_idle_ttl`(默认 1800s)的会话自动 `close()` 巩固并从内存回收;用户回来时按 session 文件重新装载。开关 `settings.auto_consolidate_enabled`(默认开),仅生产路径(未注入 manager)启线程,测试不受影响。`sweep(idle_ttl)` 用可注入时钟单测。前端"结束会话·巩固记忆"按钮 = 运维/演示用手动触发,免等 TTL。
+
 ---
 
 ## Phase 6 — 治理链"观察 vs 授权"分离  ⭐⭐(架构优化)

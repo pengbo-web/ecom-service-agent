@@ -81,6 +81,11 @@ class Settings(BaseSettings):
     hitl_db_path: str = "app/sessions/hitl.db"
     manual_mode_timeout: int = 3600   # 人工接管超时（秒），超时自动回落自动模式
 
+    # 空闲会话自动巩固长期记忆（Web 无"会话结束"信号，用空闲超时近似真实客服）
+    auto_consolidate_enabled: bool = True
+    session_idle_ttl: int = 1800      # 会话空闲多久（秒）后自动巩固记忆并从内存回收
+    reaper_interval: int = 120        # 后台扫描间隔（秒）
+
     # 生产加固（W3.5）
     admin_token: str = ""              # 管理接口令牌；空=本地不鉴权
     rate_limit_per_min: int = 20       # 每会话每分钟最大请求数

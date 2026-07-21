@@ -45,6 +45,11 @@ def create_app(session_manager: Optional[SessionManager] = None,
     app = FastAPI(title="Ecom Service Agent API")
     manager = session_manager or SessionManager()
 
+    # 生产路径(未注入 manager)才启动空闲回收线程:空闲超时自动巩固长期记忆。
+    # 测试都会注入 session_manager,因此不会误起后台线程。
+    if session_manager is None and settings.auto_consolidate_enabled:
+        manager.start_reaper(settings.reaper_interval, settings.session_idle_ttl)
+
     store = trace_store
     tracer = None
     if settings.obs_enabled or trace_store is not None:
@@ -128,8 +133,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
     def consolidate(session_id: str):
         """把本会话对话巩固进长期记忆(触发 Phase 5 策展),并回传当前长期记忆事实。
 
-        Web 流程平时不触发记忆巩固,此端点供前端"结束会话·巩固记忆"按钮手动触发,
-        便于观察策展效果(合并近义/就地纠正/按重要性淘汰)。
+        生产环境由空闲超时自动巩固(见 SessionManager.sweep/start_reaper);
+        此端点是运维/演示用的手动触发,便于即时观察策展效果而不必等空闲 TTL。
         """
         agent = manager.get_or_create(session_id)
         mm = getattr(agent, "memory_manager", None)
