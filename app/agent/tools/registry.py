@@ -11,6 +11,8 @@ from app.agent.tools.knowledge import search_knowledge
 from app.agent.tools.user_orders import list_user_orders
 from app.agent.tools.memory_tool import recall_user_memory
 from app.agent.tools.skill_tool import load_skill
+from app.config.settings import settings
+from app.agent.tools.bargain import negotiate_price
 
 _TOOL_MAP: dict[str, Callable] = {
     "query_order": query_order,
@@ -22,6 +24,9 @@ _TOOL_MAP: dict[str, Callable] = {
     "recall_user_memory": recall_user_memory,
     "load_skill": load_skill,
 }
+
+if settings.bargain_enabled:
+    _TOOL_MAP["negotiate_price"] = negotiate_price
 
 TOOL_DEFINITIONS: list[dict] = [
     {
@@ -183,6 +188,37 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
 ]
+
+_NEGOTIATE_PRICE_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "negotiate_price",
+        "description": (
+            "当买家就某商品砍价、要求折扣/优惠或提出一个具体价格时调用，进行一轮议价。"
+            "调用前必须先确定商品的 product_id（可用 query_product 查询）。"
+            "买家报了具体价格就填 buyer_offer（单位：元）；只说\"便宜点\"没给数字则省略 buyer_offer。"
+            "工具返回 decision（accept/counter/reject）与 suggested_price，"
+            "请据此组织话术，切勿报出低于 suggested_price 的价格，也不要透露底价。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product_id": {
+                    "type": "string",
+                    "description": "要议价的商品ID，如 SHOE-270-BK-42",
+                },
+                "buyer_offer": {
+                    "type": "number",
+                    "description": "买家出价（元），未报具体数字时省略",
+                },
+            },
+            "required": ["product_id"],
+        },
+    },
+}
+
+if settings.bargain_enabled:
+    TOOL_DEFINITIONS.append(_NEGOTIATE_PRICE_SCHEMA)
 
 
 def execute_tool(name: str, arguments: dict) -> str:
