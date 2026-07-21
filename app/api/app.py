@@ -124,6 +124,28 @@ def create_app(session_manager: Optional[SessionManager] = None,
         manager.reset(req.session_id)
         return {"status": "reset"}
 
+    @app.post("/api/session/{session_id}/consolidate", dependencies=[Depends(admin_auth)])
+    def consolidate(session_id: str):
+        """把本会话对话巩固进长期记忆(触发 Phase 5 策展),并回传当前长期记忆事实。
+
+        Web 流程平时不触发记忆巩固,此端点供前端"结束会话·巩固记忆"按钮手动触发,
+        便于观察策展效果(合并近义/就地纠正/按重要性淘汰)。
+        """
+        agent = manager.get_or_create(session_id)
+        mm = getattr(agent, "memory_manager", None)
+        if mm is None or not getattr(mm, "memory_enabled", False):
+            return {"enabled": False, "count": 0, "facts": []}
+        with manager.get_lock(session_id):
+            mm.consolidate_to_long_term(
+                getattr(agent, "raw_messages", []), getattr(agent, "summary", None),
+            )
+            facts = [
+                {"content": f.content, "category": f.category, "created_at": f.created_at}
+                for f in mm.ltm.facts
+            ]
+        return {"enabled": True, "curation": settings.memory_curation_enabled,
+                "count": len(facts), "facts": facts}
+
     @app.get("/api/metrics", dependencies=[Depends(admin_auth)])
     def metrics():
         return compute_metrics(store)

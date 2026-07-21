@@ -13,3 +13,12 @@ export async function getJSON<T>(url: string): Promise<T> {
   if (!r.ok) throw new Error("HTTP " + r.status);
   return r.json();
 }
+
+export type LtmFact = { content: string; category: string; created_at: string };
+export type ConsolidateResult = { enabled: boolean; curation?: boolean; count: number; facts: LtmFact[] };
+
+export async function consolidateMemory(sessionId: string): Promise<ConsolidateResult> {
+  const r = await adminFetch(`/api/session/${sessionId}/consolidate`, { method: "POST" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
