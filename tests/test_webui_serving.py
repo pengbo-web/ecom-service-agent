@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 from app.api.app import create_app
 
 
-def test_root_serves_spa_or_legacy():
+def test_root_serves_spa():
     app = create_app()
     c = TestClient(app)
     r = c.get("/")
@@ -10,12 +10,12 @@ def test_root_serves_spa_or_legacy():
     assert "<div id=\"root\">" in r.text or "小夕" in r.text
 
 
-def test_legacy_serves_old_page():
+def test_dashboard_serves_spa():
     app = create_app()
     c = TestClient(app)
-    r = c.get("/legacy")
+    r = c.get("/dashboard")
     assert r.status_code == 200
-    assert "switchTab" in r.text
+    assert "<div id=\"root\">" in r.text or "小夕" in r.text
 
 
 def test_health_still_ok():

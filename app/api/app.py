@@ -169,26 +169,25 @@ def create_app(session_manager: Optional[SessionManager] = None,
     def eval_status():
         return eval_runner.status()
 
-    # 新版 SPA（web/dist）；未构建时回退旧页，保证始终可用
-    if (_DIST_DIR / "index.html").exists():
+    # 单页 SPA（web/dist）；/ 与 /dashboard 都进这个应用（前端按路径定位到看板 Tab）
+    _spa_index = _DIST_DIR / "index.html"
+    if _spa_index.exists():
         app.mount("/assets", StaticFiles(directory=str(_DIST_DIR / "assets")), name="assets")
+
+    def _serve_spa() -> HTMLResponse:
+        if _spa_index.exists():
+            return HTMLResponse(_spa_index.read_text(encoding="utf-8"))
+        return HTMLResponse(
+            "<h1>前端未构建</h1><p>请先执行：cd webui &amp;&amp; npm install &amp;&amp; npm run build</p>",
+            status_code=503,
+        )
 
     @app.get("/", response_class=HTMLResponse)
     def index():
-        spa = _DIST_DIR / "index.html"
-        if spa.exists():
-            return HTMLResponse(spa.read_text(encoding="utf-8"))
-        return HTMLResponse((_WEB_DIR / "chat.html").read_text(encoding="utf-8"))
-
-    @app.get("/legacy", response_class=HTMLResponse)
-    def legacy():
-        return HTMLResponse((_WEB_DIR / "chat.html").read_text(encoding="utf-8"))
+        return _serve_spa()
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard():
-        spa = _DIST_DIR / "index.html"
-        if spa.exists():
-            return HTMLResponse(spa.read_text(encoding="utf-8"))
-        return HTMLResponse((_WEB_DIR / "chat.html").read_text(encoding="utf-8"))
+        return _serve_spa()
 
     return app
