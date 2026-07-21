@@ -6,6 +6,7 @@ from typing import Optional
 
 from fastapi import Depends, FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.schemas import ChatRequest, ResetRequest
 from app.api.session_manager import SessionManager
@@ -29,6 +30,7 @@ from app.observability.metrics import compute_metrics
 _ROOT = Path(__file__).resolve().parents[2]
 
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
+_DIST_DIR = _WEB_DIR / "dist"
 
 
 def _sse_frame(event: dict) -> str:
@@ -167,15 +169,26 @@ def create_app(session_manager: Optional[SessionManager] = None,
     def eval_status():
         return eval_runner.status()
 
+    # 新版 SPA（web/dist）；未构建时回退旧页，保证始终可用
+    if (_DIST_DIR / "index.html").exists():
+        app.mount("/assets", StaticFiles(directory=str(_DIST_DIR / "assets")), name="assets")
+
     @app.get("/", response_class=HTMLResponse)
     def index():
-        html = (_WEB_DIR / "chat.html").read_text(encoding="utf-8")
-        return HTMLResponse(content=html)
+        spa = _DIST_DIR / "index.html"
+        if spa.exists():
+            return HTMLResponse(spa.read_text(encoding="utf-8"))
+        return HTMLResponse((_WEB_DIR / "chat.html").read_text(encoding="utf-8"))
+
+    @app.get("/legacy", response_class=HTMLResponse)
+    def legacy():
+        return HTMLResponse((_WEB_DIR / "chat.html").read_text(encoding="utf-8"))
 
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard():
-        # 看板已合并进单页应用；/dashboard 作为别名，前端会自动切到看板标签
-        html = (_WEB_DIR / "chat.html").read_text(encoding="utf-8")
-        return HTMLResponse(content=html)
+        spa = _DIST_DIR / "index.html"
+        if spa.exists():
+            return HTMLResponse(spa.read_text(encoding="utf-8"))
+        return HTMLResponse((_WEB_DIR / "chat.html").read_text(encoding="utf-8"))
 
     return app
