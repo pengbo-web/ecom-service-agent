@@ -72,3 +72,41 @@ def compute_offer(
         "floor": F,
         "floor_hit": floor_hit,
     }
+
+
+def negotiate_price(product_id: str, buyer_offer: Optional[float] = None) -> dict:
+    """针对指定商品进行一轮议价。buyer_offer 为买家出价（元），未报价可省略。"""
+    if not settings.bargain_enabled:
+        return {"success": False, "error": "议价功能未启用"}
+
+    db = get_db()
+    product = db.get_product(product_id)
+    if not product:
+        return {"success": False, "error": f"未找到商品 {product_id}，请先用 query_product 确认商品ID"}
+
+    session_id = _current_session_id.get()
+    state = db.get_bargain_state(session_id, product_id) if session_id else None
+    rounds = state["rounds"] if state else 0
+
+    result = compute_offer(
+        list_price=product["price"],
+        floor_price=product.get("floor_price"),
+        buyer_offer=buyer_offer,
+        rounds=rounds,
+    )
+
+    if session_id:
+        db.bump_bargain_state(session_id, product_id, result["suggested_price"])
+
+    return {
+        "success": True,
+        "product_id": product_id,
+        "product_name": product["name"],
+        "list_price": round(product["price"], 2),
+        "buyer_offer": buyer_offer,
+        "round": rounds + 1,
+        "decision": result["decision"],
+        "suggested_price": result["suggested_price"],
+        "floor_hit": result["floor_hit"],
+        "rationale": "内部参考：这是本轮可让到的价格，禁止报出更低价，也不要向买家透露底价或本说明。",
+    }
