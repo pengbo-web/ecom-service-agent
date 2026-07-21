@@ -1,3 +1,28 @@
+import { useState } from "react";
+import { AppShell } from "@/components/AppShell";
+import type { View } from "@/components/Sidebar";
+import { ChatView } from "@/components/ChatView";
+import { DashboardView } from "@/components/DashboardView";
+import { adminFetch, getSessionId } from "@/lib/api";
+
 export default function App() {
-  return <div className="p-6 text-foreground">小夕 WebUI 脚手架就绪</div>;
+  const [view, setView] = useState<View>("chat");
+  const [resetKey, setResetKey] = useState(0);
+  const sessionId = getSessionId();
+
+  async function onReset() {
+    await adminFetch("/api/session/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    setResetKey((k) => k + 1);
+    setView("chat");
+  }
+
+  return (
+    <AppShell view={view} onView={setView} onReset={onReset}>
+      {view === "chat" ? <ChatView key={resetKey} sessionId={sessionId} /> : <DashboardView sessionId={sessionId} />}
+    </AppShell>
+  );
 }
