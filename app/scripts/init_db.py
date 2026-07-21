@@ -15,6 +15,11 @@ def main():
     db = Database(settings.db_path)
     db.init_schema()
     seed_from_mock(db)
+
+    # 清理超大工具结果存档(避免旧 ref 文件堆积)
+    from app.agent.tools.result_store import get_result_store
+    get_result_store().clear()
+
     print(f"建库完成并已灌入种子数据: {db_file}")
 
 

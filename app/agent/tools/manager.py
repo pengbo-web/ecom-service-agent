@@ -83,7 +83,7 @@ class ToolManager:
         return self._tool_defs
 
     def execute_tool(self, name: str, arguments: dict) -> str:
-        """根据工具来源分发调用;结果超长则截断,防单条结果撑爆上下文窗口。"""
+        """分发调用;结果超长则落盘留指针(不丢信息),防单条结果撑爆上下文窗口。"""
         source = self._tool_source.get(name)
 
         if source == "mcp" and self._mcp_client:
@@ -93,9 +93,28 @@ class ToolManager:
         else:
             result = json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
 
-        from app.agent.history_utils import truncate_tool_result
+        return self._maybe_offload(name, result)
+
+    # 读取工具本身豁免(否则读回内容又被落盘,形成死循环)
+    _OFFLOAD_EXEMPT = {"read_tool_result"}
+
+    def _maybe_offload(self, name: str, result: str) -> str:
         from app.config.settings import settings
-        return truncate_tool_result(result, settings.tool_result_max_chars)
+        if name in self._OFFLOAD_EXEMPT or not isinstance(result, str):
+            return result
+        limit = settings.tool_result_max_chars
+        if len(result) <= limit:
+            return result
+        from app.agent.tools.result_store import get_result_store
+        ref = get_result_store().save(result)
+        return json.dumps({
+            "truncated": True,
+            "result_ref": ref,
+            "total_chars": len(result),
+            "preview": result[:settings.tool_result_preview_chars],
+            "note": (f"结果过长已存档。若预览不足以回答,请调用 "
+                     f"read_tool_result(ref='{ref}', offset=0, length=4000) 分段读取完整内容。"),
+        }, ensure_ascii=False)
 
     def close(self):
         """清理 MCP 连接。"""

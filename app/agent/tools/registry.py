@@ -13,6 +13,7 @@ from app.agent.tools.memory_tool import recall_user_memory
 from app.agent.tools.skill_tool import load_skill
 from app.config.settings import settings
 from app.agent.tools.bargain import negotiate_price
+from app.agent.tools.read_result import read_tool_result
 
 _TOOL_MAP: dict[str, Callable] = {
     "query_order": query_order,
@@ -23,6 +24,7 @@ _TOOL_MAP: dict[str, Callable] = {
     "list_user_orders": list_user_orders,
     "recall_user_memory": recall_user_memory,
     "load_skill": load_skill,
+    "read_tool_result": read_tool_result,
 }
 
 if settings.bargain_enabled:
@@ -219,6 +221,27 @@ _NEGOTIATE_PRICE_SCHEMA = {
 
 if settings.bargain_enabled:
     TOOL_DEFINITIONS.append(_NEGOTIATE_PRICE_SCHEMA)
+
+TOOL_DEFINITIONS.append({
+    "type": "function",
+    "function": {
+        "name": "read_tool_result",
+        "description": (
+            "读回此前因过长被存档的工具结果。当某个工具结果里出现 "
+            "`truncated: true` 与 `result_ref` 时,若预览不足以回答,用本工具按 ref 读取完整内容;"
+            "内容很大时可用 offset/length 分段多次读取。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "ref": {"type": "string", "description": "结果引用,如 tr_a1b2c3d4e5"},
+                "offset": {"type": "integer", "description": "起始字符偏移,默认 0", "default": 0},
+                "length": {"type": "integer", "description": "读取字符数,默认 4000", "default": 4000},
+            },
+            "required": ["ref"],
+        },
+    },
+})
 
 
 def execute_tool(name: str, arguments: dict) -> str:

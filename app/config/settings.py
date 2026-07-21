@@ -101,7 +101,9 @@ class Settings(BaseSettings):
     context_window_tokens: int = 30000    # 模型上下文窗口(保守默认,按实际模型调大)
     max_output_tokens: int = 2048         # 单次输出预留
     context_safety_buffer: int = 1024     # 安全缓冲
-    tool_result_max_chars: int = 4000     # 单条工具结果最大字符数(超则截断)
+    tool_result_max_chars: int = 4000     # 单条工具结果超此字符数则落盘留指针(不丢信息)
+    tool_result_preview_chars: int = 1500 # 落盘时在历史里保留的预览长度
+    tool_result_dir: str = "app/sessions/tool_results"  # 超大工具结果存档目录
 
     model_config = {"env_file": ".env"}
 
