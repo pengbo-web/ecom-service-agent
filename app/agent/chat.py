@@ -47,6 +47,7 @@ class EcomAgent:
             memory_dir=settings.memory_dir,
             memory_enabled=settings.memory_enabled,
             max_ltm_facts=settings.max_ltm_facts,
+            ltm_curation=settings.memory_curation_enabled,
         )
 
         if settings.memory_enabled:

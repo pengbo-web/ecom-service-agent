@@ -24,6 +24,7 @@ class MemoryManager:
         memory_dir: str = "app/sessions/memory",
         memory_enabled: bool = True,
         max_ltm_facts: int = 50,
+        ltm_curation: bool = False,
     ):
         self.client = client
         self.model = model
@@ -34,6 +35,7 @@ class MemoryManager:
             user_id=user_id,
             memory_dir=memory_dir,
             max_facts=max_ltm_facts,
+            curate_enabled=ltm_curation,
         )
 
         if self.memory_enabled:

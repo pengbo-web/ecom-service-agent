@@ -35,10 +35,12 @@ class LongTermMemory:
         user_id: str = "default",
         memory_dir: str = "app/sessions/memory",
         max_facts: int = 50,
+        curate_enabled: bool = False,
     ):
         self.user_id = user_id
         self.memory_dir = Path(memory_dir)
         self.max_facts = max_facts
+        self.curate_enabled = curate_enabled
         self.facts: list[MemoryFact] = []
         self.interaction_summaries: list[dict] = []
 
@@ -115,11 +117,21 @@ class LongTermMemory:
         )
 
         if new_facts:
-            self.add_facts(new_facts)
+            self._merge_facts(client, model, new_facts)
         if interaction_summary:
             self.add_interaction_summary(interaction_summary)
 
         self.save()
+
+    def _merge_facts(self, client: OpenAI, model: str, new_facts: list[MemoryFact]) -> None:
+        """并入新事实:启用策展则 LLM 合并/纠正/淘汰,失败降级回 add_facts。"""
+        if self.curate_enabled:
+            from app.agent.memory.curation import curate_facts
+            curated = curate_facts(client, model, self.facts, new_facts, self.max_facts)
+            if curated is not None:
+                self.facts = curated
+                return
+        self.add_facts(new_facts)
 
     def build_prompt_section(self) -> str | None:
         """生成注入 system prompt 的长期记忆片段。"""

@@ -231,24 +231,26 @@ sequenceDiagram
 
 ---
 
-## Phase 5 — 记忆策展(借 prompt,不借基建)  ⭐⭐
+## Phase 5 — 记忆策展(借 prompt,不借基建)  ⭐⭐  ✅(已完成 2026-07-21)
 
-**目标**:长期记忆从"追加+去重+FIFO 截 50"升级为"LLM 策展"(合并/就地纠正/按龄衰减/删或留),减少近义重复与重要事实被挤掉;可选离线化。
+**目标**:长期记忆从"追加+去重+FIFO 截 50"升级为"LLM 策展"(合并近义/就地纠正/按重要性淘汰),减少近义重复与重要事实被挤掉。
 
-**痛点**:`long_term.py:85 add_facts` 精确小写去重、`[-50:]` FIFO——近义重复留存、老而重要被新琐事挤掉,且占在线成本。
+**痛点**:`long_term.py add_facts` 精确小写去重、`[-50:]` FIFO——近义重复留存、老而重要被新琐事挤掉。
 
-**改动文件**
-- 改 `app/agent/memory/extraction.py` / `long_term.py`:会话结束的记忆更新改为一次 **LLM 策展调用**(prompt 借 nanobot `consolidator_archive.md` 的 SNIP 标记 `[permanent]/[durable]/[ephemeral]/[correction]/[skip]` 与 MECE 去重规则)。
-- 可选:LTM 按 MECE 拆"用户偏好/行为规则"两段注入。
-- 进阶(可选):新增 `app/scripts/reflect_memory.py` 离线 cron,整体回看会话→归纳→只在离线写画像;在线只读。
+**取舍(在线 + 保守 + 可降级)**
+- **在线**而非离线 cron:本项目要"本地能跑",不引入调度基建;会话结束多一次 LLM 调用可接受,且有开关。
+- **保守规则**而非放手让 LLM 乱改:只合并明显近义、明确矛盾才就地纠正、溢出按重要性(身份>稳定偏好>行为>未决问题)淘汰;不得杜撰。
+- **默认关 + 失败降级**:`settings.memory_curation_enabled` 默认 False;LLM 异常/非法 JSON/空结果一律返回 None,降级回原 `add_facts`,绝不误清空记忆。离线测试因此不触网。
 
-**跳过**:git 版本化、dream-log、append-only history 运行时、Dream 文件编辑引擎(我们"每用户封顶 50 条"规模下过度工程)。
+**已改动**
+- `app/agent/memory/curation.py`(新):`curate_facts(client, model, existing, new, max_facts)` 一次 LLM 调用整理,命中原内容的事实保留其 `created_at`(不重置年龄),空结果→None。
+- `app/prompts/memory.py`:新增 `LTM_CURATION_PROMPT`(合并/纠正/淘汰/不杜撰四条规则)。
+- `app/agent/memory/long_term.py`:`extract_and_save` 抽出 `_merge_facts`——启用策展走 `curate_facts`,失败降级 `add_facts`。
+- 接线:`LongTermMemory(curate_enabled=)` ← `MemoryManager(ltm_curation=)` ← `settings.memory_curation_enabled`。
 
-**任务拆解(TDD)**:策展函数用 fake client 返回结构化策展结果,断言合并/纠正/衰减逻辑;prompt 内容单独评审。
-**验收**:[ ] 近义事实被合并、纠正生效、按龄衰减;记忆总量受控且更干净。
-**工作量**:~1–1.5 人日(prompt 调试占大头)。
+**验收/测试**:`tests/test_memory_curation.py`——fake client 断言合并近义、保留年龄、按上限截断、去重、坏 JSON/异常/空结果降级、去代码围栏,以及 `extract_and_save` 三态(启用合并 / 失败降级 / 未启用朴素追加)。全量离线 234 绿。
 
-> 通用原则复用:判断离线批处理是否真生效,看**真实产出**不信模型自称——与 `reflow`/`run_eval` 一脉相承。
+**跳过(过度工程)**:git 版本化、dream-log、离线 cron 反思、Dream 文件编辑引擎——"每用户封顶 50 条"规模下不必要。
 
 ---
 

@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     memory_dir: str = "app/sessions/memory"
     memory_user_id: str = "default"
     max_ltm_facts: int = 50
+    memory_curation_enabled: bool = False   # Phase 5:长期记忆 LLM 策展(合并/纠正/按重要性淘汰);关则用 add_facts
 
     # Skill 配置（第8期）
     skills_enabled: bool = True
