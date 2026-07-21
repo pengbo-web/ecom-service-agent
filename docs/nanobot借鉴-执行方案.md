@@ -162,9 +162,23 @@ class ResilientChatClient:
 
 ---
 
-## Phase 4 — 鲁棒性阶梯(挑两条便宜的)  ⭐⭐
+## Phase 4 — 鲁棒性阶梯  ⭐⭐
 
-**目标**:减少用户可见的"⚠️ 出错了"。
+**目标**:减少用户可见的"⚠️ 出错了",并让"确认后执行"变确定性。
+
+### 4.0 服务端确认重放 ✅(已完成 2026-07-21)
+
+**问题**:确认轮能否真正退款/成交,依赖模型"确认后再次调用同一工具"——这是 LLM 行为,存在偶发不调(端到端曾复现一次不执行)。consent 门只保证"未确认不执行",不保证"确认后必执行"。
+
+**方案**:
+- `app/agent/pending.py`(新):按 session 记住被门控拦下的挂起动作(工具名 + 模型当时的真实参数 + action)。
+- `app/agent/chat.py::_react_loop`:工具返回 `need_confirm` 就 `observe_tool_result` 记住;同工具成功则清除(加法,不改核心分支)。
+- `app/api/streaming.py`:用户说确认语且存在挂起动作 → `_replay_flow` 由服务端 `consent_scope(RISK_ACTIONS)` **直接重放该工具**,据真实返回拼确定性回复,**不再调模型**;重放后清挂起(防二次确认重复执行),并写回 Agent 历史保持上下文连贯。
+
+**效果验证**:两轮 e2e——轮1 need_confirm(状态仍 shipped),轮2"确认,退款吧"事件流为 `tool_call→tool_result→reply`(**无 thought、不经 LLM**),状态 → refund_processing。与 consent 门互补:门保证不越权,重放保证必执行。
+**测试**:`tests/test_pending.py`、`tests/test_streaming_replay.py`;全量离线 218 绿。
+
+### 4.1 空回复重试 / 畸形工具调用降级(可选,未做)
 
 **改动文件**:`app/agent/chat.py::_react_loop`(:116)。
 **两条**:

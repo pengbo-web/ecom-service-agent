@@ -165,6 +165,10 @@ class EcomAgent:
                 result_str = self.tool_manager.execute_tool(func_name, func_args)
                 self._emit({"type": "tool_result", "content": result_str})
 
+                # 记住/清除待确认动作:供确认轮由服务端确定性重放(Phase 4)
+                from app.agent.pending import observe_tool_result
+                observe_tool_result(self.session_id, func_name, func_args, result_str)
+
                 self.raw_messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,

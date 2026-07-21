@@ -1,5 +1,6 @@
 """把阻塞式 agent.chat() 桥接成 SSE 事件生成器（W2 tracer + W3 guardrails/consent 可选）。"""
 
+import json
 import queue
 import threading
 from typing import Iterator
@@ -9,6 +10,20 @@ from app.guardrails.base import SAFE_FALLBACK
 _SENTINEL = object()
 
 
+def _build_confirm_reply(action: str, result: dict) -> str:
+    """据重放工具的真实返回,拼一句确定性回复(不泄漏内部字段如议价 rationale)。"""
+    if not result.get("success"):
+        # 已在处理中/订单不存在等:如实转达工具给的原因
+        return result.get("message") or result.get("error") or "抱歉,该操作暂时无法完成,请稍后再试或转人工。"
+    if action == "refund":
+        return "✅ " + result.get("message", "退款申请已提交,预计 1-3 个工作日内审核完成。")
+    if action == "deal_close":
+        price = result.get("suggested_price")
+        name = result.get("product_name", "该商品")
+        return f"✅ 已为您锁定「{name}」的成交价 ¥{price},即将为您生成订单,请稍候完成支付～"
+    return "✅ 操作已完成。"
+
+
 def run_agent_streaming(agent, user_input: str, tracer=None,
                         session_id: str = "", guard_pipeline=None,
                         hitl=None, confirm: bool = False) -> Iterator[dict]:
@@ -16,7 +31,14 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
 
     # 本轮授权的风险动作:显式 confirm 标志,或用户这轮说了确认语(退款/成交等才放行)
     from app.agent.consent import RISK_ACTIONS, consent_scope, is_confirmation
-    granted = RISK_ACTIONS if (confirm or is_confirmation(user_input)) else frozenset()
+    confirmed = confirm or is_confirmation(user_input)
+    granted = RISK_ACTIONS if confirmed else frozenset()
+
+    # Phase 4:用户确认 + 存在上一轮被门控拦下的挂起动作 → 服务端确定性重放,不再赌模型重调工具
+    pending = None
+    if confirmed:
+        from app.agent.pending import get_pending_store
+        pending = get_pending_store().get(session_id)
 
     def sink(ev: dict) -> None:
         if tracer is not None:
@@ -56,7 +78,57 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                 _sink({"type": "handoff", "reasons": reasons, "handoff_id": hid})
         return result.intent.value
 
+    def _replay_flow(_sink) -> str:
+        """确认轮:用记住的真实参数,由服务端授权重放挂起动作(确定性,不经模型)。"""
+        from app.agent.consent import consent_scope as _scope
+        from app.agent.tools.registry import execute_tool as _exec
+        from app.agent.tools.bargain import set_current_session
+        from app.schemas.response import CustomerServiceResponse, IntentType
+        from app.agent.pending import get_pending_store
+
+        _sink({"type": "tool_call", "name": pending.tool_name, "args": pending.args})
+        set_current_session(session_id)   # negotiate_price 需要会话上下文
+        with _scope(RISK_ACTIONS):
+            result_str = _exec(pending.tool_name, pending.args)
+        _sink({"type": "tool_result", "content": result_str})
+        try:
+            result = json.loads(result_str)
+        except (ValueError, TypeError):
+            result = {}
+
+        reply = _build_confirm_reply(pending.action, result)
+        if guard_pipeline is not None:
+            reply, out_results = guard_pipeline.check_output(reply)
+            for gr in out_results:
+                _sink({"type": "guard", "stage": "output", "action": gr.action,
+                       "guard": gr.guard, "reason": gr.reason})
+
+        intent = IntentType.AFTER_SALE if pending.action == "refund" else IntentType.PRODUCT_CONSULT
+        _sink({"type": "reply", "content": reply})
+        _sink({"type": "metadata", "intent": intent.value, "confidence": 1.0,
+               "requires_human": False, "follow_up_question": None})
+
+        # 重放成功即清挂起,防二次"确认"重复执行;失败(如已在处理中)也清,避免卡死
+        get_pending_store().pop(session_id)
+
+        # 把这一轮写回 Agent 历史,保持后续对话上下文连贯
+        resp = CustomerServiceResponse(intent=intent, confidence=1.0, reply=reply,
+                                       requires_human=False, follow_up_question=None)
+        msgs = getattr(agent, "raw_messages", None)
+        if isinstance(msgs, list):
+            msgs.append({"role": "user", "content": user_input})
+            msgs.append({"role": "assistant", "content": resp.model_dump_json()})
+            save = getattr(agent, "save", None)
+            if callable(save):
+                try:
+                    save()
+                except Exception:  # noqa: BLE001  保存失败不影响本轮回复
+                    pass
+        return intent.value
+
     def _drive(_sink) -> str:
+        if pending is not None:
+            return _replay_flow(_sink)
         if guard_pipeline is not None:
             gin = guard_pipeline.check_input(user_input)
             if gin.action == "block":
