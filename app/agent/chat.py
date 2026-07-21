@@ -16,10 +16,15 @@ class EcomAgent:
     """电商客服 Agent —— 第八期：Skill 可复用能力模块"""
 
     def __init__(self, session_path: Optional[str] = None, session_id: Optional[str] = None):
-        self.client = OpenAI(
-            api_key=settings.openai_api_key,
-            base_url=settings.openai_base_url,
-        )
+        # 模型容错:启用时用主备熔断代理(memory/summarizer 复用本 client 自动继承)
+        if settings.resilience_enabled:
+            from app.resilience.factory import make_resilient_client
+            self.client = make_resilient_client()
+        else:
+            self.client = OpenAI(
+                api_key=settings.openai_api_key,
+                base_url=settings.openai_base_url,
+            )
         self.model = settings.model_name
         self.temperature = settings.temperature
         self.session_path = session_path or settings.session_path
