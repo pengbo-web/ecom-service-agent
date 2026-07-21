@@ -75,6 +75,12 @@ class Settings(BaseSettings):
     daily_request_budget: int = 500    # 每日全局请求上限（成本兜底）
     fast_path_enabled: bool = True     # 规则快路径（高频简单意图秒回）
 
+    # 议价功能
+    bargain_enabled: bool = True
+    bargain_floor_ratio: float = 0.85   # 未设 floor_price 时：底价 = 标价 × 该系数
+    bargain_max_rounds: int = 5         # 达到该轮次后直接让到底价
+    bargain_decay: float = 0.5          # 阶梯让价衰减系数（越大让得越慢）
+
     # 多轮对话管理
     session_path: str = "app/sessions/session.json"
     history_threshold: int = 10  # 消息压缩策略通常为上下文达到一定的token数，例如claude code通常为达到最大上下文窗口的70%左右，此处简略为原始消息条数超过10轮
