@@ -9,6 +9,7 @@ from app.config.settings import settings
 from app.prompts.customer_service import SYSTEM_PROMPT
 from app.schemas.response import CustomerServiceResponse, IntentType
 from app.agent.tools.manager import ToolManager
+from app.agent.history_utils import estimate_tokens, sanitize_tool_pairs
 from app.agent.tools.bargain import set_current_session
 
 
@@ -93,7 +94,9 @@ class EcomAgent:
             {"role": "assistant", "content": result.model_dump_json()}
         )
 
-        if len(self.raw_messages) > self.history_threshold:
+        _budget = (settings.context_window_tokens - settings.max_output_tokens
+                   - settings.context_safety_buffer)
+        if estimate_tokens(self._build_messages()) > _budget:
             self._compress_history()
 
         save_session(
@@ -247,7 +250,7 @@ class EcomAgent:
                 }
             )
         messages.extend(self.raw_messages)
-        return messages
+        return sanitize_tool_pairs(messages)   # 送模型前自愈 tool_calls/tool 结果配对
 
     def _compress_history(self) -> None:
         keep = self.history_keep_recent

@@ -83,16 +83,19 @@ class ToolManager:
         return self._tool_defs
 
     def execute_tool(self, name: str, arguments: dict) -> str:
-        """根据工具来源分发调用。"""
+        """根据工具来源分发调用;结果超长则截断,防单条结果撑爆上下文窗口。"""
         source = self._tool_source.get(name)
 
         if source == "mcp" and self._mcp_client:
-            return self._mcp_client.call_tool(name, arguments)
+            result = self._mcp_client.call_tool(name, arguments)
+        elif source == "local":
+            result = local_execute_tool(name, arguments)
+        else:
+            result = json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
 
-        if source == "local":
-            return local_execute_tool(name, arguments)
-
-        return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
+        from app.agent.history_utils import truncate_tool_result
+        from app.config.settings import settings
+        return truncate_tool_result(result, settings.tool_result_max_chars)
 
     def close(self):
         """清理 MCP 连接。"""

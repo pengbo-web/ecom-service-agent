@@ -94,8 +94,14 @@ class Settings(BaseSettings):
 
     # 多轮对话管理
     session_path: str = "app/sessions/session.json"
-    history_threshold: int = 10  # 消息压缩策略通常为上下文达到一定的token数，例如claude code通常为达到最大上下文窗口的70%左右，此处简略为原始消息条数超过10轮
+    history_threshold: int = 10  # (兼容保留)条数触发阈值,现主用 token 预算
     history_keep_recent: int = 3  # 压缩时保留最近 3 条原始消息
+
+    # 上下文防线（Phase 2，借鉴 nanobot context_governance）
+    context_window_tokens: int = 30000    # 模型上下文窗口(保守默认,按实际模型调大)
+    max_output_tokens: int = 2048         # 单次输出预留
+    context_safety_buffer: int = 1024     # 安全缓冲
+    tool_result_max_chars: int = 4000     # 单条工具结果最大字符数(超则截断)
 
     model_config = {"env_file": ".env"}
 
