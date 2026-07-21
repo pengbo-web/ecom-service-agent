@@ -10,7 +10,8 @@ _RE_BANK = re.compile(r"(?<!\d)(\d{4})\d{8,11}(\d{4})(?!\d)")
 _RE_EMAIL = re.compile(r"([\w.+-]{1,3})[\w.+-]*@([\w-]+\.[\w.-]+)")
 
 _CONTACT_PATTERNS = [
-    r"(加|上|留个?)?微信", r"\bweixin\b", r"\bwechat\b", r"\bQQ\b",
+    # 「微信支付/微信付款」是正规站内支付方式，不拦；只拦引导加微信/微信号等站外联系
+    r"(加|上|留个?)?微信(?!支付|付款)", r"\bweixin\b", r"\bwechat\b", r"\bQQ\b",
     r"私(下|聊).{0,4}(交易|联系|发)", r"线下(交易|付款|联系)", r"绕过平台",
 ]
 _CONTACT_COMPILED = [re.compile(p, re.IGNORECASE) for p in _CONTACT_PATTERNS]
