@@ -95,6 +95,16 @@ def negotiate_price(product_id: str, buyer_offer: Optional[float] = None) -> dic
         rounds=rounds,
     )
 
+    # 前置授权门:成交(accept)是提交型动作,未获本轮确认则不落单,先请用户确认
+    if result["decision"] == "accept":
+        from app.agent.consent import is_allowed, need_confirm_result
+        if not is_allowed("deal_close"):
+            return need_confirm_result(
+                "deal_close",
+                f"可以按 ¥{result['suggested_price']} 成交 {product['name']}。"
+                "请确认是否以此价下单？",
+            )
+
     if session_id:
         db.bump_bargain_state(session_id, product_id, result["suggested_price"])
 

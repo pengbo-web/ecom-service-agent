@@ -58,10 +58,18 @@ def test_list_user_orders():
 def test_apply_refund_mutates_db():
     from app.agent.tools.refund import apply_refund
     from app.agent.tools.order import query_order
-    r = apply_refund("ORD-20240115-001", "尺码不合适")
+    from app.agent.consent import consent_scope
+    with consent_scope({"refund"}):        # 退款需前置授权
+        r = apply_refund("ORD-20240115-001", "尺码不合适")
     assert r["success"] is True
     # 退款后再查订单，状态已变（真实数据流动）
     assert query_order("ORD-20240115-001")["order"]["status"] == "refund_processing"
+
+
+def test_apply_refund_blocked_without_consent():
+    from app.agent.tools.refund import apply_refund
+    r = apply_refund("ORD-20240115-001", "尺码不合适")
+    assert r["success"] is False and r.get("need_confirm") is True
 
 
 def test_apply_refund_already_processing():

@@ -4,13 +4,13 @@ import { splitSSEFrames, type SSEEvent } from "@/lib/sse";
 export function useChatStream(opts: { sessionId: string; onEvent: (e: SSEEvent) => void }) {
   const [streaming, setStreaming] = useState(false);
 
-  const send = useCallback(async (message: string) => {
+  const send = useCallback(async (message: string, confirm = false) => {
     setStreaming(true);
     try {
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: opts.sessionId, message }),
+        body: JSON.stringify({ session_id: opts.sessionId, message, confirm }),
       });
       if (!resp.ok || !resp.body) throw new Error("服务返回 " + resp.status);
       const reader = resp.body.getReader();

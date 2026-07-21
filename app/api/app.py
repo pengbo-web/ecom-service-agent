@@ -113,7 +113,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 for event in run_agent_streaming(
                     agent, req.message, tracer=tracer,
                     session_id=req.session_id, guard_pipeline=guard_pipeline,
-                    hitl=hitl,
+                    hitl=hitl, confirm=req.confirm,
                 ):
                     yield _sse_frame(event)
 

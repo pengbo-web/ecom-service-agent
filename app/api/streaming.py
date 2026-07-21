@@ -11,7 +11,7 @@ _SENTINEL = object()
 
 def run_agent_streaming(agent, user_input: str, tracer=None,
                         session_id: str = "", guard_pipeline=None,
-                        hitl=None) -> Iterator[dict]:
+                        hitl=None, confirm: bool = False) -> Iterator[dict]:
     q: "queue.Queue" = queue.Queue()
 
     def _blocked_flow(sink, gr) -> str:
@@ -25,7 +25,9 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
 
     def _normal_flow(sink) -> str:
         """正常调用 Agent，并对输出跑护栏。返回 intent。"""
-        result = agent.chat(user_input)
+        from app.agent.consent import consent_scope, RISK_ACTIONS
+        with consent_scope(RISK_ACTIONS if confirm else frozenset()):
+            result = agent.chat(user_input)
         reply = result.reply
         if guard_pipeline is not None:
             reply, out_results = guard_pipeline.check_output(reply)

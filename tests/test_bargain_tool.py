@@ -33,12 +33,19 @@ def db(tmp_path):
 
 
 def test_accept_offer_and_bump_round(db):
-    r = negotiate_price("P1", 950.0)
+    from app.agent.consent import consent_scope
+    with consent_scope({"deal_close"}):     # 成交需前置授权
+        r = negotiate_price("P1", 950.0)
     assert r["success"] is True
     assert r["decision"] == "accept"
     assert r["suggested_price"] == 950.0
     assert r["round"] == 1
     assert db.get_bargain_state("t1", "P1")["rounds"] == 1
+
+
+def test_accept_blocked_without_consent(db):
+    r = negotiate_price("P1", 950.0)
+    assert r.get("need_confirm") is True and r["action"] == "deal_close"
 
 
 def test_reject_below_floor(db):
@@ -75,8 +82,10 @@ def test_disabled_returns_error(db, monkeypatch):
 
 def test_stateless_when_no_session(db):
     # 未绑定会话：仍可用，rounds 从 0 起（round==1），且不落库
+    from app.agent.consent import consent_scope
     set_current_session(None)
-    r = negotiate_price("P1", 950.0)
+    with consent_scope({"deal_close"}):     # 950>=标价 → accept,需授权
+        r = negotiate_price("P1", 950.0)
     assert r["success"] is True
     assert r["round"] == 1
     assert db.get_bargain_state("t1", "P1") is None  # 无 session 时不写状态

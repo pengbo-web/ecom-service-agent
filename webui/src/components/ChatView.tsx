@@ -28,11 +28,11 @@ export function ChatView({ sessionId }: { sessionId: string }) {
     },
   });
 
-  function onSend(text: string) {
+  function onSend(text: string, confirm: boolean) {
     const id = ++idRef.current;
     cur.current = id;
     setTurns((ts) => [...ts, { id, userText: text, activity: [] }]);
-    send(text);
+    send(text, confirm);
   }
 
   return (

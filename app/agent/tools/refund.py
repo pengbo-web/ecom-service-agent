@@ -1,4 +1,5 @@
 from app.db import get_db
+from app.agent.consent import is_allowed, need_confirm_result
 
 
 def apply_refund(order_id: str, reason: str) -> dict:
@@ -10,6 +11,14 @@ def apply_refund(order_id: str, reason: str) -> dict:
 
     if order["status"] == "refund_processing":
         return {"success": False, "error": "该订单已有退款申请正在处理中，请耐心等待"}
+
+    # 前置授权门:退款是涉钱不可逆动作,未获本轮确认则不执行
+    if not is_allowed("refund"):
+        return need_confirm_result(
+            "refund",
+            f"退款是敏感操作。请确认是否为订单 {order_id} 办理退款（原因：{reason}）？"
+            "确认后我再为您提交。",
+        )
 
     was_pending = order["status"] == "pending"
     db.set_refund(order_id, reason)

@@ -129,7 +129,11 @@ TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "apply_refund",
-            "description": "为指定订单申请退款。注意：这是一个敏感操作，调用前应先与用户确认",
+            "description": (
+                "当用户想退款时调用本工具。系统会强制前置确认:若返回 "
+                "need_confirm=true,请把其中的确认问题转达给用户,让其确认后你再次调用本工具即可;"
+                "无需你自己纠结是否已确认——由系统门控。"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
