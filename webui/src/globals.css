@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 220 20% 97%;
+  --foreground: 222 20% 18%;
+  --card: 0 0% 100%;
+  --card-foreground: 222 20% 18%;
+  --primary: 226 100% 65%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 220 14% 94%;
+  --secondary-foreground: 222 20% 24%;
+  --muted: 220 14% 94%;
+  --muted-foreground: 220 9% 46%;
+  --accent: 28 96% 55%;
+  --accent-foreground: 0 0% 100%;
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 220 13% 88%;
+  --input: 220 13% 85%;
+  --ring: 226 100% 65%;
+  --radius: 0.75rem;
+}
+
+* { border-color: hsl(var(--border)); }
+html, body, #root { height: 100%; }
+body { margin: 0; background: hsl(var(--background)); color: hsl(var(--foreground)); font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }

@@ -33,3 +33,6 @@ app/sessions/
 
 # 执行过程草稿（SDD 进度 ledger，非项目产物）
 .superpowers/
+
+# WebUI
+webui/node_modules
