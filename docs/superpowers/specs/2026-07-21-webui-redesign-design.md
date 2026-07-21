@@ -90,7 +90,7 @@ Tailwind + shadcn CSS 变量，**仅浅色**。primary = 电商蓝（≈ `#4f7cf
 
 ## 8. 版本管理
 
-`webui/node_modules` 与 `web/dist` 加入 `.gitignore`（源码入库、产物不入库）；README 补「前端构建/开发」说明。若希望「拉下来即可跑、无需 npm build」，可另行决定提交 `web/dist`（本设计默认不提交，构建产物由部署时生成）。
+`webui/node_modules` 加入 `.gitignore`；**`web/dist` 构建产物提交入库**（决定：拉下来 `python run_api.py` 即有新界面，无需 node/build，便于当 demo 展示）。README 补「前端构建/开发」说明，并注明改前端后需 `npm run build` 重新生成并提交 `web/dist`。
 
 ## 9. 测试
 
