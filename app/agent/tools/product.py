@@ -28,12 +28,17 @@ def _generate_mock_product(keyword: str) -> dict:
     }
 
 
+def _public_view(product: dict) -> dict:
+    """面向顾客的商品视图：剔除 floor_price（议价底价，绝不能暴露给模型/顾客）。"""
+    return {k: v for k, v in product.items() if k != "floor_price"}
+
+
 def query_product(keyword: str) -> dict:
     """根据商品名称关键词或商品ID查询商品信息，包括价格、库存、规格等。"""
     db = get_db()
     exact = db.get_product(keyword)
     if exact:
-        return {"success": True, "products": [exact]}
+        return {"success": True, "products": [_public_view(exact)]}
 
     keywords = [kw.lower() for kw in keyword.split() if kw.strip()]
     if not keywords:
@@ -44,4 +49,4 @@ def query_product(keyword: str) -> dict:
 
     if not results:
         return {"success": True, "products": [_generate_mock_product(keyword)]}
-    return {"success": True, "products": results}
+    return {"success": True, "products": [_public_view(p) for p in results]}
