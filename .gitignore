@@ -6,6 +6,9 @@ __pycache__/
 dist/
 build/
 .eggs/
+# 前端构建产物需入库（拉下来即可跑，无需 npm build）
+!web/dist/
+!web/dist/**
 
 # 环境变量（含密钥，禁止提交）
 .env
