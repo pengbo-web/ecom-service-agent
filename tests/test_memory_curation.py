@@ -48,6 +48,23 @@ def test_curate_preserves_created_at_for_unchanged():
     assert kept["喜欢运动鞋"].created_at != ""                       # 新事实给当前时间
 
 
+def test_curate_inherits_oldest_created_at_via_from():
+    # 合并第1、2条 → 继承更早的 2022 时间戳(按龄不丢)
+    client = FakeClient('{"facts":[{"content":"偏好红色系","category":"preference","from":[1,2]}]}')
+    existing = [
+        _fact("喜欢红色", "preference", "2022-01-01T00:00:00"),
+        _fact("偏好红色款", "preference", "2024-06-01T00:00:00"),
+    ]
+    out = curate_facts(client, "m", existing, [], max_facts=50)
+    assert len(out) == 1 and out[0].created_at == "2022-01-01T00:00:00"
+
+
+def test_curate_from_out_of_range_falls_back_to_now():
+    client = FakeClient('{"facts":[{"content":"全新事实","from":[99]}]}')
+    out = curate_facts(client, "m", [_fact("旧", created_at="2020-01-01T00:00:00")], [], 50)
+    assert out[0].created_at != "2020-01-01T00:00:00"   # 越界序号忽略 → 用当前时间
+
+
 def test_curate_truncates_to_max_facts():
     client = FakeClient(
         '{"facts":[{"content":"a"},{"content":"b"},{"content":"c"}]}')

@@ -73,24 +73,47 @@ def curate_facts(
     seen: set = set()
     for item in kept:
         if isinstance(item, str):
-            content, category = item.strip(), "other"
+            content, category, sources = item.strip(), "other", []
         elif isinstance(item, dict):
             content = (item.get("content") or "").strip()
             category = item.get("category") or "other"
+            sources = _origin_facts(item.get("from"), all_facts)
         else:
             continue
         key = content.lower()
         if not content or key in seen:
             continue
         seen.add(key)
-        prev = by_content.get(key)
+
+        # 年龄继承:优先按来源序号取最早的记录时间;否则内容精确匹配;都无则用当前时间
+        if not sources and key in by_content:
+            sources = [by_content[key]]
+        if sources:
+            oldest = min(sources, key=lambda f: f.created_at)
+            created_at, source_session = oldest.created_at, oldest.source_session
+        else:
+            created_at, source_session = now, ""
+
         result.append(MemoryFact(
-            content=content,
-            category=category,
-            created_at=prev.created_at if prev else now,
-            source_session=prev.source_session if prev else "",
+            content=content, category=category,
+            created_at=created_at, source_session=source_session,
         ))
 
     if not result:
         return None
     return result[:max_facts]
+
+
+def _origin_facts(raw_from, all_facts: list) -> list:
+    """把 LLM 给的 1-based 来源序号列表映射为对应的源事实(越界/非法忽略)。"""
+    if not isinstance(raw_from, list):
+        return []
+    out = []
+    for idx in raw_from:
+        try:
+            i = int(idx) - 1
+        except (ValueError, TypeError):
+            continue
+        if 0 <= i < len(all_facts):
+            out.append(all_facts[i])
+    return out

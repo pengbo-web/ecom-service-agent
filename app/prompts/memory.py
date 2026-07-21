@@ -57,8 +57,10 @@ LTM_CURATION_PROMPT = """你是用户长期记忆的策展员。下面是关于�
 4. **重要性优先**：最多保留 {max_facts} 条；超出时按重要性取舍——身份信息 > 稳定偏好 > 行为习惯 > 未决问题，优先丢弃最不重要的。
 5. **不得杜撰**：只能对给定事实做保留/合并/改写，绝不新增清单里没有的信息。
 
-待整理的事实清单：
+待整理的事实清单（每条前有序号）：
 {facts}
 
+每条输出还需给出 "from"：它来自上面清单的哪些序号（合并多条就列出全部来源序号）。系统据此让保留/合并后的事实继承最早来源的记录时间。
+
 只输出 JSON，格式如下，不要加 markdown 代码块或任何解释：
-{{"facts": [{{"content": "简洁中文", "category": "identity|preference|behavior|issue|other"}}]}}"""
+{{"facts": [{{"content": "简洁中文", "category": "identity|preference|behavior|issue|other", "from": [1, 2]}}]}}"""
