@@ -13,11 +13,12 @@ def seed_from_mock(db: Database) -> None:
         for p in PRODUCTS.values():
             conn.execute(
                 """INSERT OR REPLACE INTO products
-                   (product_id, name, category, price, stock, description, specs)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (product_id, name, category, price, stock, description, specs, floor_price)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
                 (p["product_id"], p["name"], p.get("category"), p.get("price"),
                  p.get("stock"), p.get("description", ""),
-                 json.dumps(p.get("specs", {}), ensure_ascii=False)),
+                 json.dumps(p.get("specs", {}), ensure_ascii=False),
+                 p.get("floor_price")),
             )
 
         users = {}
