@@ -6,7 +6,9 @@ import { DashboardView } from "@/components/DashboardView";
 import { adminFetch, getSessionId } from "@/lib/api";
 
 export default function App() {
-  const [view, setView] = useState<View>("chat");
+  const [view, setView] = useState<View>(
+    typeof location !== "undefined" && location.pathname === "/dashboard" ? "dash" : "chat"
+  );
   const [resetKey, setResetKey] = useState(0);
   const sessionId = getSessionId();
 

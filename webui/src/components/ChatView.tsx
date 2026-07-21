@@ -22,7 +22,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
     onEvent: (e) => {
       if (["thought", "tool_call", "tool_result", "guard"].includes(e.type)) patch((t) => ({ ...t, activity: [...t.activity, e] }));
       else if (e.type === "reply") patch((t) => ({ ...t, reply: e.content }));
-      else if (e.type === "metadata") patch((t) => ({ ...t, meta: e as unknown as Meta }));
+      else if (e.type === "metadata") patch((t) => ({ ...t, meta: { intent: e.intent, confidence: e.confidence, requires_human: e.requires_human, follow_up_question: e.follow_up_question } }));
       else if (e.type === "handoff") patch((t) => ({ ...t, handoff: e.reasons || [] }));
       else if (e.type === "error") patch((t) => ({ ...t, reply: "⚠️ 出错了：" + e.message }));
     },

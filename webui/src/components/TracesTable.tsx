@@ -3,19 +3,25 @@ import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { adminFetch } from "@/lib/api";
 
 export type Trace = { trace_id: string; started_at: number; session_id?: string; intent?: string; status: string; latency_ms: number; prompt_tokens?: number; completion_tokens?: number };
+type Span = { kind: string; name: string; latency_ms?: number; success?: boolean | null; prompt_tokens?: number; completion_tokens?: number };
+type Detail = { trace_id?: string; user_input?: string; intent?: string; status?: string; spans?: Span[]; error?: string };
 
 export function TracesTable({ traces }: { traces: Trace[] }) {
-  const [detail, setDetail] = useState<any | null>(null);
+  const [detail, setDetail] = useState<Detail | null>(null);
   async function open(id: string) {
-    const t = await (await adminFetch("/api/traces/" + id)).json();
-    setDetail(t);
+    try {
+      const t: Detail = await (await adminFetch("/api/traces/" + id)).json();
+      setDetail(t);
+    } catch {
+      setDetail({ error: "加载调用链失败" });
+    }
   }
   return (
     <>
       <div className="overflow-x-auto rounded-lg border">
         <table className="w-full text-sm">
           <thead className="bg-secondary/60 text-muted-foreground">
-            <tr>{["时间(相对)", "会话", "意图", "状态", "延迟(ms)", "tokens"].map((h) => <th key={h} className="px-3 py-2 text-left font-medium">{h}</th>)}</tr>
+            <tr>{["时间戳", "会话", "意图", "状态", "延迟(ms)", "tokens"].map((h) => <th key={h} className="px-3 py-2 text-left font-medium">{h}</th>)}</tr>
           </thead>
           <tbody>
             {traces.length === 0 && <tr><td colSpan={6} className="px-3 py-6 text-center text-muted-foreground">暂无记录</td></tr>}
@@ -36,10 +42,12 @@ export function TracesTable({ traces }: { traces: Trace[] }) {
         <DialogContent>
           <DialogTitle>调用链 {detail?.trace_id}</DialogTitle>
           <pre className="mt-3 max-h-[60vh] overflow-auto rounded-md bg-secondary p-3 text-xs">
-{detail && `用户: ${detail.user_input}\n意图: ${detail.intent} 状态: ${detail.status}\n\n` +
-  (detail?.spans || []).map((s: any) => `[${s.kind}] ${s.name}  ${s.latency_ms.toFixed(0)}ms` +
-    (s.success == null ? "" : s.success ? " ✅" : " ❌") +
-    (s.prompt_tokens ? `  tok:${s.prompt_tokens}+${s.completion_tokens}` : "")).join("\n")}
+{detail?.error
+  ? detail.error
+  : detail && `用户: ${detail.user_input ?? "-"}\n意图: ${detail.intent ?? "-"} 状态: ${detail.status ?? "-"}\n\n` +
+      (detail?.spans || []).map((s) => `[${s.kind}] ${s.name}  ${(s.latency_ms ?? 0).toFixed(0)}ms` +
+        (s.success == null ? "" : s.success ? " ✅" : " ❌") +
+        (s.prompt_tokens ? `  tok:${s.prompt_tokens}+${s.completion_tokens}` : "")).join("\n")}
           </pre>
         </DialogContent>
       </Dialog>

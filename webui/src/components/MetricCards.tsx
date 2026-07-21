@@ -17,7 +17,7 @@ export function MetricCards({ m }: { m: Metrics }) {
     ["工具成功率", pct(m.tool_success_rate)], ["工具调用数", m.tool_calls],
     ["护栏拦截", m.guard_blocks], ["拦截率", pct(m.block_rate)],
     ["脱敏次数", m.guard_sanitizes], ["转人工数", m.handoffs],
-    ["转人工率", pct(m.escalation_rate)], ["估算成本", "$" + m.est_cost_usd],
+    ["转人工率", pct(m.escalation_rate)], ["估算成本", "$" + m.est_cost_usd.toFixed(4)],
     ["Prompt tokens", m.total_prompt_tokens], ["Completion tokens", m.total_completion_tokens],
   ];
   return (
