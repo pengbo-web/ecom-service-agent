@@ -95,7 +95,9 @@ class SessionManager:
         def loop():
             while not self._reaper_stop.wait(interval):
                 try:
-                    self.sweep(idle_ttl)
+                    reaped = self.sweep(idle_ttl)
+                    if reaped:
+                        print(f"🧠 [自动巩固] 空闲会话 {reaped} 已巩固长期记忆并回收", flush=True)
                 except Exception:
                     pass
 
