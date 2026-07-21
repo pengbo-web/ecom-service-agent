@@ -9,6 +9,17 @@ class Settings(BaseSettings):
     model_name: str = "gpt-4o-mini"
     temperature: float = 0.7
 
+    # 模型容错（Phase 1：fallback + 熔断 + 错误分类重试）
+    resilience_enabled: bool = True
+    llm_timeout_s: float = 120.0          # 单次 LLM 调用超时
+    llm_max_retries: int = 2              # 主模型瞬时错误重试次数
+    llm_retry_after_cap_s: float = 30.0   # Retry-After 的上限
+    breaker_threshold: int = 3            # 主模型连续失败多少次跳闸
+    breaker_cooldown_s: float = 60.0      # 熔断冷却秒数
+    fallback_base_url: str = ""           # 备用模型端点（留空=无备用，仅重试）
+    fallback_model: str = ""              # 备用模型 id（留空=无备用）
+    fallback_api_key: str = ""            # 备用模型 key（留空=复用主 key）
+
     # ReAct 循环
     max_react_steps: int = 5
 
