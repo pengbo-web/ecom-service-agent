@@ -31,7 +31,8 @@ class Database:
                     price REAL,
                     stock INTEGER,
                     description TEXT,
-                    specs TEXT
+                    specs TEXT,
+                    floor_price REAL
                 );
                 CREATE TABLE IF NOT EXISTS orders (
                     order_id TEXT PRIMARY KEY,
@@ -75,8 +76,20 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_items_order ON order_items(order_id);
                 CREATE INDEX IF NOT EXISTS idx_events_tn ON logistics_events(tracking_number);
+                CREATE TABLE IF NOT EXISTS bargain_sessions (
+                    session_id TEXT NOT NULL,
+                    product_id TEXT NOT NULL,
+                    rounds INTEGER DEFAULT 0,
+                    last_offer REAL,
+                    updated_at TEXT,
+                    PRIMARY KEY (session_id, product_id)
+                );
                 """
             )
+            # 兼容旧库：products 补 floor_price 列
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
+            if "floor_price" not in cols:
+                conn.execute("ALTER TABLE products ADD COLUMN floor_price REAL")
             conn.commit()
         finally:
             conn.close()
@@ -193,5 +206,41 @@ class Database:
             )
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # ---------- 议价状态 ----------
+    def get_bargain_state(self, session_id: str, product_id: str) -> Optional[dict]:
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT rounds, last_offer FROM bargain_sessions "
+                "WHERE session_id = ? AND product_id = ?",
+                (session_id, product_id),
+            ).fetchone()
+            return {"rounds": row["rounds"], "last_offer": row["last_offer"]} if row else None
+        finally:
+            conn.close()
+
+    def bump_bargain_state(self, session_id: str, product_id: str, offer: float) -> None:
+        conn = self.connect()
+        try:
+            now = self._now()
+            conn.execute(
+                """INSERT INTO bargain_sessions (session_id, product_id, rounds, last_offer, updated_at)
+                   VALUES (?, ?, 1, ?, ?)
+                   ON CONFLICT(session_id, product_id)
+                   DO UPDATE SET rounds = rounds + 1, last_offer = ?, updated_at = ?""",
+                (session_id, product_id, offer, now, offer, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def clear_bargain_state(self, session_id: str) -> None:
+        conn = self.connect()
+        try:
+            conn.execute("DELETE FROM bargain_sessions WHERE session_id = ?", (session_id,))
+            conn.commit()
         finally:
             conn.close()
