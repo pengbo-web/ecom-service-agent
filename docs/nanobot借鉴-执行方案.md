@@ -178,16 +178,14 @@ class ResilientChatClient:
 **效果验证**:两轮 e2e——轮1 need_confirm(状态仍 shipped),轮2"确认,退款吧"事件流为 `tool_call→tool_result→reply`(**无 thought、不经 LLM**),状态 → refund_processing。与 consent 门互补:门保证不越权,重放保证必执行。
 **测试**:`tests/test_pending.py`、`tests/test_streaming_replay.py`;全量离线 218 绿。
 
-### 4.1 空回复重试 / 畸形工具调用降级(可选,未做)
+### 4.1 空回复重试 / 畸形工具调用降级 ✅(已完成 2026-07-21)
 
-**改动文件**:`app/agent/chat.py::_react_loop`(:116)。
+**改动文件**:`app/agent/chat.py::_react_loop`。抽出 `_llm_create`(统一带/不带 tools 调用)、`_answer_without_tools`(无工具兜底)、`_parse_tool_calls`(解析并判畸形)。
 **两条**:
-1. **空回复重试**:LLM 返回空 `content` 且无 tool_calls → 重试一次(移植 `runner.py:494` 思路)。
-2. **畸形工具调用降级**:`json.loads(tc.function.arguments)` 失败或工具名缺失 → 退回一次"不带 tools"的请求让模型用自然语言回答(移植 `runner.py:821-848`)。
+1. **空回复重试**:LLM 返回空/纯空白 `content` 且无 tool_calls → 不带 tools 重试一次;仍空则给兜底文案 `_EMPTY_REPLY_FALLBACK`,不把空白冒泡给用户。发 `degrade{reason:empty_reply}` 事件便于观测。
+2. **畸形工具调用降级**:任一 `tc.function.arguments` 非法 JSON / 非对象 / 工具名缺失 → 整批降级为"不带 tools"的自然语言回答,**畸形调用绝不执行**,且不把带 tool_calls 的 assistant 写进历史(避免留下无结果的孤儿调用)。发 `degrade{reason:malformed_tool_call}`。
 
-**任务拆解(TDD)**:用 fake client 让首个响应空/畸形、第二个正常,断言最终有合理回复而非异常。
-**验收**:[ ] 空回复/畸形工具调用不再直接冒泡成用户可见错误;全量离线绿。
-**工作量**:~0.5 人日。
+**测试**:`tests/test_react_degrade.py`(fake client 脚本化空/畸形/正常路径,断言重试次数、tools 开关、工具不被执行、历史干净)。全量离线 223 绿。
 
 ---
 
