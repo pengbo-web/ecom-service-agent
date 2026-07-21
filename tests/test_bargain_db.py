@@ -33,9 +33,11 @@ def test_clear_bargain_state(tmp_path):
     db = _fresh_db(tmp_path)
     db.bump_bargain_state("s1", "P1", 900.0)
     db.bump_bargain_state("s1", "P2", 100.0)
+    db.bump_bargain_state("s2", "P1", 500.0)  # 另一会话，clear s1 后应保留
     db.clear_bargain_state("s1")
     assert db.get_bargain_state("s1", "P1") is None
     assert db.get_bargain_state("s1", "P2") is None
+    assert db.get_bargain_state("s2", "P1")["rounds"] == 1  # 未被误删
 
 
 def test_product_floor_price_column(tmp_path):
