@@ -28,3 +28,13 @@ def test_nested_scopes_restore():
 def test_need_confirm_result_shape():
     r = need_confirm_result("refund", "确认?")
     assert r["success"] is False and r["need_confirm"] is True and r["action"] == "refund"
+
+
+def test_is_confirmation():
+    from app.agent.consent import is_confirmation
+    assert is_confirmation("确认") is True
+    assert is_confirmation("好的,退款吧") is True
+    assert is_confirmation("同意下单") is True
+    assert is_confirmation("我要退款订单 ORD-1") is False        # 首次请求不是确认
+    assert is_confirmation("我先问一下这个商品有货吗") is False   # 太长/非确认
+    assert is_confirmation("") is False

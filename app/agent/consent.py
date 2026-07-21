@@ -32,3 +32,22 @@ def consent_scope(actions):
 def need_confirm_result(action: str, message: str) -> dict:
     """未授权时工具的统一返回体(不执行副作用)。"""
     return {"success": False, "need_confirm": True, "action": action, "message": message}
+
+
+# 确认语识别:用户明确表示同意执行的短语
+_CONFIRM_WORDS = [
+    "确认", "确定", "同意", "可以", "好的", "没错", "就这样", "就这么办",
+    "退吧", "退款吧", "下单", "成交", "同意退款", "同意下单", "是的",
+]
+
+
+def is_confirmation(text: str) -> bool:
+    """判断用户这句是否为"确认执行"。过长的一般不是单纯确认。
+
+    用作前置授权门的放行信号:用户这轮说了确认语,才在动作边界放行风险动作。
+    这样匹配模型真实行为(模型总是先口头请用户确认、确认后才调风险工具)。
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 30:
+        return False
+    return any(w in t for w in _CONFIRM_WORDS)

@@ -1,4 +1,4 @@
-"""把阻塞式 agent.chat() 桥接成 SSE 事件生成器（W2 tracer + W3 guardrails 可选）。"""
+"""把阻塞式 agent.chat() 桥接成 SSE 事件生成器（W2 tracer + W3 guardrails/consent 可选）。"""
 
 import queue
 import threading
@@ -14,31 +14,37 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                         hitl=None, confirm: bool = False) -> Iterator[dict]:
     q: "queue.Queue" = queue.Queue()
 
-    def _blocked_flow(sink, gr) -> str:
-        """输入被护栏拦截：短路，不调用 Agent。返回 intent 供 trace 记录。"""
-        sink({"type": "guard", "stage": "input", "action": "block",
-              "guard": gr.guard, "reason": gr.reason})
-        sink({"type": "reply", "content": SAFE_FALLBACK})
-        sink({"type": "metadata", "intent": "blocked", "confidence": 1.0,
-              "requires_human": False, "follow_up_question": None})
+    # 本轮授权的风险动作:显式 confirm 标志,或用户这轮说了确认语(退款/成交等才放行)
+    from app.agent.consent import RISK_ACTIONS, consent_scope, is_confirmation
+    granted = RISK_ACTIONS if (confirm or is_confirmation(user_input)) else frozenset()
+
+    def sink(ev: dict) -> None:
+        if tracer is not None:
+            tracer.on_event(ev)
+        q.put(ev)
+
+    def _blocked_flow(_sink, gr) -> str:
+        _sink({"type": "guard", "stage": "input", "action": "block",
+               "guard": gr.guard, "reason": gr.reason})
+        _sink({"type": "reply", "content": SAFE_FALLBACK})
+        _sink({"type": "metadata", "intent": "blocked", "confidence": 1.0,
+               "requires_human": False, "follow_up_question": None})
         return "blocked"
 
-    def _normal_flow(sink) -> str:
-        """正常调用 Agent，并对输出跑护栏。返回 intent。"""
-        from app.agent.consent import consent_scope, RISK_ACTIONS
-        with consent_scope(RISK_ACTIONS if confirm else frozenset()):
+    def _normal_flow(_sink) -> str:
+        with consent_scope(granted):
             result = agent.chat(user_input)
         reply = result.reply
         if guard_pipeline is not None:
             reply, out_results = guard_pipeline.check_output(reply)
             for gr in out_results:
-                sink({"type": "guard", "stage": "output", "action": gr.action,
-                      "guard": gr.guard, "reason": gr.reason})
-        sink({"type": "reply", "content": reply})
-        sink({"type": "metadata", "intent": result.intent.value,
-              "confidence": result.confidence,
-              "requires_human": result.requires_human,
-              "follow_up_question": result.follow_up_question})
+                _sink({"type": "guard", "stage": "output", "action": gr.action,
+                       "guard": gr.guard, "reason": gr.reason})
+        _sink({"type": "reply", "content": reply})
+        _sink({"type": "metadata", "intent": result.intent.value,
+               "confidence": result.confidence,
+               "requires_human": result.requires_human,
+               "follow_up_question": result.follow_up_question})
         if hitl is not None:
             reasons = hitl.evaluate(result.intent.value, result.confidence,
                                     result.requires_human, user_input=user_input)
@@ -47,50 +53,36 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                 hid = hitl.escalate(session_id, user_input, reply,
                                     result.intent.value, result.confidence,
                                     reasons, recent_context=recent)
-                sink({"type": "handoff", "reasons": reasons, "handoff_id": hid})
+                _sink({"type": "handoff", "reasons": reasons, "handoff_id": hid})
         return result.intent.value
 
-    def _drive(sink) -> str:
-        """返回 intent 字符串；抛错时上层处理。"""
+    def _drive(_sink) -> str:
         if guard_pipeline is not None:
             gin = guard_pipeline.check_input(user_input)
             if gin.action == "block":
-                return _blocked_flow(sink, gin)
-        return _normal_flow(sink)
+                return _blocked_flow(_sink, gin)
+        return _normal_flow(_sink)
 
     def worker():
-        if tracer is None:
-            agent.event_sink = q.put
-            try:
-                _drive(q.put)
-            except Exception as e:  # noqa: BLE001
-                q.put({"type": "error", "message": str(e)})
-            finally:
-                agent.event_sink = None
-                q.put(_SENTINEL)
-            return
-
-        from app.observability.client_proxy import TracingClient
-
-        def sink(ev):
-            tracer.on_event(ev)
-            q.put(ev)
-
         real_client = getattr(agent, "client", None)
+        agent.event_sink = sink
         try:
-            with tracer.start_trace(session_id, user_input) as trace:
-                agent.event_sink = sink
-                if real_client is not None:
-                    agent.client = TracingClient(real_client, tracer)
-                try:
-                    trace.intent = _drive(sink)
-                finally:
-                    agent.event_sink = None
+            if tracer is None:
+                _drive(sink)
+            else:
+                from app.observability.client_proxy import TracingClient
+                with tracer.start_trace(session_id, user_input) as trace:
                     if real_client is not None:
-                        agent.client = real_client
+                        agent.client = TracingClient(real_client, tracer)
+                    try:
+                        trace.intent = _drive(sink)
+                    finally:
+                        if real_client is not None:
+                            agent.client = real_client
         except Exception as e:  # noqa: BLE001
             q.put({"type": "error", "message": str(e)})
         finally:
+            agent.event_sink = None
             q.put(_SENTINEL)
 
     threading.Thread(target=worker, daemon=True).start()
