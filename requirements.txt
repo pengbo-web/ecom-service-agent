@@ -7,3 +7,4 @@ chromadb>=0.5.0
 fastapi>=0.110.0
 uvicorn>=0.29.0
 httpx>=0.27.0
+pyyaml>=6.0        # Skill frontmatter 解析（yaml.safe_load，支持嵌套/列表/多行）

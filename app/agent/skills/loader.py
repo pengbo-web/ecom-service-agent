@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import yaml
+
 
 @dataclass
 class SkillMeta:
@@ -33,29 +35,19 @@ class SkillMeta:
 
 
 def _parse_frontmatter(content: str) -> dict:
-    """解析 YAML frontmatter（简单正则，避免 PyYAML 依赖）。"""
+    """解析 YAML frontmatter（yaml.safe_load，支持嵌套/列表/多行/引号）。
+
+    解析失败（非法 YAML / 非映射）一律返回 {}，让单个坏 SKILL.md 被跳过，
+    而不是拖垮整个目录扫描或误解析。
+    """
     match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
     if not match:
         return {}
-
-    result = {}
-    current_key = None
-    current_value_lines: list[str] = []
-
-    for line in match.group(1).strip().splitlines():
-        if ":" in line and not line.startswith(" "):
-            if current_key is not None:
-                result[current_key] = " ".join(current_value_lines).strip()
-            key, _, value = line.partition(":")
-            current_key = key.strip()
-            current_value_lines = [value.strip()] if value.strip() else []
-        elif current_key is not None:
-            current_value_lines.append(line.strip())
-
-    if current_key is not None:
-        result[current_key] = " ".join(current_value_lines).strip()
-
-    return result
+    try:
+        data = yaml.safe_load(match.group(1))
+    except yaml.YAMLError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _parse_body(content: str) -> str:
@@ -92,8 +84,8 @@ class SkillManager:
             content = skill_file.read_text(encoding="utf-8")
             meta = _parse_frontmatter(content)
 
-            name = meta.get("name", "")
-            description = meta.get("description", "")
+            name = str(meta.get("name") or "").strip()
+            description = str(meta.get("description") or "").strip()
             if not name or not description:
                 continue
 

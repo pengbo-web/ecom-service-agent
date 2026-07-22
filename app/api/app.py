@@ -151,6 +151,25 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return {"enabled": True, "curation": settings.memory_curation_enabled,
                 "count": len(facts), "facts": facts}
 
+    @app.post("/api/config/reload", dependencies=[Depends(admin_auth)])
+    def config_reload():
+        """热更新:重读 .env,把变化的行为字段应用到在运行的限流/成本/HITL 对象,免重启。"""
+        from app.config.hot_reload import reload_settings
+        changed = reload_settings()
+        applied = []
+        if "rate_limit_per_min" in changed:
+            rate_limiter.max = settings.rate_limit_per_min
+            applied.append("rate_limit_per_min")
+        if "daily_request_budget" in changed:
+            cost_guard.max = settings.daily_request_budget
+            applied.append("daily_request_budget")
+        if "hitl_confidence_threshold" in changed and hitl is not None:
+            hitl.confidence_threshold = settings.hitl_confidence_threshold
+            applied.append("hitl_confidence_threshold")
+        model_changed = [f for f in ("model_name", "fallback_model", "fallback_base_url") if f in changed]
+        note = "模型变更对新建会话即时生效(现有会话下次重建后生效)。" if model_changed else ""
+        return {"changed": changed, "applied": applied, "model_changed": model_changed, "note": note}
+
     @app.get("/api/memory", dependencies=[Depends(admin_auth)])
     def memory():
         """只读:从磁盘加载当前用户的长期记忆(反映真实存储,不触发巩固)。"""

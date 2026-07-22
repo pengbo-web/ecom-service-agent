@@ -272,17 +272,19 @@ sequenceDiagram
 
 ---
 
-## Phase 7 — 小改进  ⭐
+## Phase 7 — 小改进  ⭐  ✅(已完成 2026-07-22)
 
-**7a. Skill frontmatter 解析健壮性**
-- 改 `app/agent/skills/loader.py::_parse_frontmatter(:35)`:手写正则 → `yaml.safe_load`(移植 `skills.py:250`)。当前只认扁平 `key: value`,遇嵌套/多行会崩。
-- 需在 `requirements.txt` 加 `pyyaml`(或确认已随 fastapi 传入)。
-- 可选:frontmatter 加 `requires.env`,启动检测缺失内部 key,不可用技能标灰 + 原因(移植 `skills.py:144-214`)。
+**7a. Skill frontmatter 解析健壮性 ✅**
+- `app/agent/skills/loader.py::_parse_frontmatter`:手写正则 → `yaml.safe_load`,支持嵌套/列表/多行/引号;非法 YAML 或非映射一律返回 `{}`,坏 SKILL.md 被 `_discover` 跳过而非拖垮整个扫描。`_discover` 对 name/description 做 `str().strip()` 兜底。
+- `requirements.txt` 加 `pyyaml>=6.0`(实际已随依赖传入 6.0.3)。
+- 测试:`tests/test_skill_frontmatter.py`(扁平/嵌套/列表/多行/带冒号引号值/坏YAML/非映射/body 提取/坏 skill 跳过)。
 
-**7b. 配置签名式热更新**
-- 给 `app/config/` 加"配置签名"函数 + 惰性比对:每次取 runtime 时比对影响行为字段(`hitl_confidence_threshold`/`rate_limit_per_min`/主备模型),变了才重建对象——线上调阈值/切模型免重启(移植 `config/loader.py` 思路,不 watch 文件)。
+**7b. 配置签名式热更新 ✅**
+- `app/config/hot_reload.py`:`config_signature()` + `reload_settings(fresh=None)`——重读 .env,只更新白名单热更字段(`rate_limit_per_min`/`daily_request_budget`/`hitl_confidence_threshold`/`model_name`/`fallback_model`/`fallback_base_url`),返回变化字段名;`fresh` 可注入便于测试。
+- `POST /api/config/reload`(admin):把变化应用到在运行的 `RateLimiter.max`/`CostGuard.max`/`HitlManager.confidence_threshold`;模型变更对新建会话即时生效。改 .env 后调一次即生效,免重启进程。不 watch 文件、由显式触发驱动。
+- 测试:`tests/test_config_hot_reload.py`(签名覆盖/检测并应用/无变化空列表/端点应用到限流器)。
 
-**工作量**:各 ~0.5 人日。
+全量离线 263 绿(+13)。
 
 ---
 
