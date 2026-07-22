@@ -22,6 +22,7 @@ export function AppShell({ view, onView, onReset, children }: {
         <div className="flex items-center gap-2">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground font-bold">夕</div>
           <div className="text-sm font-semibold">并夕夕 · 小夕</div>
+          <span className="rounded bg-emerald-500 px-1.5 py-0.5 text-[10px] font-bold text-white" title="构建版本:用户隔离+历史回显">v2·隔离版</span>
         </div>
         <nav className="flex gap-1">
           {TABS.map((t) => (
