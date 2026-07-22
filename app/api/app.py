@@ -251,7 +251,9 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     def _serve_spa() -> HTMLResponse:
         if _spa_index.exists():
-            return HTMLResponse(_spa_index.read_text(encoding="utf-8"))
+            # 入口 HTML 不缓存,确保重新构建后浏览器立刻拿到新包(哈希化的 assets 仍可长缓存)
+            return HTMLResponse(_spa_index.read_text(encoding="utf-8"),
+                                headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
         return HTMLResponse(
             "<h1>前端未构建</h1><p>请先执行：cd webui &amp;&amp; npm install &amp;&amp; npm run build</p>",
             status_code=503,
