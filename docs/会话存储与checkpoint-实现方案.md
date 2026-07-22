@@ -1,134 +1,154 @@
-# 会话存储抽象 + 步级 Checkpoint — 实现方案
+# 会话存储(Redis)+ 步级 Checkpoint — 技术方案
 
-> 对应总方案 P2 + 存储抽象。目标:①热会话上下文**存储介质可插拔**(单机本地文件 / 生产 Redis 一行切换);②**步级 checkpoint**做到"进程中途崩溃不丢上下文、确认前重启不丢挂起动作";③补齐 nanobot 式的**有界 LRU 缓存**与**优雅停机 fsync**。
-> 原则:单机 demo 用本地实现真实跑通,Redis 作为可插拔实现"留好口子",不为单机强上重依赖。
+> **目标**:以 **Redis** 作为热会话上下文存储(快、可共享、带 TTL),配合**步级 checkpoint** 实现"进程/实例中途崩溃不丢上下文、确认前重启不丢挂起动作",并支持**多实例横向扩展**。
+> **本地可跑**:开发用 Docker 起 Redis;离线测试用 `fakeredis`(内存假实现,不需真服务、不触网)。保留 `SessionStore` 抽象,`file` 仅作降级/极简本地用。
 
 ---
 
-## 1. 现状与问题
+## 1. 为什么是 Redis + checkpoint(而非本地文件)
 
-| 现状 | 问题 |
-|---|---|
-| 会话上下文在 `EcomAgent.raw_messages`(内存)+ 每**回合末** `save_session` 到 `app/sessions/api/{sid}.json` | ReAct **回合中途崩溃 → 本轮丢失** |
-| `SessionManager._agents` dict 缓存,无上限 | 高并发多会话**内存无界** |
-| `PendingActionStore` 纯内存 | **确认前重启 → 挂起动作丢失**,用户要重发 |
-| 存储写死本地 JSON | 多实例横向扩展时无法共享(需 Redis/共享存储) |
-| 无 fsync | 网络盘/优雅停机时最新写可能丢 |
+| 能力 | 本地文件 + 进程内缓存 | **Redis + checkpoint** |
+|---|---|---|
+| 多实例共享热会话 | ❌ 请求打到别的实例就断上下文 | ✅ 所有实例读同一份 |
+| 会话过期回收 | 需自建 reaper | ✅ 原生 TTL |
+| 读写延迟 | 磁盘 | ✅ 内存级 |
+| 崩溃/重启恢复 | 回合末才落盘,中途丢 | ✅ 步级 checkpoint,任意实例可恢复 |
+| 并发安全(同会话) | 进程内 `threading.Lock`(仅单实例有效) | ✅ **分布式锁**(跨实例) |
+| 持久化 | 文件即持久 | Redis **AOF** 持久化 + 冷归档 |
 
-## 2. 总体设计
+结论:面向"生产级、可横向扩展"的目标,**Redis 是热会话的正确介质**;checkpoint 解决"崩溃恢复粒度";两者配合,任意实例都能从 Redis 恢复被中断的会话。
+
+## 2. 总体架构
 
 ```
-SessionManager(有界 LRU + weakref 溢出)
-   │  get_or_create / save / checkpoint
-   ▼
-SessionStore(抽象接口)
-   ├── FileSessionStore   ← 默认(单机):原子 tmp+replace,可选 fsync
-   └── RedisSessionStore  ← 生产(多实例):hot key + TTL,可插拔
+       多实例(N 个 app 进程,LB 后)
+   inst-A        inst-B        inst-C
+      \            |            /
+       \           |           /
+        ▼          ▼          ▼
+     ┌─────────────────────────────┐
+     │            Redis            │  ← 热会话上下文 + 步级 checkpoint + 分布式锁 + 挂起动作
+     │  sess:{id}(state, TTL)      │     AOF 持久化(everysec)
+     │  lock:{id}(SET NX PX)       │
+     └─────────────────────────────┘
+                    │ 会话结束/空闲(异步)
+                    ▼
+        冷归档:SQLite/DB/对象存储(长期留存、审计、离线分析)
 ```
 
-四块改动:**(A) SessionStore 抽象 + FileSessionStore**、**(B) 有界 LRU 缓存**、**(C) 步级 checkpoint + 恢复**、**(D) 挂起动作持久化**;**(E) Redis 实现**与**(F) 优雅停机 fsync** 为可选增强。
+## 3. 数据模型(Redis Key 设计)
 
-## 3. 接口设计
+| Key | 类型 | 内容 | TTL |
+|---|---|---|---|
+| `sess:{session_id}` | String(JSON) | `SessionState`:messages / summary / short_term_memory / **status** / **step_seq** / **pending** / updated_at | `session_ttl`(默认 3600s,每次访问续期) |
+| `lock:{session_id}` | String | 持有者 token(`SET NX PX`) | 锁超时(默认 30s) |
 
+`SessionState`(与介质无关的统一结构):
 ```python
-# app/session/store.py(新)
 class SessionState(TypedDict):
     version: int
     messages: list[dict]
     summary: str | None
     short_term_memory: dict | None
     status: str            # "complete" | "in_flight"
-    step_seq: int          # 本回合已 checkpoint 的步数(崩溃定位)
-    pending: dict | None   # 挂起的待确认动作(action/tool/args/message)
+    step_seq: int          # 本回合已 checkpoint 的工具步数
+    pending: dict | None   # 挂起待确认动作(action/tool/args/message)
     updated_at: str
+```
 
+## 4. 组件设计
+
+### 4.1 SessionStore 抽象 + RedisSessionStore
+```python
+# app/session/store.py
 class SessionStore(Protocol):
     def load(self, session_id: str) -> SessionState | None: ...
-    def save(self, session_id: str, state: SessionState, *, fsync: bool = False) -> None: ...
+    def save(self, session_id: str, state: SessionState) -> None: ...   # SETEX 带 TTL
     def delete(self, session_id: str) -> None: ...
+
+class RedisSessionStore:
+    def __init__(self, url: str, ttl: int): self._r = redis.from_url(url); self._ttl = ttl
+    def load(self, sid):  raw = self._r.get(f"sess:{sid}"); return json.loads(raw) if raw else None
+    def save(self, sid, state): self._r.set(f"sess:{sid}", json.dumps(state, ensure_ascii=False), ex=self._ttl)
+    def delete(self, sid): self._r.delete(f"sess:{sid}")
 ```
+- 工厂 `get_session_store()` 据 `settings.session_store_backend` 返回 `RedisSessionStore`(生产)/ `FakeRedisSessionStore`(测试)/ `FileSessionStore`(降级)。
+- `EcomAgent` 的 load/save 改为走 store(不再直接 `save_session` 到本地文件)。
 
-`storage.save_session/load_session` 收敛为 `FileSessionStore` 的实现(保留原子写),对外统一走 `SessionStore`。工厂 `get_session_store()` 据 `settings.session_store_backend`("file"|"redis")返回实现。
+### 4.2 分布式会话锁(多实例正确性,关键)
+单实例的 `threading.Lock` 在多实例下失效——两个实例可能同时处理同一会话、互相覆盖 Redis 状态。改用 **Redis 分布式锁**:
+```python
+# 获取:SET lock:{sid} <token> NX PX <lock_ms>   成功才处理
+# 释放:Lua 校验 token 再 DEL(防误删别人的锁)
+```
+- `/api/chat` 处理某会话前先抢锁,拿不到 → 排队/短暂重试/提示"处理中"。
+- 锁带超时(防实例崩溃后死锁);长回合可续租(watchdog)。
+- 单实例部署时锁退化为本地即可(可用同一接口,Redis 版天然兼容)。
 
-## 4. 数据模型变化(session 文件)
-
-在现有 `{version, messages, summary, short_term_memory}` 基础上加:
-- `status`:`in_flight`(回合进行中)/ `complete`(回合结束)。
-- `step_seq`:本回合内已完成的工具步数(恢复时定位)。
-- `pending`:挂起的待确认动作(替代纯内存的 PendingActionStore,或双写)。
-
-向后兼容:老文件无这些字段 → 读时默认 `status=complete, step_seq=0, pending=None`。
-
-## 5. 步级 Checkpoint 与恢复语义(核心)
-
-### 写入时机
-- **回合开始**:先持久化用户消息 + `status=in_flight, step_seq=0`(借 nanobot `_persist_user_message_early`)。
-- **每个工具步后**(`_execute_tool_call` 末尾):把最新 raw_messages + `step_seq+=1` 增量落盘(仍整文件原子重写,文件小、代价可忽略)。
+### 4.3 步级 Checkpoint(写入时机)
+- **回合开始**:持久化用户消息 + `status=in_flight, step_seq=0` → `save` 到 Redis。
+- **每个工具步后**(`_execute_tool_call` 末尾):最新 messages + `step_seq+=1` → `save`(Redis SET,内存级、极快,步级落盘无压力)。
 - **回合结束**:写结构化回复 + `status=complete`,清 `pending`(若已落地)。
+- Redis 开 **AOF(appendfsync everysec)**:即使 Redis 进程崩溃,最多丢 1s 写,checkpoint 基本不丢。
 
-### 恢复语义(分两级,重点讲清幂等)
+### 4.4 恢复语义(核心,分两级)
+装载会话时若 `status=in_flight`(说明上次回合被中断):
 
-**Level 1 — 持久化(推荐,安全,先做)**
-- 装载时若 `status=in_flight`:**上下文完整恢复**(到最后一次 checkpoint),解决"重启丢会话"。
-- **不自动重放工具**:对崩溃时"有 tool_call 无 tool_result"的孤儿调用,用现有 `sanitize_tool_pairs` 丢弃 → 交下一轮由模型/用户重新决定。
-- **挂起动作恢复**:`pending` 已落盘 → 用户"确认"仍能触发服务端重放(不丢)。
-- **为什么不自动重放**:写操作(退款/取消)可能已执行但结果没落盘,盲目重放会**双重执行**。安全第一:只保证不丢上下文/不丢挂起,不赌工具重放。
+**Level 1 — 持久化恢复(先做,安全)**
+- **上下文完整恢复**到最后一次 checkpoint(任意实例都能从 Redis 读到)。
+- **不自动重放工具**:崩溃时"有 tool_call 无 tool_result"的孤儿调用,用现有 `sanitize_tool_pairs` 清除 → 交下一轮重新决定。
+- **挂起动作恢复**:`pending` 在 Redis state 里 → 用户"确认"仍触发服务端重放(跨实例也不丢)。
+- 理由:写操作(退款/取消)可能已执行但结果没落盘,盲目重放会**双重执行**;安全第一。
 
-**Level 2 — 自动续跑(可选,高阶)**
-- 给写工具加**幂等键** `idempotency_key = hash(session_id, step_seq, tool, args)`:执行前查"该键是否已应用",已应用则直接返回上次结果(不重复副作用)。
-- 有幂等键后,才可安全**自动续跑**被中断的回合(从 `step_seq` 继续)。
-- 依赖:DB 加 `applied_actions(idempotency_key, result, ts)` 表。工作量更大,作为后续增强。
+**Level 2 — 自动续跑(可选高阶)**
+- 写工具加**幂等键** `idempotency_key = hash(session_id, step_seq, tool, args)`,执行前查 Redis `applied:{key}` 是否已应用,已应用直接返回上次结果(不重复副作用)。
+- 有幂等键后才安全**从 `step_seq` 自动续跑**被中断的回合。
 
-## 6. 有界 LRU 缓存(借 nanobot)
+### 4.5 挂起动作持久化
+`PendingActionStore` 不再纯内存:挂起动作写进 `SessionState.pending`(随 Redis 落盘)。任意实例、重启后,用户"确认"都能读到并重放。
 
-`SessionManager._agents` 改为:
-- `_cache: OrderedDict`(强引用,LRU,上限 `settings.session_cache_max`,默认 200),超限淘汰最久未用;
-- `_overflow: WeakValueDictionary`(弱引用溢出,活跃调用方持有的不丢、闲置的可回收)。
-- 淘汰前确保已 `save`(不丢盘);与现有 idle-reaper 协同(reaper 负责巩固+回收,LRU 负责内存上限)。
+### 4.6 冷归档(长期留存/审计)
+Redis 是热存储(带 TTL 会过期)。会话结束/空闲时,异步把完整会话 + 长期记忆归档到 **SQLite/DB/对象存储**(审计、离线分析、数据飞轮用)。热读走 Redis,冷读走归档。
 
-## 7. Redis 实现(可选,生产,留口子)
+## 5. 本地开发 / 测试路径(保证单机能跑、测试不触网)
 
-`RedisSessionStore`(`redis-py`,`import` 守卫,缺库时报清晰错误):
-- key `sess:{session_id}` 存 `SessionState`(JSON),`SETEX` 带 TTL(`settings.session_ttl`,默认 3600s)。
-- 冷归档:巩固/结束时可同时落 DB/对象存储(附录,非本方案)。
-- 切换:`SESSION_STORE_BACKEND=redis` + `REDIS_URL` 即启用,业务代码零改动。
+- **本地运行**:`docker-compose` 起一个 Redis(附 compose 片段);`REDIS_URL=redis://localhost:6379/0`。
+- **离线测试**:用 **`fakeredis`**(纯内存假实现)注入 `RedisSessionStore`,单测无需真 Redis、不触网,全量离线套件照常绿。
+- **降级**:未配 Redis 时可 `SESSION_STORE_BACKEND=file` 退回本地文件(极简本地/无 Docker 环境用)。
 
-## 8. 优雅停机 fsync(借 nanobot)
-
-`FileSessionStore.save(fsync=True)`:写完 `flush()+os.fsync()`,并 fsync 父目录(Windows 上 `PermissionError` 时跳过,NTFS 元数据同步写)。在进程 `SIGTERM`/FastAPI `shutdown` 事件里对所有活跃会话 `save(fsync=True)`——防网络盘/优雅停机丢最新写。
-
-## 9. 配置(settings)
+## 6. 配置(settings)
 
 ```
-session_store_backend: str = "file"     # file | redis
-session_cache_max: int = 200            # 内存强缓存会话上限(LRU)
-session_ttl: int = 3600                 # redis 会话过期(秒)
-redis_url: str = ""                     # redis 连接串
+session_store_backend: str = "redis"    # redis | file | fake(测试)
+redis_url: str = "redis://localhost:6379/0"
+session_ttl: int = 3600                 # 热会话过期(秒),每次访问续期
+session_lock_ms: int = 30000            # 分布式锁超时
 checkpoint_enabled: bool = True         # 步级 checkpoint 开关
+archive_enabled: bool = True            # 会话结束冷归档
 ```
+`requirements.txt` 加 `redis>=5.0`;测试依赖 `fakeredis`。
 
-## 10. 分阶段任务(每阶段独立提交、离线全绿)
+## 7. 分阶段任务(每阶段独立提交、离线全绿)
 
 | 阶段 | 内容 | 改动文件 | 验收 | 工作量 |
 |---|---|---|---|---|
-| **C1** | SessionStore 抽象 + FileSessionStore(收敛现有 storage)| 新 `app/session/store.py`;`storage.py` 复用;`chat.py`/`session_manager.py` 改走 store | 行为等价,全量离线绿 | 1d |
-| **C2** | 有界 LRU + weakref 缓存 | `session_manager.py` | 超上限淘汰且淘汰前落盘;单测(注入小上限)| 1d |
-| **C3** | 步级 checkpoint + Level 1 恢复 | `chat.py`(每步落盘+in_flight)、`store.py`(字段)、`session_manager.py`(装载识别 in_flight)| 模拟回合中途 kill,重启后上下文不丢;孤儿 tool_call 被清;单测 | 2d |
-| **C4** | 挂起动作持久化 | `pending.py`(双写 store)、`store.py` | 确认前重启,重启后"确认"仍能重放;单测 | 1d |
-| **C5** | 优雅停机 fsync | `store.py`、`run_api.py`(shutdown 钩子)| SIGTERM 时活跃会话 fsync 落盘 | 0.5d |
-| **C6**(可选)| RedisSessionStore + 配置切换 | 新 `RedisSessionStore`、settings | `SESSION_STORE_BACKEND=redis` 可跑(需本地 redis);file 默认不受影响 | 1.5d |
-| **C7**(可选高阶)| 幂等键 + Level 2 自动续跑 | 写工具、DB `applied_actions`、`chat.py` 续跑 | 中断回合自动续跑且不双重执行;单测 | 2.5d |
+| **R1** | SessionStore 抽象 + RedisSessionStore + 工厂 + fakeredis 测试 | 新 `app/session/store.py`;`chat.py`/`session_manager.py` 走 store;settings | fakeredis 读写往返;`chat` 读写会话经 Redis;全量离线绿 | 1.5d |
+| **R2** | 步级 checkpoint + L1 恢复 | `chat.py`(每步 save+in_flight)、`store.py` | 模拟回合中途"崩溃"(留 in_flight 态)→ 新建 store 装载上下文不丢、孤儿 tool_call 被清;单测 | 2d |
+| **R3** | 挂起动作持久化(入 SessionState.pending) | `pending.py`、`streaming.py`、`store.py` | 确认前"重启"(重建 store)→ "确认"仍能重放;单测 | 1d |
+| **R4** | 分布式会话锁(Redis SET NX PX + Lua 释放) | 新 `app/session/lock.py`;`app.py` 抢锁 | 并发两次同会话请求被串行化;锁超时释放;fakeredis 单测 | 1.5d |
+| **R5** | 冷归档 + Redis AOF 说明 + docker-compose | 归档器、`docker-compose.yml`、docs | 会话结束落归档;文档给 AOF 配置与 compose | 1d |
+| **R6**(可选高阶) | 幂等键 + L2 自动续跑 | 写工具、Redis `applied:{key}`、`chat.py` | 中断回合自动续跑且不双重执行;单测 | 2.5d |
 
-**核心(C1–C5)约 5.5 人日**;可选(C6/C7)按需。
+**核心 R1–R5 约 7 人日**;R6 可选。
 
-## 11. 测试策略
+## 8. 测试策略(全部 fakeredis / 临时目录 / 可注入时钟,不触网)
 
-- **C1**:store 读写往返、原子写、老文件兼容。
-- **C2**:注入 `session_cache_max=2`,访问 3 个会话 → 最久的被淘汰且已落盘、再访问能从盘重载。
-- **C3**:构造"回合中途"状态(in_flight + 半截 messages)→ 装载后上下文完整、孤儿 tool_call 被 `sanitize_tool_pairs` 清除;`step_seq` 正确。
-- **C4**:remember 挂起 → 重建 store → get 仍在 → 重放成功清除。
-- 全部用**可注入时钟/临时目录/fake**,不触网。
+- **R1**:store CRUD 往返、TTL 参数、老状态兼容;`EcomAgent` 经 store 读写。
+- **R2**:构造 in_flight + 半截 messages 的 Redis state → 装载后上下文完整、`step_seq` 正确、孤儿 tool_call 被 `sanitize_tool_pairs` 清。
+- **R3**:remember 挂起 → 重建 store(模拟重启)→ pending 仍在 → 重放清除。
+- **R4**:两个"实例"抢同一 `lock:{sid}` → 只有一个成功;释放后另一个可得;超时自动释放。
+- 不引入真 Redis 到 CI;`fakeredis` 覆盖行为。
 
-## 12. 面试点
+## 9. 面试点
 
-> "会话存储我做了 `SessionStore` 抽象:单机用本地原子文件 + 有界 LRU/weakref 缓存(等价 nanobot),生产多实例一行切 Redis(hot key + TTL)。可中断可恢复用**步级 checkpoint**——每个工具步落盘 + `in_flight` 标记,重启后上下文与挂起动作都不丢;对写操作我**不盲目重放**(防双重执行),Level 2 用**幂等键**才安全自动续跑。优雅停机走 fsync 防网络盘丢写。介质、缓存、持久化粒度三者解耦。"
+> "热会话上下文我放 **Redis**:`sess:{id}` 存状态带 TTL 自动过期,多实例共享——横向扩展时任意实例都能接续同一会话。可中断可恢复用**步级 checkpoint**:每个工具步写回 Redis + `in_flight/step_seq` 标记,配合 Redis AOF 持久化,崩溃后任意实例从 Redis 恢复;写操作**不盲目重放**(防双重执行),Level 2 用幂等键才自动续跑。多实例并发用 **Redis 分布式锁**(SET NX PX + Lua 安全释放)替代进程内锁。热存 Redis、冷归档到 DB。本地用 Docker Redis、测试用 fakeredis,单机可跑、CI 不触网。介质 / 缓存 / 持久化粒度 / 并发控制四者解耦。"
