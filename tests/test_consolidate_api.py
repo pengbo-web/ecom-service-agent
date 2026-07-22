@@ -40,7 +40,7 @@ class NoMemAgent:
 
 
 def test_consolidate_returns_curated_facts():
-    mgr = SessionManager(agent_factory=lambda p: FakeAgent(p))
+    mgr = SessionManager(agent_factory=lambda p, u=None: FakeAgent(p))
     client = TestClient(create_app(session_manager=mgr))
     r = client.post("/api/session/s1/consolidate")
     assert r.status_code == 200
@@ -54,7 +54,7 @@ def test_consolidate_returns_curated_facts():
 
 
 def test_consolidate_when_memory_disabled():
-    mgr = SessionManager(agent_factory=lambda p: NoMemAgent(p))
+    mgr = SessionManager(agent_factory=lambda p, u=None: NoMemAgent(p))
     client = TestClient(create_app(session_manager=mgr))
     body = client.post("/api/session/s2/consolidate").json()
     assert body == {"enabled": False, "count": 0, "facts": []}

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useChatStream } from "@/hooks/useChatStream";
 import type { SSEEvent } from "@/lib/sse";
 import { MessageBubble } from "@/components/MessageBubble";
@@ -8,21 +8,39 @@ import { Composer } from "@/components/Composer";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { consolidateMemory, type ConsolidateResult } from "@/lib/api";
+import { consolidateMemory, getHistory, type ConsolidateResult } from "@/lib/api";
 
 type Turn = { id: number; userText: string; activity: SSEEvent[]; reply?: string; meta?: Meta; handoff?: string[] };
 
-export function ChatView({ sessionId }: { sessionId: string }) {
+export function ChatView({ sessionId, userId, onUserId }: {
+  sessionId: string; userId: string; onUserId: (uid: string) => void;
+}) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [mem, setMem] = useState<ConsolidateResult | null>(null);
   const [memBusy, setMemBusy] = useState(false);
   const [memErr, setMemErr] = useState<string | null>(null);
+  const [uidDraft, setUidDraft] = useState(userId);
   const idRef = useRef(0);
   const cur = useRef<number>(-1);
 
+  // 挂载/切会话时拉取已落盘历史,重启或刷新后聊天记录不再空白
+  useEffect(() => {
+    let cancelled = false;
+    getHistory(sessionId).then((bubbles) => {
+      if (cancelled) return;
+      const restored: Turn[] = [];
+      for (const b of bubbles) {
+        if (b.role === "user") restored.push({ id: ++idRef.current, userText: b.content, activity: [] });
+        else if (restored.length) restored[restored.length - 1].reply = b.content;
+      }
+      setTurns(restored);
+    });
+    return () => { cancelled = true; };
+  }, [sessionId]);
+
   async function onConsolidate() {
     setMemBusy(true); setMemErr(null);
-    try { setMem(await consolidateMemory(sessionId)); }
+    try { setMem(await consolidateMemory(sessionId, userId)); }
     catch (e) { setMemErr(String(e)); }
     finally { setMemBusy(false); }
   }
@@ -32,6 +50,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
 
   const { send, streaming } = useChatStream({
     sessionId,
+    userId,
     onEvent: (e) => {
       if (["thought", "tool_call", "tool_result", "guard"].includes(e.type)) patch((t) => ({ ...t, activity: [...t.activity, e] }));
       else if (e.type === "reply") patch((t) => ({ ...t, reply: e.content }));
@@ -51,6 +70,15 @@ export function ChatView({ sessionId }: { sessionId: string }) {
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b bg-card/50 px-6 py-1.5">
+        <span className="text-xs text-muted-foreground">用户</span>
+        <input
+          className="h-7 w-32 rounded border bg-background px-2 text-xs"
+          value={uidDraft}
+          title="用户身份:长期记忆按此隔离(一人一档)。回车切换。"
+          onChange={(e) => setUidDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") onUserId(uidDraft); }}
+          onBlur={() => onUserId(uidDraft)}
+        />
         <span className="text-xs text-muted-foreground">会话 {sessionId}</span>
         <Button variant="outline" size="sm" className="ml-auto h-7 text-xs"
                 disabled={memBusy} onClick={onConsolidate}>

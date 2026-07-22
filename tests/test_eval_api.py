@@ -19,7 +19,7 @@ def _client(tmp_path):
         eval_fn=lambda: {"summary": {"pass_rate": 0.9, "avg_process_score": None,
                                      "avg_result_score": 0.8}},
         baseline_path=tmp_path / "b.json")
-    mgr = SessionManager(agent_factory=lambda p: None)
+    mgr = SessionManager(agent_factory=lambda p, u=None: None)
     app = create_app(session_manager=mgr, trace_store=store, hitl=None, eval_runner=runner)
     return TestClient(app)
 

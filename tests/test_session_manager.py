@@ -13,7 +13,7 @@ class FakeAgent:
 
 
 def _mgr():
-    return SessionManager(agent_factory=lambda p: FakeAgent(p))
+    return SessionManager(agent_factory=lambda p, u=None: FakeAgent(p))
 
 
 def test_same_session_returns_same_instance():
@@ -69,7 +69,7 @@ def test_reset_clears_bargain_state(tmp_path):
     set_db(db)
     db.bump_bargain_state("s1", "P1", 900.0)
 
-    mgr = SessionManager(agent_factory=lambda p: FakeAgent(p), base_dir=str(tmp_path))
+    mgr = SessionManager(agent_factory=lambda p, u=None: FakeAgent(p), base_dir=str(tmp_path))
     mgr.get_or_create("s1")
     mgr.reset("s1")
     assert db.get_bargain_state("s1", "P1") is None

@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { splitSSEFrames, type SSEEvent } from "@/lib/sse";
 
-export function useChatStream(opts: { sessionId: string; onEvent: (e: SSEEvent) => void }) {
+export function useChatStream(opts: { sessionId: string; userId: string; onEvent: (e: SSEEvent) => void }) {
   const [streaming, setStreaming] = useState(false);
 
   const send = useCallback(async (message: string, confirm = false) => {
@@ -10,7 +10,7 @@ export function useChatStream(opts: { sessionId: string; onEvent: (e: SSEEvent) 
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: opts.sessionId, message, confirm }),
+        body: JSON.stringify({ session_id: opts.sessionId, message, confirm, user_id: opts.userId }),
       });
       if (!resp.ok || !resp.body) throw new Error("服务返回 " + resp.status);
       const reader = resp.body.getReader();

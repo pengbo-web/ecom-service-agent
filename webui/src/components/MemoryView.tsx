@@ -9,21 +9,21 @@ const CAT_LABEL: Record<string, string> = {
   identity: "身份", preference: "偏好", behavior: "行为", issue: "问题", other: "其他",
 };
 
-export function MemoryView({ sessionId }: { sessionId: string }) {
+export function MemoryView({ sessionId, userId }: { sessionId: string; userId: string }) {
   const [snap, setSnap] = useState<MemorySnapshot | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function load() {
     setErr(null);
-    try { setSnap(await getMemory()); }
+    try { setSnap(await getMemory(userId)); }
     catch (e) { setErr(String(e)); }
   }
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  useEffect(() => { load(); /* eslint-disable-next-line */ }, [userId]);
 
   async function consolidateNow() {
     setBusy(true); setErr(null);
-    try { await consolidateMemory(sessionId); await load(); }
+    try { await consolidateMemory(sessionId, userId); await load(); }
     catch (e) { setErr(String(e)); }
     finally { setBusy(false); }
   }

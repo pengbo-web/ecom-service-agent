@@ -26,7 +26,7 @@ describe("useChatStream", () => {
       'data: {"type":"reply","content":"你好"}\n\ndata: {"type":"metadata","intent":"greeting","confidence":0.9,"requires_human":false}\n\n',
       'data: {"type":"done"}\n\n',
     ])));
-    const { result } = renderHook(() => useChatStream({ sessionId: "s1", onEvent: (e) => events.push(e) }));
+    const { result } = renderHook(() => useChatStream({ sessionId: "s1", userId: "default", onEvent: (e) => events.push(e) }));
     await act(async () => { await result.current.send("在吗"); });
     await waitFor(() => expect(events.at(-1)?.type).toBe("done"));
     expect(events.map((e) => e.type)).toContain("reply");

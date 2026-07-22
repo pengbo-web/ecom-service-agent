@@ -47,7 +47,7 @@ class FakeAgent:
 
 def test_reload_endpoint_applies_to_rate_limiter(monkeypatch):
     monkeypatch.setenv("RATE_LIMIT_PER_MIN", str(getattr(settings, "rate_limit_per_min") + 50))
-    mgr = SessionManager(agent_factory=lambda p: FakeAgent(p))
+    mgr = SessionManager(agent_factory=lambda p, u=None: FakeAgent(p))
     client = TestClient(create_app(session_manager=mgr))
     body = client.post("/api/config/reload").json()
     assert "rate_limit_per_min" in body["changed"]

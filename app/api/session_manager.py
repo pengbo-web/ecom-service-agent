@@ -11,9 +11,10 @@ from pathlib import Path
 from typing import Callable, Optional
 
 
-def _default_factory(session_path: str):
+def _default_factory(session_path: str, user_id: str | None = None):
     from app.agent.chat import EcomAgent
-    return EcomAgent(session_path=session_path, session_id=Path(session_path).stem)
+    return EcomAgent(session_path=session_path, session_id=Path(session_path).stem,
+                     user_id=user_id)
 
 
 class SessionManager:
@@ -32,12 +33,18 @@ class SessionManager:
     def _session_path(self, session_id: str) -> str:
         return str(self._base_dir / f"{session_id}.json")
 
-    def get_or_create(self, session_id: str):
+    def get_or_create(self, session_id: str, user_id: str | None = None):
         with self._guard:
             if session_id not in self._agents:
-                self._agents[session_id] = self._factory(self._session_path(session_id))
+                self._agents[session_id] = self._factory(self._session_path(session_id), user_id)
             self._last_active[session_id] = self._clock()   # 任何访问都算活跃
             return self._agents[session_id]
+
+    def peek_messages(self, session_id: str) -> list:
+        """只读取该会话已落盘的原始消息(不创建 agent),供历史回显。"""
+        from app.agent.storage import load_session
+        loaded = load_session(self._session_path(session_id))
+        return loaded["messages"] if loaded else []
 
     def get_lock(self, session_id: str) -> threading.Lock:
         with self._guard:

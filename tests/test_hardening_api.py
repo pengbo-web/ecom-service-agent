@@ -47,7 +47,7 @@ class _FakeAgent:
 
 def _client(tmp_path, **over):
     store = TraceStore(str(tmp_path / "tr.db")); store.init_schema()
-    mgr = SessionManager(agent_factory=lambda p: _FakeAgent(p))
+    mgr = SessionManager(agent_factory=lambda p, u=None: _FakeAgent(p))
     app = create_app(session_manager=mgr, trace_store=store, hitl=None, **over)
     return TestClient(app)
 

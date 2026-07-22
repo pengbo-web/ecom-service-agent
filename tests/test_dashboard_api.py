@@ -13,7 +13,7 @@ def _client(tmp_path):
         "t1", "s", "查订单", "order_query", 0.0, 0.2, 200.0, "ok", None,
         [Span("a", "t1", "tool:query_order", "tool", 0, 0.1, 100, True, 0, 0, {})],
     ))
-    mgr = SessionManager(agent_factory=lambda p: None)
+    mgr = SessionManager(agent_factory=lambda p, u=None: None)
     app = create_app(session_manager=mgr, trace_store=store)
     return TestClient(app)
 

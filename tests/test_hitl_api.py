@@ -30,7 +30,7 @@ def _client(tmp_path):
     q.add({"session_id": "s1", "intent": "complaint", "reasons": ["敏感意图"]})
     mm = ManualMode(3600)
     hitl = HitlManager(q, mm, 0.6)
-    mgr = SessionManager(agent_factory=lambda p: FakeAgent(p))
+    mgr = SessionManager(agent_factory=lambda p, u=None: FakeAgent(p))
     app = create_app(session_manager=mgr, trace_store=store, hitl=hitl)
     return TestClient(app), q, mm
 

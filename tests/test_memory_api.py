@@ -17,7 +17,7 @@ class FakeAgent:
 def _client(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "memory_dir", str(tmp_path))
     monkeypatch.setattr(settings, "memory_user_id", "default")
-    mgr = SessionManager(agent_factory=lambda p: FakeAgent(p))
+    mgr = SessionManager(agent_factory=lambda p, u=None: FakeAgent(p))
     return TestClient(create_app(session_manager=mgr))
 
 

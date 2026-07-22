@@ -5,14 +5,21 @@ import { DashboardView } from "@/components/DashboardView";
 import { SeatView } from "@/components/SeatView";
 import { EvalView } from "@/components/EvalView";
 import { MemoryView } from "@/components/MemoryView";
-import { adminFetch, getSessionId } from "@/lib/api";
+import { adminFetch, getSessionId, getUserId, setUserId } from "@/lib/api";
 
 export default function App() {
   const [view, setView] = useState<View>(
     typeof location !== "undefined" && location.pathname === "/dashboard" ? "dash" : "chat"
   );
   const [resetKey, setResetKey] = useState(0);
+  const [userId, setUid] = useState<string>(getUserId());
   const sessionId = getSessionId();
+
+  function onUserId(uid: string) {
+    const clean = uid.trim() || "default";
+    setUserId(clean);
+    setUid(clean);
+  }
 
   async function onReset() {
     await adminFetch("/api/session/reset", {
@@ -26,11 +33,11 @@ export default function App() {
 
   return (
     <AppShell view={view} onView={setView} onReset={onReset}>
-      {view === "chat" && <ChatView key={resetKey} sessionId={sessionId} />}
+      {view === "chat" && <ChatView key={resetKey + userId} sessionId={sessionId} userId={userId} onUserId={onUserId} />}
       {view === "dash" && <DashboardView sessionId={sessionId} />}
       {view === "seat" && <SeatView sessionId={sessionId} />}
       {view === "eval" && <EvalView />}
-      {view === "mem" && <MemoryView sessionId={sessionId} />}
+      {view === "mem" && <MemoryView sessionId={sessionId} userId={userId} />}
     </AppShell>
   );
 }

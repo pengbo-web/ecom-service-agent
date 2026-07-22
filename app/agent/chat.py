@@ -16,7 +16,8 @@ from app.agent.tools.bargain import set_current_session
 class EcomAgent:
     """电商客服 Agent —— 第八期：Skill 可复用能力模块"""
 
-    def __init__(self, session_path: Optional[str] = None, session_id: Optional[str] = None):
+    def __init__(self, session_path: Optional[str] = None, session_id: Optional[str] = None,
+                 user_id: Optional[str] = None):
         # 模型容错:启用时用主备熔断代理(memory/summarizer 复用本 client 自动继承)
         if settings.resilience_enabled:
             from app.resilience.factory import make_resilient_client
@@ -30,6 +31,7 @@ class EcomAgent:
         self.temperature = settings.temperature
         self.session_path = session_path or settings.session_path
         self.session_id = session_id
+        self.user_id = user_id or settings.memory_user_id   # 长期记忆按用户隔离
         self.history_threshold = settings.history_threshold
         self.history_keep_recent = settings.history_keep_recent
         self.max_react_steps = settings.max_react_steps
@@ -43,7 +45,7 @@ class EcomAgent:
         self.memory_manager = MemoryManager(
             client=self.client,
             model=self.model,
-            user_id=settings.memory_user_id,
+            user_id=self.user_id,
             memory_dir=settings.memory_dir,
             memory_enabled=settings.memory_enabled,
             max_ltm_facts=settings.max_ltm_facts,

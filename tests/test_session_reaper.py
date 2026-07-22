@@ -26,7 +26,7 @@ class Clock:
 
 def _mgr():
     clock = Clock()
-    return SessionManager(agent_factory=lambda p: FakeAgent(p), clock=clock), clock
+    return SessionManager(agent_factory=lambda p, u=None: FakeAgent(p), clock=clock), clock
 
 
 def test_active_session_not_reaped():

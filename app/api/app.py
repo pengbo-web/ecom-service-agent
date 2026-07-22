@@ -110,7 +110,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
         if not cost_guard.allow():
             return _reply_stream("🛑 今日服务已达使用上限，请明天再来～")
 
-        agent = manager.get_or_create(req.session_id)
+        agent = manager.get_or_create(req.session_id, req.user_id)
         lock = manager.get_lock(req.session_id)
 
         def event_stream():
@@ -129,14 +129,20 @@ def create_app(session_manager: Optional[SessionManager] = None,
         manager.reset(req.session_id)
         return {"status": "reset"}
 
+    @app.get("/api/session/{session_id}/history")
+    def session_history(session_id: str):
+        """回显该会话已落盘的历史气泡(重启/刷新后聊天记录不再空白)。与 /api/chat 同等公开。"""
+        from app.api.history import reconstruct_bubbles
+        return {"session_id": session_id, "turns": reconstruct_bubbles(manager.peek_messages(session_id))}
+
     @app.post("/api/session/{session_id}/consolidate", dependencies=[Depends(admin_auth)])
-    def consolidate(session_id: str):
+    def consolidate(session_id: str, user_id: str = "default"):
         """把本会话对话巩固进长期记忆(触发 Phase 5 策展),并回传当前长期记忆事实。
 
         生产环境由空闲超时自动巩固(见 SessionManager.sweep/start_reaper);
         此端点是运维/演示用的手动触发,便于即时观察策展效果而不必等空闲 TTL。
         """
-        agent = manager.get_or_create(session_id)
+        agent = manager.get_or_create(session_id, user_id)
         mm = getattr(agent, "memory_manager", None)
         if mm is None or not getattr(mm, "memory_enabled", False):
             return {"enabled": False, "count": 0, "facts": []}
@@ -171,17 +177,18 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return {"changed": changed, "applied": applied, "model_changed": model_changed, "note": note}
 
     @app.get("/api/memory", dependencies=[Depends(admin_auth)])
-    def memory():
-        """只读:从磁盘加载当前用户的长期记忆(反映真实存储,不触发巩固)。"""
+    def memory(user_id: str = ""):
+        """只读:从磁盘加载指定用户的长期记忆(反映真实存储,不触发巩固)。"""
         from app.agent.memory.long_term import LongTermMemory
+        uid = user_id or settings.memory_user_id
         ltm = LongTermMemory(
-            user_id=settings.memory_user_id,
+            user_id=uid,
             memory_dir=settings.memory_dir,
             max_facts=settings.max_ltm_facts,
         )
         ltm.load()
         return {
-            "user_id": settings.memory_user_id,
+            "user_id": uid,
             "curation": settings.memory_curation_enabled,
             "count": len(ltm.facts),
             "facts": [
