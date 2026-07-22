@@ -74,12 +74,17 @@ export function ChatView({ sessionId, userId, onUserId }: {
         <input
           className="h-7 w-32 rounded border bg-background px-2 text-xs"
           value={uidDraft}
-          title="用户身份:长期记忆按此隔离(一人一档)。回车切换。"
+          placeholder="用户ID"
+          title="用户身份:长期记忆按此隔离(一人一档)。改完点「切换」或按回车。"
           onChange={(e) => setUidDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") onUserId(uidDraft); }}
-          onBlur={() => onUserId(uidDraft)}
+          onKeyDown={(e) => { if (e.key === "Enter" && uidDraft.trim() && uidDraft !== userId) onUserId(uidDraft); }}
         />
-        <span className="text-xs text-muted-foreground">会话 {sessionId}</span>
+        <Button variant="secondary" size="sm" className="h-7 text-xs"
+                disabled={!uidDraft.trim() || uidDraft === userId}
+                onClick={() => onUserId(uidDraft)}>
+          切换
+        </Button>
+        <span className="text-xs text-muted-foreground">当前:<b>{userId}</b> · 会话 {sessionId}</span>
         <Button variant="outline" size="sm" className="ml-auto h-7 text-xs"
                 disabled={memBusy} onClick={onConsolidate}>
           {memBusy ? "巩固中…" : "结束会话·巩固记忆"}
