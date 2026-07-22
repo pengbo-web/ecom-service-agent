@@ -8,8 +8,8 @@
 from contextlib import contextmanager
 from contextvars import ContextVar
 
-# 需要前置授权的风险动作
-RISK_ACTIONS = frozenset({"refund", "deal_close"})
+# 需要前置授权的风险动作(涉钱/不可逆/改重要信息)
+RISK_ACTIONS = frozenset({"refund", "deal_close", "cancel_order", "change_address"})
 
 _ALLOWED: ContextVar[frozenset] = ContextVar("consent_allowed", default=frozenset())
 

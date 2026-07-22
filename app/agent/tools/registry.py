@@ -14,6 +14,9 @@ from app.agent.tools.skill_tool import load_skill
 from app.config.settings import settings
 from app.agent.tools.bargain import negotiate_price
 from app.agent.tools.read_result import read_tool_result
+from app.agent.tools.order_ops import (
+    change_address, cancel_order, expedite_shipping, issue_invoice, query_coupons,
+)
 
 _TOOL_MAP: dict[str, Callable] = {
     "query_order": query_order,
@@ -25,6 +28,11 @@ _TOOL_MAP: dict[str, Callable] = {
     "recall_user_memory": recall_user_memory,
     "load_skill": load_skill,
     "read_tool_result": read_tool_result,
+    "change_address": change_address,
+    "cancel_order": cancel_order,
+    "expedite_shipping": expedite_shipping,
+    "issue_invoice": issue_invoice,
+    "query_coupons": query_coupons,
 }
 
 if settings.bargain_enabled:
@@ -222,6 +230,82 @@ _NEGOTIATE_PRICE_SCHEMA = {
         },
     },
 }
+
+TOOL_DEFINITIONS.extend([
+    {
+        "type": "function",
+        "function": {
+            "name": "change_address",
+            "description": (
+                "修改订单的收货地址(仅未发货订单)。敏感操作:系统强制前置确认——"
+                "若返回 need_confirm=true,请把确认问题转达用户,其确认后你再次调用本工具即可。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string", "description": "要修改的订单号"},
+                    "new_address": {"type": "string", "description": "新的完整收货地址"},
+                },
+                "required": ["order_id", "new_address"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_order",
+            "description": (
+                "取消订单(仅未发货订单)。敏感操作:系统强制前置确认——"
+                "若返回 need_confirm=true,请把确认问题转达用户,其确认后你再次调用本工具即可。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string", "description": "要取消的订单号"},
+                },
+                "required": ["order_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "expedite_shipping",
+            "description": "为订单催发货/加急处理。当用户着急、催单时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string", "description": "要加急的订单号"},
+                },
+                "required": ["order_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "issue_invoice",
+            "description": "为已完成支付的订单开具电子发票。用户要发票/报销凭证时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "order_id": {"type": "string", "description": "要开票的订单号"},
+                    "title": {"type": "string", "description": "发票抬头(个人或公司名)", "default": "个人"},
+                    "tax_id": {"type": "string", "description": "公司税号(个人抬头可省略)", "default": ""},
+                },
+                "required": ["order_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_coupons",
+            "description": "查询当前可用的优惠券/折扣。用户问有无优惠、能否更便宜、有什么券时调用。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+])
 
 if settings.bargain_enabled:
     TOOL_DEFINITIONS.append(_NEGOTIATE_PRICE_SCHEMA)

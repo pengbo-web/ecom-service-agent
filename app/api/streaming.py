@@ -21,7 +21,8 @@ def _build_confirm_reply(action: str, result: dict) -> str:
         price = result.get("suggested_price")
         name = result.get("product_name", "该商品")
         return f"✅ 已为您锁定「{name}」的成交价 ¥{price},即将为您生成订单,请稍候完成支付～"
-    return "✅ 操作已完成。"
+    # 其它风险动作(取消订单/改地址等):直接用工具返回的真实消息
+    return "✅ " + (result.get("message") or "操作已完成。")
 
 
 def run_agent_streaming(agent, user_input: str, tracer=None,

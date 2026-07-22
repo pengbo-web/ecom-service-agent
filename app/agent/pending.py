@@ -86,4 +86,4 @@ def observe_tool_result(session_id: str, tool_name: str, args: dict, result_str:
 
 
 # 风险工具名 → 成功执行后清挂起
-_RISK_TOOLS = frozenset({"apply_refund", "negotiate_price"})
+_RISK_TOOLS = frozenset({"apply_refund", "negotiate_price", "cancel_order", "change_address"})

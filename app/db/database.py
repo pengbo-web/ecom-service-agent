@@ -45,6 +45,7 @@ class Database:
                     carrier TEXT,
                     estimated_delivery TEXT,
                     delivered_at TEXT,
+                    shipping_address TEXT,
                     refund_reason TEXT,
                     refund_status TEXT,
                     refund_requested_at TEXT
@@ -90,6 +91,10 @@ class Database:
             cols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
             if "floor_price" not in cols:
                 conn.execute("ALTER TABLE products ADD COLUMN floor_price REAL")
+            # 兼容旧库：orders 补 shipping_address 列
+            ocols = [r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()]
+            if "shipping_address" not in ocols:
+                conn.execute("ALTER TABLE orders ADD COLUMN shipping_address TEXT")
             conn.commit()
         finally:
             conn.close()
@@ -192,6 +197,18 @@ class Database:
         try:
             cur = conn.execute(
                 "UPDATE orders SET status = ? WHERE order_id = ?", (status, order_id)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def set_shipping_address(self, order_id: str, address: str) -> bool:
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE orders SET shipping_address = ? WHERE order_id = ?",
+                (address, order_id),
             )
             conn.commit()
             return cur.rowcount > 0
