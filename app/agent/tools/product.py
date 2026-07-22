@@ -1,31 +1,24 @@
-import random
-
 from app.db import get_db
 
 
-def _match_score(product: dict, keywords: list[str]) -> int:
-    """计算商品与关键词列表的匹配度（命中关键词数量）。"""
-    searchable = " ".join([
+def _searchable_text(product: dict) -> str:
+    return " ".join([
         product["name"],
         product["category"],
         product.get("description", ""),
         " ".join(str(v) for v in product.get("specs", {}).values()),
     ]).lower()
-    return sum(1 for kw in keywords if kw in searchable)
 
 
-def _generate_mock_product(keyword: str) -> dict:
-    """未命中任何商品时，生成一个 mock 商品兜底。"""
-    price = round(random.uniform(99, 2999), 2)
-    return {
-        "product_id": f"MOCK-{random.randint(1000,9999)}",
-        "name": f"{keyword}（热销款）",
-        "category": keyword,
-        "price": price,
-        "stock": random.randint(10, 200),
-        "description": f"并夕夕精选{keyword}，品质保证，支持七天无理由退换",
-        "specs": {"备注": "模拟商品数据"},
-    }
+def _matched_keywords(product: dict, keywords: list[str]) -> list[str]:
+    """返回该商品命中的关键词子集。"""
+    text = _searchable_text(product)
+    return [kw for kw in keywords if kw in text]
+
+
+def _match_score(product: dict, keywords: list[str]) -> int:
+    """计算商品与关键词列表的匹配度（命中关键词数量）。"""
+    return len(_matched_keywords(product, keywords))
 
 
 def _public_view(product: dict) -> dict:
@@ -44,9 +37,32 @@ def query_product(keyword: str) -> dict:
     if not keywords:
         keywords = [keyword.lower()]
 
-    scored = [(p, _match_score(p, keywords)) for p in db.all_products()]
-    results = [p for p, score in scored if score > 0]
+    scored = [(p, s) for p in db.all_products() if (s := _match_score(p, keywords)) > 0]
+    scored.sort(key=lambda ps: ps[1], reverse=True)   # 匹配度高的排前面
 
-    if not results:
-        return {"success": True, "products": [_generate_mock_product(keyword)]}
-    return {"success": True, "products": [_public_view(p) for p in results]}
+    if not scored:
+        # 如实返回空,绝不编造不存在的商品(与"结果如实汇报"一致)
+        return {
+            "success": True,
+            "products": [],
+            "note": (f"未找到与「{keyword}」匹配的商品。请如实告知顾客暂无此类商品，"
+                     f"可建议更换关键词或推荐其他在售品类；切勿编造不存在的商品，也不要用相同关键词重复检索。"),
+        }
+
+    best_score = scored[0][1]
+    top = [p for p, s in scored if s == best_score]   # 只返回最高匹配档,不掺弱匹配
+    result = {"success": True, "products": [_public_view(p) for p in top]}
+
+    # 部分匹配诚实告知:没有商品命中全部关键词时,标出未命中的词,
+    # 让模型如实回复"该属性无匹配商品"并推荐替代,而不是误以为检索坏了反复重搜。
+    if best_score < len(keywords):
+        matched = _matched_keywords(top[0], keywords)
+        unmatched = [kw for kw in keywords if kw not in matched]
+        result["partial_match"] = True
+        result["unmatched_keywords"] = unmatched
+        result["note"] = (
+            f"没有同时满足「{keyword}」全部条件的商品；以下为最接近的结果，"
+            f"但未命中：{'、'.join(unmatched)}。请如实告知顾客该属性（如颜色）暂无匹配商品，"
+            f"可推荐现有替代款或询问是否放宽条件；切勿用相同关键词重复检索。"
+        )
+    return result
