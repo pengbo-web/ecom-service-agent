@@ -1,232 +1,88 @@
-"""Multi-Agent 编排器：协调 Router 和子 Agent 完成用户请求。
+"""Multi-Agent 编排器:Router → 领域画像 → 同一个硬化引擎(EcomAgent)。
 
-流程：Router 分类意图 → 选择子 Agent → ReAct 执行 → 结构化提取 → 持久化。
+生产最主流的"薄编排"形态:不是 N 个各自带一套 ReAct 循环的子 Agent,而是
+**同一个经过 Phase 1–6 硬化的引擎**,按路由结果切换"画像"(专属 system prompt + 工具子集)。
+好处:复用全部硬化(空回复/畸形降级、落盘指针、consent 门、事件流、记忆/持久化),
+延迟/成本低,加新领域只是加一份画像。对外接口与 EcomAgent 一致。
 """
 
+from pathlib import Path
 from typing import Optional
 
-from openai import OpenAI
-
-from app.agent.storage import delete_session, load_session, save_session
-from app.agent.summarizer import summarize
 from app.config.settings import settings
-from app.multi_agent.agents import AGENT_CONFIGS, SubAgent
+from app.multi_agent.agents import AGENT_CONFIGS
 from app.multi_agent.router import Router
-from app.schemas.response import CustomerServiceResponse, IntentType
 from app.agent.tools.manager import ToolManager
 
 
 class MultiAgentOrchestrator:
-    """多 Agent 编排器，对外接口与 EcomAgent 一致。"""
+    """路由到领域画像,用同一硬化引擎执行。委托历史/记忆/持久化给引擎。"""
 
-    def __init__(self, session_path: Optional[str] = None):
-        # 模型容错:启用时用主备熔断代理(子 Agent 复用本 client 自动继承)
-        if settings.resilience_enabled:
-            from app.resilience.factory import make_resilient_client
-            self.client = make_resilient_client()
-        else:
-            self.client = OpenAI(
-                api_key=settings.openai_api_key,
-                base_url=settings.openai_base_url,
-            )
-        self.model = settings.model_name
-        self.temperature = settings.temperature
-        self.session_path = session_path or settings.session_path
-        self.history_threshold = settings.history_threshold
-        self.history_keep_recent = settings.history_keep_recent
-        self.max_react_steps = settings.max_react_steps
+    def __init__(self, session_path: Optional[str] = None, user_id: Optional[str] = None):
+        from app.agent.chat import EcomAgent
+        sid = Path(session_path).stem if session_path else None
+        self.engine = EcomAgent(session_path=session_path, session_id=sid, user_id=user_id)
+        self.router = Router(self.engine.client, self.engine.model)
 
-        self.router = Router(self.client, self.model)
-
-        self.agents: dict[str, SubAgent] = {}
+        # 每个画像 = 专属 prompt + 工具子集(独立 ToolManager,仅暴露该领域允许的工具)
+        self.profiles: dict[str, dict] = {}
         for key, cfg in AGENT_CONFIGS.items():
-            tm = ToolManager(
-                use_mcp=settings.mcp_enabled,
-                mcp_server_url=settings.mcp_server_url,
-                allowed_tools=cfg["tools"],
-            )
-            self.agents[key] = SubAgent(
-                name=cfg["name"],
-                system_prompt=cfg["prompt"],
-                tool_manager=tm,
-                client=self.client,
-                model=self.model,
-                temperature=self.temperature,
-            )
+            self.profiles[key] = {
+                "name": cfg["name"],
+                "prompt": cfg["prompt"],
+                "tool_manager": ToolManager(
+                    use_mcp=settings.mcp_enabled,
+                    mcp_server_url=settings.mcp_server_url,
+                    allowed_tools=cfg["tools"],
+                ),
+            }
+        self._default_tm = self.engine.tool_manager   # 引擎自带的全量工具(复位/关闭用)
 
-        from app.agent.memory import MemoryManager
-        self.memory_manager = MemoryManager(
-            client=self.client,
-            model=self.model,
-            user_id=settings.memory_user_id,
-            memory_dir=settings.memory_dir,
-            memory_enabled=settings.memory_enabled,
-            max_ltm_facts=settings.max_ltm_facts,
-        )
+        # 供 streaming 层设置/透传(与 EcomAgent 接口一致)
+        self.event_sink = None
+        self.client = self.engine.client
 
-        if settings.memory_enabled:
-            from app.agent.tools.memory_tool import set_memory_manager
-            set_memory_manager(self.memory_manager)
+    def chat(self, user_input: str):
+        key = self.router.route(user_input, self.engine.raw_messages)
+        profile = self.profiles.get(key) or next(iter(self.profiles.values()))
+        if self.event_sink:
+            self.event_sink({"type": "route", "agent": profile["name"], "key": key})
+        # 切画像:同一硬化引擎,换 prompt + 工具子集;透传 event_sink/client(含 tracer 包装)
+        self.engine.system_prompt = profile["prompt"]
+        self.engine.tool_manager = profile["tool_manager"]
+        self.engine.event_sink = self.event_sink
+        self.engine.client = self.client
+        return self.engine.chat(user_input)
 
-        from app.agent.skills import SkillManager
-        self.skill_manager = SkillManager(
-            skills_dir=settings.skills_dir,
-            enabled=settings.skills_enabled,
-        )
-        if settings.skills_enabled:
-            from app.agent.tools.skill_tool import set_skill_manager
-            set_skill_manager(self.skill_manager)
+    # ---- 委托给引擎(对外接口与 EcomAgent 一致)----
+    @property
+    def raw_messages(self) -> list:
+        return self.engine.raw_messages
 
-        self.raw_messages: list[dict] = []
-        self.summary: Optional[str] = None
+    @property
+    def memory_manager(self):
+        return self.engine.memory_manager
 
-        loaded = load_session(self.session_path)
-        if loaded:
-            self.summary = loaded["summary"]
-            self.raw_messages = loaded["messages"]
-            if loaded.get("short_term_memory"):
-                self.memory_manager.restore_stm(loaded["short_term_memory"])
+    @property
+    def session_id(self):
+        return self.engine.session_id
+
+    @property
+    def user_id(self):
+        return self.engine.user_id
 
     @property
     def history_size(self) -> int:
-        return len(self.raw_messages)
-
-    def chat(self, user_input: str) -> CustomerServiceResponse:
-        """路由 → 子 Agent 执行 → 结构化提取 → 返回结果。"""
-        self.raw_messages.append({"role": "user", "content": user_input})
-
-        agent_key = self.router.route(user_input, self.raw_messages)
-        agent = self.agents[agent_key]
-        print(f"\n🔀 [路由] → {agent.name}")
-
-        messages = self._build_messages(agent)
-        final_text, new_messages = agent.handle(
-            messages, max_steps=self.max_react_steps,
-        )
-        self.raw_messages.extend(new_messages)
-
-        result = self._extract_structured_response(final_text)
-
-        self.memory_manager.update_short_term(self.raw_messages[-6:])
-
-        self.raw_messages.append(
-            {"role": "assistant", "content": result.model_dump_json()}
-        )
-
-        if len(self.raw_messages) > self.history_threshold:
-            self._compress_history()
-
-        save_session(
-            self.session_path, self.raw_messages, self.summary,
-            short_term_memory=self.memory_manager.stm_to_dict(),
-        )
-        return result
+        return self.engine.history_size
 
     def reset(self):
-        self.raw_messages = []
-        self.summary = None
-        self.memory_manager.reset_short_term()
-        delete_session(self.session_path)
+        self.engine.reset()
 
-    def save(self) -> None:
-        save_session(
-            self.session_path, self.raw_messages, self.summary,
-            short_term_memory=self.memory_manager.stm_to_dict(),
-        )
+    def save(self):
+        self.engine.save()
 
     def close(self):
-        self.memory_manager.consolidate_to_long_term(self.raw_messages, self.summary)
-        for agent in self.agents.values():
-            agent.tool_manager.close()
-
-    def _build_messages(self, agent: SubAgent) -> list[dict]:
-        """用子 Agent 的 system prompt 构建消息列表。"""
-        system_content = agent.system_prompt
-        if self.skill_manager and self.skill_manager.enabled:
-            system_content += self.skill_manager.build_catalog_prompt()
-
-        messages: list[dict] = [
-            {"role": "system", "content": system_content}
-        ]
-        messages.extend(self.memory_manager.build_memory_prompt_sections())
-        if self.summary:
-            messages.append({
-                "role": "system",
-                "content": f"以下是此前对话的摘要，用于延续上下文记忆：\n{self.summary}",
-            })
-        messages.extend(self.raw_messages)
-        return messages
-
-    def _extract_structured_response(self, text: str) -> CustomerServiceResponse:
-        try:
-            response = self.client.beta.chat.completions.parse(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "基于以下客服回复内容，提取结构化信息。"
-                            "reply 字段直接使用原文，不要修改或缩减。"
-                        ),
-                    },
-                    {"role": "user", "content": text},
-                ],
-                temperature=0.0,
-                response_format=CustomerServiceResponse,
-            )
-            return response.choices[0].message.parsed
-        except Exception:
-            return self._extract_structured_fallback(text)
-
-    def _extract_structured_fallback(self, text: str) -> CustomerServiceResponse:
-        """当 response_format 不被 API 支持时，用 prompt 引导 JSON 输出。"""
-        intent_values = ", ".join(f'"{e.value}"' for e in IntentType)
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "基于以下客服回复内容，提取结构化信息并输出 JSON。\n"
-                        "reply 字段直接使用原文，不要修改或缩减。\n\n"
-                        "必须严格按照以下 JSON 格式输出（不要加 markdown 代码块）：\n"
-                        "{\n"
-                        f'  "intent": <从以下选择: {intent_values}>,\n'
-                        '  "confidence": <0.0到1.0的浮点数>,\n'
-                        '  "reply": <原文回复内容>,\n'
-                        '  "requires_human": <true或false>,\n'
-                        '  "follow_up_question": <追问问题或null>\n'
-                        "}"
-                    ),
-                },
-                {"role": "user", "content": text},
-            ],
-            temperature=0.0,
-        )
-        raw = response.choices[0].message.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        return CustomerServiceResponse.model_validate_json(raw)
-
-    def _compress_history(self) -> None:
-        keep = self.history_keep_recent
-        split = len(self.raw_messages) - keep
-        while split > 0 and self.raw_messages[split].get("role") in ("tool",):
-            split -= 1
-        if split <= 0:
-            return
-        old_messages = self.raw_messages[:split]
-        recent = self.raw_messages[split:]
-
-        new_summary = summarize(
-            client=self.client,
-            model=self.model,
-            old_messages=old_messages,
-            prev_summary=self.summary,
-        )
-        self.summary = new_summary
-        self.raw_messages = recent
-        print(
-            f"\n💾 [已压缩 {len(old_messages)} 条老消息 → summary "
-            f"({len(new_summary)} 字)]\n"
-        )
+        self.engine.tool_manager = self._default_tm   # 复位后由 engine.close 关闭
+        self.engine.close()
+        for p in self.profiles.values():
+            p["tool_manager"].close()

@@ -32,6 +32,7 @@ class EcomAgent:
         self.session_path = session_path or settings.session_path
         self.session_id = session_id
         self.user_id = user_id or settings.memory_user_id   # 长期记忆按用户隔离
+        self.system_prompt = SYSTEM_PROMPT   # 可切换:多 Agent 编排按路由画像覆盖
         self.history_threshold = settings.history_threshold
         self.history_keep_recent = settings.history_keep_recent
         self.max_react_steps = settings.max_react_steps
@@ -278,7 +279,7 @@ class EcomAgent:
         return CustomerServiceResponse.model_validate_json(raw)
 
     def _build_messages(self) -> list[dict]:
-        system_content = SYSTEM_PROMPT
+        system_content = self.system_prompt
         if self.skill_manager and self.skill_manager.enabled:
             system_content += self.skill_manager.build_catalog_prompt()
 

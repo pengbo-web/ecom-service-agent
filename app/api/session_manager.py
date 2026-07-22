@@ -12,6 +12,10 @@ from typing import Callable, Optional
 
 
 def _default_factory(session_path: str, user_id: str | None = None):
+    from app.config.settings import settings
+    if settings.multi_agent_enabled:
+        from app.multi_agent.orchestrator import MultiAgentOrchestrator
+        return MultiAgentOrchestrator(session_path=session_path, user_id=user_id)
     from app.agent.chat import EcomAgent
     return EcomAgent(session_path=session_path, session_id=Path(session_path).stem,
                      user_id=user_id)
