@@ -101,9 +101,26 @@ def create_app(session_manager: Optional[SessionManager] = None,
             return _reply_stream("🎧 当前会话已转由人工客服处理，请稍候…")
 
         # 3) 规则快路径：高频简单意图秒回，跳过 Agent（省 LLM 成本）
+        #    仍把这轮问答写进会话历史并落盘，保证刷新/切换后可回显（不因走快路径而丢失）。
         if settings.fast_path_enabled:
             fp = match_fast_path(req.message)
             if fp:
+                agent = manager.get_or_create(req.session_id, req.user_id)
+                with manager.get_lock(req.session_id):
+                    msgs = getattr(agent, "raw_messages", None)
+                    if isinstance(msgs, list):
+                        msgs.append({"role": "user", "content": req.message})
+                        msgs.append({"role": "assistant", "content": json.dumps({
+                            "intent": fp.get("intent", "fast_path"), "confidence": 1.0,
+                            "reply": fp["reply"], "requires_human": False,
+                            "follow_up_question": None,
+                        }, ensure_ascii=False)})
+                        save = getattr(agent, "save", None)
+                        if callable(save):
+                            try:
+                                save()
+                            except Exception:  # noqa: BLE001 保存失败不影响本轮回复
+                                pass
                 return _reply_stream(fp["reply"])
 
         # 4) 成本上限（防烧爆 API Key）
