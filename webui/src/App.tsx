@@ -4,6 +4,7 @@ import { ChatView } from "@/components/ChatView";
 import { DashboardView } from "@/components/DashboardView";
 import { SeatView } from "@/components/SeatView";
 import { EvalView } from "@/components/EvalView";
+import { MemoryView } from "@/components/MemoryView";
 import { adminFetch, getSessionId } from "@/lib/api";
 
 export default function App() {
@@ -29,6 +30,7 @@ export default function App() {
       {view === "dash" && <DashboardView sessionId={sessionId} />}
       {view === "seat" && <SeatView sessionId={sessionId} />}
       {view === "eval" && <EvalView />}
+      {view === "mem" && <MemoryView sessionId={sessionId} />}
     </AppShell>
   );
 }

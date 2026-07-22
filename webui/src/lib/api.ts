@@ -22,3 +22,12 @@ export async function consolidateMemory(sessionId: string): Promise<ConsolidateR
   if (!r.ok) throw new Error("HTTP " + r.status);
   return r.json();
 }
+
+export type MemorySnapshot = {
+  user_id: string; curation: boolean; count: number;
+  facts: LtmFact[]; interaction_summaries: { summary: string; timestamp: string }[];
+};
+
+export function getMemory(): Promise<MemorySnapshot> {
+  return getJSON<MemorySnapshot>("/api/memory");
+}

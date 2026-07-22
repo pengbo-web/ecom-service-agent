@@ -1,15 +1,16 @@
 import * as React from "react";
-import { MessageSquare, LayoutDashboard, Headset, FlaskConical, RotateCcw } from "lucide-react";
+import { MessageSquare, LayoutDashboard, Headset, FlaskConical, Brain, RotateCcw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
-export type View = "chat" | "dash" | "seat" | "eval";
+export type View = "chat" | "dash" | "seat" | "eval" | "mem";
 
 const TABS: { v: View; icon: React.ReactNode; label: string }[] = [
   { v: "chat", icon: <MessageSquare className="h-4 w-4" />, label: "聊天" },
   { v: "dash", icon: <LayoutDashboard className="h-4 w-4" />, label: "看板" },
   { v: "seat", icon: <Headset className="h-4 w-4" />, label: "坐席" },
   { v: "eval", icon: <FlaskConical className="h-4 w-4" />, label: "评估" },
+  { v: "mem", icon: <Brain className="h-4 w-4" />, label: "记忆" },
 ];
 
 export function AppShell({ view, onView, onReset, children }: {

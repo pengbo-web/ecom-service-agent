@@ -151,6 +151,28 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return {"enabled": True, "curation": settings.memory_curation_enabled,
                 "count": len(facts), "facts": facts}
 
+    @app.get("/api/memory", dependencies=[Depends(admin_auth)])
+    def memory():
+        """只读:从磁盘加载当前用户的长期记忆(反映真实存储,不触发巩固)。"""
+        from app.agent.memory.long_term import LongTermMemory
+        ltm = LongTermMemory(
+            user_id=settings.memory_user_id,
+            memory_dir=settings.memory_dir,
+            max_facts=settings.max_ltm_facts,
+        )
+        ltm.load()
+        return {
+            "user_id": settings.memory_user_id,
+            "curation": settings.memory_curation_enabled,
+            "count": len(ltm.facts),
+            "facts": [
+                {"content": f.content, "category": f.category,
+                 "created_at": f.created_at, "source_session": f.source_session}
+                for f in ltm.facts
+            ],
+            "interaction_summaries": ltm.interaction_summaries[-10:],
+        }
+
     @app.get("/api/metrics", dependencies=[Depends(admin_auth)])
     def metrics():
         return compute_metrics(store)
