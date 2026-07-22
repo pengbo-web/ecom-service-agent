@@ -203,21 +203,25 @@ class EcomAgent:
             self.raw_messages.append(msg_dict)
 
             for tc, func_name, func_args in parsed_calls:
-                self._emit({"type": "tool_call", "name": func_name, "args": func_args})
-                result_str = self.tool_manager.execute_tool(func_name, func_args)
-                self._emit({"type": "tool_result", "content": result_str})
-
-                # 记住/清除待确认动作:供确认轮由服务端确定性重放(Phase 4)
-                from app.agent.pending import observe_tool_result
-                observe_tool_result(self.session_id, func_name, func_args, result_str)
-
-                self.raw_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result_str,
-                })
+                self._execute_tool_call(tc.id, func_name, func_args)
 
         return self._answer_without_tools()
+
+    def _execute_tool_call(self, tool_call_id: str, name: str, args: dict) -> str:
+        """工具生命周期缝(observe):before(埋点)→ 执行 → after(埋点+挂起观察+写历史)。
+
+        埋点是"观察"——只记录不否决;真正的动作授权在工具内部的 consent 门强制。
+        """
+        self._emit({"type": "tool_call", "name": name, "args": args})          # before
+        result_str = self.tool_manager.execute_tool(name, args)
+        self._emit({"type": "tool_result", "content": result_str})             # after
+
+        # 记住/清除待确认动作:供确认轮由服务端确定性重放(Phase 4)
+        from app.agent.pending import observe_tool_result
+        observe_tool_result(self.session_id, name, args, result_str)
+
+        self.raw_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": result_str})
+        return result_str
 
     def _extract_structured_response(self, text: str) -> CustomerServiceResponse:
         """从最终文本中提取结构化元数据（意图、置信度等）。"""

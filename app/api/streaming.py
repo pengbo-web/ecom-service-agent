@@ -45,6 +45,17 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
             tracer.on_event(ev)
         q.put(ev)
 
+    # ── 观察/变换阶段(observe):不能否决已发生的动作,只做变换与埋点 ──
+    def _finalize(reply: str, _sink) -> str:
+        """输出护栏 = finalize(text)->text 变换缝:改写文案、发观察事件,不改动作结果。"""
+        if guard_pipeline is None:
+            return reply
+        reply, out_results = guard_pipeline.check_output(reply)
+        for gr in out_results:
+            _sink({"type": "guard", "stage": "output", "action": gr.action,
+                   "guard": gr.guard, "reason": gr.reason})
+        return reply
+
     def _blocked_flow(_sink, gr) -> str:
         _sink({"type": "guard", "stage": "input", "action": "block",
                "guard": gr.guard, "reason": gr.reason})
@@ -54,14 +65,11 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         return "blocked"
 
     def _normal_flow(_sink) -> str:
+        # 授权闸门(authorize):风险动作前置授权在动作边界强制(consent_scope)
         with consent_scope(granted):
             result = agent.chat(user_input)
-        reply = result.reply
-        if guard_pipeline is not None:
-            reply, out_results = guard_pipeline.check_output(reply)
-            for gr in out_results:
-                _sink({"type": "guard", "stage": "output", "action": gr.action,
-                       "guard": gr.guard, "reason": gr.reason})
+        # 观察/变换:输出护栏变换 + 事后升级判定,均不否决已发生的动作
+        reply = _finalize(result.reply, _sink)
         _sink({"type": "reply", "content": reply})
         _sink({"type": "metadata", "intent": result.intent.value,
                "confidence": result.confidence,
@@ -96,12 +104,7 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         except (ValueError, TypeError):
             result = {}
 
-        reply = _build_confirm_reply(pending.action, result)
-        if guard_pipeline is not None:
-            reply, out_results = guard_pipeline.check_output(reply)
-            for gr in out_results:
-                _sink({"type": "guard", "stage": "output", "action": gr.action,
-                       "guard": gr.guard, "reason": gr.reason})
+        reply = _finalize(_build_confirm_reply(pending.action, result), _sink)
 
         intent = IntentType.AFTER_SALE if pending.action == "refund" else IntentType.PRODUCT_CONSULT
         _sink({"type": "reply", "content": reply})

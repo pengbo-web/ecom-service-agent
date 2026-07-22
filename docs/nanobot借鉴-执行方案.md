@@ -256,7 +256,16 @@ sequenceDiagram
 
 ---
 
-## Phase 6 — 治理链"观察 vs 授权"分离  ⭐⭐(架构优化)
+## Phase 6 — 治理链"观察 vs 授权"分离  ⭐⭐(架构优化)  ✅(已完成 2026-07-22)
+
+**已做(轻量版,未引入 hook 类体系,行为等价)**:
+- `streaming.py`:抽出 `_finalize(text)->text` 输出护栏变换缝(消除 `_normal_flow`/`_replay_flow` 两处重复),并给 `_normal_flow` 加"授权闸门 / 观察变换"分段注释——授权在动作边界强制(consent_scope),观察(输出变换、事后升级)不否决已发生的动作。
+- `chat.py`:工具执行从 `_react_loop` 内联抽出 `_execute_tool_call`(before 埋点→执行→after 埋点+挂起观察+写历史),得到干净的工具生命周期缝;埋点是"观察"、真正授权在工具内 consent 门。
+- 验收:全量离线 263 绿 + 端到端冒烟(`thought→tool_call→tool_result→reply→metadata→done` 序列不变)。
+
+---
+
+### 原始设计说明
 
 **目标**:把 `streaming.py` 里命令式揉在一起的治理链(限流→人工→快路径→成本→护栏→Agent→护栏→升级)理清为两类:**观察**(不能否决动作:可观测埋点、事后升级判定)与**授权**(在动作边界强制:限流/成本/人工短路/前置授权门)。
 
