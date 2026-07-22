@@ -13,7 +13,7 @@ export default function App() {
   );
   const [resetKey, setResetKey] = useState(0);
   const [userId, setUid] = useState<string>(getUserId());
-  const sessionId = getSessionId();
+  const sessionId = getSessionId(userId);   // 会话随用户走:切用户=切会话线程
 
   function onUserId(uid: string) {
     const clean = uid.trim() || "default";

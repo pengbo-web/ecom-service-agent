@@ -1,7 +1,12 @@
-export function getSessionId(): string {
-  let s = localStorage.getItem("xiaoxi_sid");
-  if (!s) { s = "web-" + Math.random().toString(36).slice(2, 10); localStorage.setItem("xiaoxi_sid", s); }
-  return s;
+function getBaseToken(): string {
+  let b = localStorage.getItem("xiaoxi_base");
+  if (!b) { b = Math.random().toString(36).slice(2, 10); localStorage.setItem("xiaoxi_base", b); }
+  return b;
+}
+// 会话归属于用户:session_id 带上 user_id,切换用户即切到该用户自己的会话线程(各自历史/上下文)
+export function getSessionId(userId: string): string {
+  const safe = (userId || "default").replace(/[^a-zA-Z0-9_-]/g, "_");
+  return `${safe}--${getBaseToken()}`;
 }
 export function getUserId(): string {
   return localStorage.getItem("xiaoxi_uid") || "default";
