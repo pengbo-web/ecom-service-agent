@@ -56,6 +56,58 @@ class SessionState(TypedDict):
     updated_at: str
 ```
 
+### 3.1 `sess:{session_id}` 的值示例(退款·确认前)
+
+以"用户 alice 要退款、正处于确认前"为例,`GET sess:alice--web123` 拿到的 JSON:
+
+```json
+{
+  "version": 1,
+  "status": "in_flight",
+  "step_seq": 1,
+  "updated_at": "2026-07-22T10:30:05",
+  "summary": null,
+  "messages": [
+    {"role": "user", "content": "我要退款订单 ORD-20240115-001,尺码不合适"},
+    {"role": "assistant", "content": null,
+     "tool_calls": [{"id": "call_1", "type": "function",
+       "function": {"name": "apply_refund",
+                    "arguments": "{\"order_id\":\"ORD-20240115-001\",\"reason\":\"尺码不合适\"}"}}]},
+    {"role": "tool", "tool_call_id": "call_1",
+     "content": "{\"success\":false,\"need_confirm\":true,\"action\":\"refund\",\"message\":\"退款是敏感操作,请确认…\"}"}
+  ],
+  "short_term_memory": {"facts": ["用户关注订单 ORD-20240115-001", "退款原因:尺码不合适"]},
+  "pending": {
+    "action": "refund", "tool_name": "apply_refund",
+    "args": {"order_id": "ORD-20240115-001", "reason": "尺码不合适"},
+    "message": "退款是敏感操作,请确认是否为订单 ORD-20240115-001 办理退款?"
+  }
+}
+```
+
+字段职责:`messages` 是真·对话上下文(恢复靠它);`status/step_seq` 是 checkpoint 元信息(in_flight=上轮没跑完、定位到第几步);`pending` 是挂起动作(下轮"确认"时任意实例读到即可服务端重放);`summary` 历史压缩;`short_term_memory` STM(长期记忆单独存/归档,不在此)。
+
+### 3.2 一次退款回合的 Key 演变(checkpoint 逐步写)
+
+```
+轮1「我要退款…」
+ ├─ 回合开始 → SET sess:{id} {status:in_flight, step_seq:0, messages:[user]}
+ ├─ 调 apply_refund 得 need_confirm → SET {step_seq:1, messages:[user,assistant,tool], pending:{refund…}}
+ └─ 回合结束 → SET {status:complete, messages:[…,assistant回复]}   // pending 保留
+轮2「确认退款」
+ ├─ 抢锁 lock:{id} → 命中 pending → 服务端重放 apply_refund → 成功
+ ├─ SET {status:complete, pending:null, messages:[…]}   // 清挂起
+ └─ 释放锁
+```
+
+任意一步后 Redis 崩溃/实例重启:因每步都 SET 了最新状态(+AOF),另一实例 `GET sess:{id}` 就能拿完整现场续上。
+
+### 3.3 为什么用 String(JSON) 而非 Hash / Stream
+
+- **String(整块 JSON)**:一次 GET/SET 读写整会话,简单、单键原子、TTL 好管——**本方案采用**。
+- **Hash(每字段一 field)**:可只更新某字段省带宽,但会话本就整体读给模型,收益小、命令多。
+- **List/Stream(消息逐条 append)**:适合超长历史只追加;代价是读时拼装 + 单独管元数据。**历史达几百条时可升级**,当前 String 足够。
+
 ## 4. 组件设计
 
 ### 4.1 SessionStore 抽象 + RedisSessionStore
