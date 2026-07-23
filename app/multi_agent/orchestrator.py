@@ -60,6 +60,14 @@ class MultiAgentOrchestrator:
         return self.engine.raw_messages
 
     @property
+    def _pending(self):                      # R3:挂起动作透传给引擎(streaming 读/清)
+        return self.engine._pending
+
+    @_pending.setter
+    def _pending(self, value):
+        self.engine._pending = value
+
+    @property
     def memory_manager(self):
         return self.engine.memory_manager
 

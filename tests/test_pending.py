@@ -1,66 +1,40 @@
+"""挂起动作判定(R3):evaluate_pending 据工具返回决定 set/clear/keep;PendingAction 可序列化。"""
+
 import json
 
-from app.agent.pending import (
-    PendingAction, PendingActionStore, observe_tool_result,
-    get_pending_store, set_pending_store,
-)
+from app.agent.pending import PendingAction, evaluate_pending
 
 
-def _fresh():
-    s = PendingActionStore()
-    set_pending_store(s)
-    return s
-
-
-def test_remember_get_pop():
-    s = _fresh()
+def test_pending_action_roundtrip():
     p = PendingAction("refund", "apply_refund", {"order_id": "O1", "reason": "x"}, "确认?")
-    s.remember("sess", p)
-    assert s.get("sess") is p
-    assert s.pop("sess") is p
-    assert s.get("sess") is None
+    d = p.to_dict()
+    assert d == {"action": "refund", "tool_name": "apply_refund",
+                 "args": {"order_id": "O1", "reason": "x"}, "message": "确认?"}
+    assert PendingAction.from_dict(d) == p
 
 
-def test_empty_session_id_ignored():
-    s = _fresh()
-    s.remember("", PendingAction("refund", "apply_refund", {}, ""))
-    assert s.get("") is None
+def test_need_confirm_sets_pending():
+    result = json.dumps({"success": False, "need_confirm": True, "action": "refund",
+                         "message": "退款是敏感操作,请确认?"})
+    act, pa = evaluate_pending("apply_refund", {"order_id": "O1", "reason": "尺码"}, result)
+    assert act == "set"
+    assert pa.action == "refund" and pa.tool_name == "apply_refund"
+    assert pa.args == {"order_id": "O1", "reason": "尺码"}
 
 
-def test_observe_records_need_confirm():
-    s = _fresh()
-    result = json.dumps({"success": False, "need_confirm": True,
-                         "action": "refund", "message": "确认退款?"})
-    observe_tool_result("sess", "apply_refund", {"order_id": "O1", "reason": "尺码"}, result)
-    p = s.get("sess")
-    assert p is not None and p.action == "refund"
-    assert p.args == {"order_id": "O1", "reason": "尺码"}
+def test_risk_tool_success_clears():
+    ok = json.dumps({"success": True, "message": "退款已提交"})
+    assert evaluate_pending("apply_refund", {"order_id": "O1"}, ok) == ("clear", None)
+    assert evaluate_pending("cancel_order", {"order_id": "O1"}, ok) == ("clear", None)
 
 
-def test_observe_clears_on_success():
-    s = _fresh()
-    s.remember("sess", PendingAction("refund", "apply_refund", {"order_id": "O1"}, "?"))
-    ok = json.dumps({"success": True, "message": "退款申请已提交"})
-    observe_tool_result("sess", "apply_refund", {"order_id": "O1"}, ok)
-    assert s.get("sess") is None
+def test_non_risk_tool_keeps():
+    ok = json.dumps({"success": True, "order": {}})
+    assert evaluate_pending("query_order", {"order_id": "O1"}, ok) == ("keep", None)
 
 
-def test_observe_ignores_plain_tool_result():
-    s = _fresh()
-    observe_tool_result("sess", "query_order", {"order_id": "O1"},
-                        json.dumps({"order": {"status": "shipped"}}))
-    assert s.get("sess") is None
-
-
-def test_observe_ignores_non_json():
-    s = _fresh()
-    observe_tool_result("sess", "apply_refund", {}, "not-json")
-    assert s.get("sess") is None
-
-
-def test_observe_ignores_unknown_action():
-    s = _fresh()
-    # need_confirm 但 action 不在 RISK_ACTIONS → 不记
-    result = json.dumps({"need_confirm": True, "action": "unknown", "message": "?"})
-    observe_tool_result("sess", "some_tool", {}, result)
-    assert s.get("sess") is None
+def test_bad_or_nonrisk_result_keeps():
+    assert evaluate_pending("apply_refund", {}, "not-json") == ("keep", None)
+    assert evaluate_pending(
+        "some_tool", {}, json.dumps({"need_confirm": True, "action": "other"})
+    ) == ("keep", None)

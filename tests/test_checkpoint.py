@@ -37,6 +37,7 @@ def _bare_agent(store):
     a.raw_messages = []
     a.summary = None
     a._status = "complete"; a._step_seq = 0
+    a._pending = None
     a.event_sink = lambda e: None
     a.tool_manager = FakeTM()
     a.memory_manager = types.SimpleNamespace(stm_to_dict=lambda: {})

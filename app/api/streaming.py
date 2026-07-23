@@ -35,11 +35,9 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
     confirmed = confirm or is_confirmation(user_input)
     granted = RISK_ACTIONS if confirmed else frozenset()
 
-    # Phase 4:用户确认 + 存在上一轮被门控拦下的挂起动作 → 服务端确定性重放,不再赌模型重调工具
-    pending = None
-    if confirmed:
-        from app.agent.pending import get_pending_store
-        pending = get_pending_store().get(session_id)
+    # Phase 4/R3:用户确认 + 会话状态里存在挂起动作 → 服务端确定性重放(不赌模型重调工具)
+    # 挂起动作随会话持久化在 agent 上(R3),重启/换实例后仍在。
+    pending = getattr(agent, "_pending", None) if confirmed else None
 
     def sink(ev: dict) -> None:
         if tracer is not None:
@@ -93,7 +91,6 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         from app.agent.tools.registry import execute_tool as _exec
         from app.agent.tools.bargain import set_current_session
         from app.schemas.response import CustomerServiceResponse, IntentType
-        from app.agent.pending import get_pending_store
 
         _sink({"type": "tool_call", "name": pending.tool_name, "args": pending.args})
         set_current_session(session_id)   # negotiate_price 需要会话上下文
@@ -113,7 +110,7 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                "requires_human": False, "follow_up_question": None})
 
         # 重放成功即清挂起,防二次"确认"重复执行;失败(如已在处理中)也清,避免卡死
-        get_pending_store().pop(session_id)
+        agent._pending = None
 
         # 把这一轮写回 Agent 历史,保持后续对话上下文连贯
         resp = CustomerServiceResponse(intent=intent, confidence=1.0, reply=reply,

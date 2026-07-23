@@ -78,6 +78,7 @@ def make_agent(script, tm=None, max_steps=3):
     a.store = _t.SimpleNamespace(save=lambda k, s: None, load=lambda k: None, delete=lambda k: None)
     a._status = "complete"
     a._step_seq = 0
+    a._pending = None
     a.memory_manager = _t.SimpleNamespace(stm_to_dict=lambda: {})
     return a
 

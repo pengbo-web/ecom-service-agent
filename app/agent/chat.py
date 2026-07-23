@@ -70,6 +70,7 @@ class EcomAgent:
         self.summary: Optional[str] = None
         self._status: str = "complete"   # R2 checkpoint:complete / in_flight
         self._step_seq: int = 0          # 本回合已 checkpoint 的工具步数
+        self._pending = None             # R3 挂起待确认动作(PendingAction),随会话状态持久化
 
         # 事件发射器：默认 None（走控制台打印）；服务层可替换为队列写入等
         self.event_sink: Optional[Callable[[dict], None]] = None
@@ -84,6 +85,9 @@ class EcomAgent:
             # R2 恢复:上次回合被中断(in_flight)→ 修复可能的孤儿 tool_call/结果,持久历史保持合法
             self._status = loaded.get("status", "complete")
             self._step_seq = loaded.get("step_seq", 0)
+            if loaded.get("pending"):       # R3:恢复挂起动作(确认前重启也能续)
+                from app.agent.pending import PendingAction
+                self._pending = PendingAction.from_dict(loaded["pending"])
             if self._status == "in_flight":
                 self.raw_messages = sanitize_tool_pairs(self.raw_messages)
                 self._status = "complete"   # 已修复,视为可继续
@@ -127,6 +131,7 @@ class EcomAgent:
             "short_term_memory": self.memory_manager.stm_to_dict(),
             "status": self._status,
             "step_seq": self._step_seq,
+            "pending": self._pending.to_dict() if self._pending else None,
         }
 
     def _checkpoint(self, status: str) -> None:
@@ -242,9 +247,13 @@ class EcomAgent:
         result_str = self.tool_manager.execute_tool(name, args)
         self._emit({"type": "tool_result", "content": result_str})             # after
 
-        # 记住/清除待确认动作:供确认轮由服务端确定性重放(Phase 4)
-        from app.agent.pending import observe_tool_result
-        observe_tool_result(self.session_id, name, args, result_str)
+        # 记住/清除待确认动作:随会话状态持久化,供确认轮由服务端确定性重放(Phase 4 / R3)
+        from app.agent.pending import evaluate_pending
+        act, pa = evaluate_pending(name, args, result_str)
+        if act == "set":
+            self._pending = pa
+        elif act == "clear":
+            self._pending = None
 
         self.raw_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": result_str})
         self._step_seq += 1
