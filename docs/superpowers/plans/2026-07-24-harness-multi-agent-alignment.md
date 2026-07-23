@@ -25,6 +25,7 @@
 
 | 文件 | 阶段 | 责任 |
 |---|---|---|
+| `app/multi_agent/orchestrator.py`(改) | H1.0 | **显式化"总控 Agent"**:内聚暴露 react/memory/permissions/lifecycle 四项职责 |
 | `app/multi_agent/router.py` / `agents.py` / `app/prompts/agents.py`(改) | H1.0 | 领域改 售前/售中/售后 + 三域画像/工具子集 |
 | `app/prompts/reply_pipeline.py`(新) | H1 | 评估器 / 重写 / 润色 提示词 |
 | `app/agent/reply_pipeline.py`(新) | H1 | 出话/评估/(重写)/润色 + **选择器循环(G1)** |
@@ -48,10 +49,22 @@
 - Consumes:现有 `EcomAgent._react_loop()` 的 `final_text`(= 出话草稿)、`self._step_seq`(>0 表本轮用过工具 = 复杂轮)、`self.raw_messages`(取本轮 tool 结果做接地)。
 - Produces:`ReplyPipeline.run(client, model, user_input, draft, grounding, complex_turn, emit) -> str`(最终回复);发 `evaluate`/`polish` 事件供 trace。
 
-### Task H1.0 — 领域路由改 售前/售中/售后
+### Task H1.0 — 显式化总控 Agent + 领域路由改 售前/售中/售后
+
+**A) 领域路由改 售前/售中/售后**
 - [ ] **写测试**:`tests/test_orchestrator_unified.py` 更新——`profiles` 键为 `{"presale","midsale","aftersale"}`;售中含 `query_logistics/expedite_shipping/change_address/cancel_order`;售后含 `apply_refund/issue_invoice`;售前含 `query_product/query_coupons/negotiate_price`。
 - [ ] **实现**:`router.py` `VALID_AGENTS={"presale","midsale","aftersale"}`、`DEFAULT_AGENT="aftersale"`;`prompts/agents.py` 用 `PRESALE/MIDSALE/AFTERSALE_PROMPT`(投诉话术并入售后);`agents.py` 三域画像 + 工具子集(见上)。
-- [ ] 运行相关测试绿。提交:`refactor(multi-agent): H1.0 领域改 售前/售中/售后`。
+
+**B) 显式化"总控 Agent"(把散落的四项能力内聚成一处入口)**
+> 目标:架构图里那个蓝盒子在代码里有对应的**一个类/一处入口**,四项能力(React 机制、记忆管理、业务权限、生命周期)显式可见、可指认——不再隐式散落。`MultiAgentOrchestrator` 即"总控 Agent"。
+- [ ] **写测试**:`tests/test_controller_agent.py`——`MultiAgentOrchestrator` 暴露四个只读职责入口:
+  - `react`:返回其 ReAct 引擎(即 `self.engine`,拥有 `_react_loop`);
+  - `memory`:返回 `memory_manager`;
+  - `permissions`:返回受控风险动作集(= `RISK_ACTIONS`)+ 是否已接幂等/挂起(标识业务权限层);
+  - `lifecycle`:暴露 `save/close/reset/history_size` + 当前 `status/step_seq`(本会话生命周期;跨会话回收在 SessionManager,文档标注)。
+  - 断言 `capabilities()` 返回这四项的清单(供自省/文档)。
+- [ ] **实现**:在 `orchestrator.py` 给 `MultiAgentOrchestrator` 加类 docstring 明确"总控 Agent"定位 + 上述四个 `@property`/方法(多为对已有能力的**内聚暴露**,不改行为):`react`→`self.engine`;`memory`→`self.engine.memory_manager`;`permissions`→`{"risk_actions": RISK_ACTIONS, "consent": True, "idempotency": True, "escalation(HITL)": True}`;`lifecycle`→委托 save/close/reset(已有)+ `status`/`step_seq`(读 engine);`capabilities()` 汇总四项名称。
+- [ ] 运行相关测试 + 全量离线绿。提交:`refactor(multi-agent): H1.0 显式化总控Agent + 领域改售前/售中/售后`。
 
 ### Task H1.1 — 提示词(评估/重写/润色)
 - [ ] **写测试**:`tests/test_reply_pipeline.py` 断言三提示词非空且含关键约束词("接地"/"不得改变任何事实")。
@@ -196,7 +209,7 @@ H1(含 H1.0 领域改 + G1 选择器,~3.5d)→ H2(含 G2 结构化档案,~2.5d)�
 ## Self-Review(写完自查 —— 覆盖两图 + G1–G4)
 
 - **逐组件覆盖核对**(对照大图):
-  - 总控Agent(React/记忆/业务权限/生命周期)✅已有;领域子Agent→**H1.0 改售前/售中/售后**;功能型多Agent(出话/评估/润色)→**H1**;**选择器动态调度**→**H1.2/G1**。
+  - **总控Agent**(React/记忆/业务权限/生命周期):能力已有但散落 → **H1.0 显式化为一处入口**(orchestrator 暴露 react/memory/permissions/lifecycle);领域子Agent→**H1.0 改售前/售中/售后**;功能型多Agent(出话/评估/润色)→**H1**;**选择器动态调度**→**H1.2/G1**。
   - Memory 长期(base profile/行为标签/工单流转)→**H2.3/G2**;Conversation 短期✅已有;记忆管理 SQLite WAL+FTS5→**H2**;上下文引擎✅已有。
   - Skill自动化生成(策划/创建/**自改进**/FTS5召回/**用户建模**/自述化循环)→**H3+H3.3/H3.4/H3.5(G3)**;Skills/Tools/MCP/HITL✅已有。
   - 数据飞轮 PE自动化→**H4**;**数据层标注**(意图/话术/正确性/润色)→**H4.0/G4**;RL🤝排除。
