@@ -105,6 +105,7 @@ class Settings(BaseSettings):
     session_store_backend: str = "file"
     redis_url: str = "redis://localhost:6379/0"
     session_ttl: int = 3600   # redis 热会话过期(秒),每次访问续期
+    checkpoint_enabled: bool = True   # R2 步级 checkpoint:每工具步落盘,回合中途崩溃可恢复
     history_threshold: int = 10  # (兼容保留)条数触发阈值,现主用 token 预算
     history_keep_recent: int = 3  # 压缩时保留最近 3 条原始消息
 

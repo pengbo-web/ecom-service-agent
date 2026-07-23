@@ -72,6 +72,13 @@ def make_agent(script, tm=None, max_steps=3):
     a.events = []
     a.event_sink = lambda ev: a.events.append(ev)
     a._build_messages = lambda: [{"role": "system", "content": "s"}] + a.raw_messages
+    # R2 checkpoint 所需字段(裸 agent 不走 __init__)
+    import types as _t
+    a.session_path = "x.json"
+    a.store = _t.SimpleNamespace(save=lambda k, s: None, load=lambda k: None, delete=lambda k: None)
+    a._status = "complete"
+    a._step_seq = 0
+    a.memory_manager = _t.SimpleNamespace(stm_to_dict=lambda: {})
     return a
 
 

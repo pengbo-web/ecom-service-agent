@@ -68,6 +68,8 @@ class EcomAgent:
 
         self.raw_messages: list[dict] = []
         self.summary: Optional[str] = None
+        self._status: str = "complete"   # R2 checkpoint:complete / in_flight
+        self._step_seq: int = 0          # 本回合已 checkpoint 的工具步数
 
         # 事件发射器：默认 None（走控制台打印）；服务层可替换为队列写入等
         self.event_sink: Optional[Callable[[dict], None]] = None
@@ -79,6 +81,12 @@ class EcomAgent:
             self.raw_messages = loaded["messages"]
             if loaded.get("short_term_memory"):
                 self.memory_manager.restore_stm(loaded["short_term_memory"])
+            # R2 恢复:上次回合被中断(in_flight)→ 修复可能的孤儿 tool_call/结果,持久历史保持合法
+            self._status = loaded.get("status", "complete")
+            self._step_seq = loaded.get("step_seq", 0)
+            if self._status == "in_flight":
+                self.raw_messages = sanitize_tool_pairs(self.raw_messages)
+                self._status = "complete"   # 已修复,视为可继续
 
     @property
     def history_size(self) -> int:
@@ -88,6 +96,8 @@ class EcomAgent:
         """处理用户输入：ReAct 循环 → 结构化提取 → 返回结果"""
         set_current_session(self.session_id)
         self.raw_messages.append({"role": "user", "content": user_input})
+        self._step_seq = 0
+        self._checkpoint("in_flight")   # 回合开始:持久化用户消息 + 标记进行中
 
         final_text = self._react_loop()
 
@@ -104,17 +114,26 @@ class EcomAgent:
         if estimate_tokens(self._build_messages()) > _budget:
             self._compress_history()
 
-        self.store.save(self.session_path, self._session_state())
+        self._status = "complete"
+        self.store.save(self.session_path, self._session_state())   # 回合结束:完整落盘(必落)
         return result
 
     def _session_state(self) -> dict:
-        """当前会话状态(交给 SessionStore 持久化;R2/R3 会补 status/step_seq/pending)。"""
+        """当前会话状态(交给 SessionStore 持久化)。"""
         return {
             "version": 1,
             "messages": self.raw_messages,
             "summary": self.summary,
             "short_term_memory": self.memory_manager.stm_to_dict(),
+            "status": self._status,
+            "step_seq": self._step_seq,
         }
+
+    def _checkpoint(self, status: str) -> None:
+        """步级 checkpoint:更新 status 并落盘。回合中途崩溃可从最后一次 checkpoint 恢复。"""
+        self._status = status
+        if settings.checkpoint_enabled:
+            self.store.save(self.session_path, self._session_state())
 
     def reset(self):
         self.raw_messages = []
@@ -228,6 +247,8 @@ class EcomAgent:
         observe_tool_result(self.session_id, name, args, result_str)
 
         self.raw_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": result_str})
+        self._step_seq += 1
+        self._checkpoint("in_flight")   # 步级 checkpoint:每个工具步后落盘
         return result_str
 
     def _extract_structured_response(self, text: str) -> CustomerServiceResponse:
