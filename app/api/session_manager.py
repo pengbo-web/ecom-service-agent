@@ -23,9 +23,13 @@ def _default_factory(session_path: str, user_id: str | None = None):
 
 class SessionManager:
     def __init__(self, agent_factory=None, base_dir: str = "app/sessions/api",
-                 clock: Optional[Callable[[], float]] = None):
+                 clock: Optional[Callable[[], float]] = None, archiver=None):
         self._factory = agent_factory or _default_factory
         self._base_dir = Path(base_dir)
+        if archiver is None:
+            from app.session.archive import NullSessionArchiver
+            archiver = NullSessionArchiver()
+        self._archiver = archiver
         self._agents: dict = {}
         self._locks: dict = {}
         self._last_active: dict[str, float] = {}
@@ -93,6 +97,7 @@ class SessionManager:
                         agent.close()   # → memory_manager.consolidate_to_long_term(...)
                 except Exception:
                     pass
+                self._archiver.archive(session_id, agent)   # 冷归档(best-effort)
             with self._guard:
                 self._agents.pop(session_id, None)
                 self._last_active.pop(session_id, None)

@@ -7,6 +7,24 @@ services:
       - .env
     environment:
       - API_HOST=0.0.0.0        # 容器内需监听 0.0.0.0 才能被宿主访问
+      - REDIS_URL=redis://redis:6379/0   # 容器内连 redis 服务(覆盖 .env 的 localhost)
     volumes:
       - ./app/sessions:/app/app/sessions   # 会话/DB/Trace 持久化
+    depends_on:
+      - redis
     restart: unless-stopped
+
+  # 会话存储 Redis(R1-R5)。--appendonly yes 开 AOF 持久化(默认 appendfsync everysec):
+  # Redis 崩溃/重启最多丢 ~1s 写,步级 checkpoint 与挂起动作基本不丢。命名卷让数据持久。
+  redis:
+    image: redis:7-alpine
+    container_name: ecom-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - ecom-redis-data:/data
+    restart: unless-stopped
+
+volumes:
+  ecom-redis-data:

@@ -107,6 +107,7 @@ class Settings(BaseSettings):
     session_ttl: int = 3600   # redis 热会话过期(秒),每次访问续期
     checkpoint_enabled: bool = True   # R2 步级 checkpoint:每工具步落盘,回合中途崩溃可恢复
     session_lock_ms: int = 30000      # R4 分布式会话锁超时(毫秒),防持有者崩溃后死锁
+    archive_enabled: bool = True      # R5 会话结束/回收时冷归档到 SQLite(审计/离线分析)
     history_threshold: int = 10  # (兼容保留)条数触发阈值,现主用 token 预算
     history_keep_recent: int = 3  # 压缩时保留最近 3 条原始消息
 

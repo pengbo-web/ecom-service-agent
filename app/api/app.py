@@ -44,7 +44,11 @@ def create_app(session_manager: Optional[SessionManager] = None,
                admin_token: Optional[str] = None,
                eval_runner: Optional[EvalRunner] = None) -> FastAPI:
     app = FastAPI(title="Ecom Service Agent API")
-    manager = session_manager or SessionManager()
+    if session_manager is not None:
+        manager = session_manager
+    else:
+        from app.session.archive import build_archiver
+        manager = SessionManager(archiver=build_archiver(settings.archive_enabled))
 
     # 生产路径(未注入 manager)才启动空闲回收线程:空闲超时自动巩固长期记忆。
     # 测试都会注入 session_manager,因此不会误起后台线程。

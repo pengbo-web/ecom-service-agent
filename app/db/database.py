@@ -77,6 +77,15 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_items_order ON order_items(order_id);
                 CREATE INDEX IF NOT EXISTS idx_events_tn ON logistics_events(tracking_number);
+                CREATE TABLE IF NOT EXISTS session_archive (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    user_id TEXT,
+                    messages TEXT,
+                    summary TEXT,
+                    msg_count INTEGER,
+                    archived_at TEXT
+                );
                 CREATE TABLE IF NOT EXISTS bargain_sessions (
                     session_id TEXT NOT NULL,
                     product_id TEXT NOT NULL,
@@ -200,6 +209,33 @@ class Database:
             )
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def archive_session(self, session_id: str, user_id: str,
+                        messages: list, summary: Optional[str]) -> None:
+        """会话冷归档:把完整会话写入 session_archive(审计/离线分析,永久留存)。"""
+        conn = self.connect()
+        try:
+            conn.execute(
+                "INSERT INTO session_archive (session_id, user_id, messages, summary, "
+                "msg_count, archived_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, user_id, json.dumps(messages, ensure_ascii=False),
+                 summary, len(messages or []), self._now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_archived_session(self, session_id: str) -> Optional[dict]:
+        """取该会话最近一条归档(测试/查询用)。"""
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM session_archive WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()
+            return dict(row) if row else None
         finally:
             conn.close()
 
