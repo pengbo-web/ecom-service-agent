@@ -21,6 +21,46 @@
 
 结论:面向"生产级、可横向扩展"的目标,**Redis 是热会话的正确介质**;checkpoint 解决"崩溃恢复粒度";两者配合,任意实例都能从 Redis 恢复被中断的会话。
 
+## 1.5 R1–R6 逐项:解决什么问题 + 效果 + 怎么验证
+
+> 六步各解决一个明确的生产痛点,叠起来 = 一套可横向扩展、抗崩溃、防重复的会话状态管理。
+
+### R1 · SessionStore 抽象 + Redis 后端
+- **痛点**:会话存储写死本地文件 + 进程内缓存。多实例部署时请求打到别的实例就读不到会话(磁盘不共享);无过期回收;`_agents` 缓存内存无界。
+- **做了**:`SessionStore` 抽象(load/save/delete)+ `FileSessionStore`(单机)/`RedisSessionStore`(生产,`sess:{id}` 存 JSON + TTL);key=session_path,file 当路径、redis 取 stem;工厂据 backend 一行切换。
+- **效果**:存储介质可插拔。redis 后端下会话进 Redis、带 TTL 自动过期、多实例共享。**before**:换实例=断;**after**:任意实例读同一份。
+- **验证**:`docker exec ecom-redis redis-cli KEYS "sess:*"`;fakeredis 单测往返;file 默认行为等价。
+
+### R2 · 步级 Checkpoint + L1 恢复
+- **痛点**:只在回合末落盘。ReAct 一轮多次 LLM+工具、耗时数秒,中途崩溃/重启/部署 → 整轮全丢(用户说的话、已查数据、已跑工具都没了)。
+- **做了**:回合开始 / 每工具步 / 回合末都落盘,记 `status`(in_flight/complete)+ `step_seq`;恢复时若 in_flight 用 `sanitize_tool_pairs` 修复孤儿 tool_call。
+- **效果**:回合中途崩溃也不丢上下文;Redis 里 `status/step_seq` 实时反映进度。**安全边界**:不自动重放工具(防退款等双重执行)。
+- **验证**:`test_checkpoint`;真 Redis 看 `status=complete, step_seq=N`。
+
+### R3 · 挂起动作持久化
+- **痛点**:待确认动作(退款/取消)放进程内全局 store,**确认前重启/换实例就丢**,用户要重发。
+- **做了**:挂起动作放进会话状态 `agent._pending`,随 checkpoint 落 Redis;streaming 从 `agent._pending` 读/清。
+- **效果**:退款确认前重启,重启后用户"确认"仍能重放执行。**before**:重启丢挂起;**after**:跨重启/实例不丢。
+- **验证**:真 Redis 种挂起 → 杀进程 → 全新进程"确认" → 订单 `shipped→refund_processing`。
+
+### R4 · 分布式会话锁
+- **痛点**:进程内 `threading.Lock` 只在单进程有效;多实例下两个进程可能**同时处理同一会话**、互相覆盖 Redis 状态。
+- **做了**:`RedisSessionLock`(`SET NX PX` 抢锁 + WATCH/MULTI 校验 token 再删 + TTL 防死锁);抢不到 → 回"⏳ 处理中,请稍候"。
+- **效果**:多实例下同一会话严格串行,不并发踩状态。
+- **验证**:`test_session_lock`;真 Redis 锁 acquire→存在、release→消失。
+
+### R5 · 冷归档 + Redis AOF + docker-compose
+- **痛点**:Redis 热存带 TTL 会过期,过期后无法审计/离线分析;Redis 不持久化则崩溃丢数据;缺一键起。
+- **做了**:会话被回收时冷归档到 SQLite `session_archive`;docker-compose 加 redis `--appendonly yes`(AOF)+ 命名卷;agent 依赖 redis。
+- **效果**:热 Redis + 冷 SQLite 双层;Redis 崩溃最多丢 ~1s 写;`docker compose up -d` 一键起整套。
+- **验证**:`test_session_archive`;compose 起 redis 看 AOF。
+
+### R6 · 写工具幂等
+- **痛点**:写操作被重试/重放/续跑时可能**重复执行副作用**(退两次款)。
+- **做了**:`idempotency_key = hash(session_id, tool, args)`,`applied:{key}` 缓存成功结果,命中直接返回不再执行;仅缓存 success;仅 redis 后端启用。
+- **效果**:同一写操作重放不重复副作用——**安全重放/续跑的基石**。
+- **验证**:`test_idempotency`(重试返缓存 vs 无幂等则二次报错)。
+
 ## 2. 总体架构
 
 ```
