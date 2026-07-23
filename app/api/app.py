@@ -17,6 +17,7 @@ from app.hardening.auth import make_admin_auth
 from app.hardening.cost_guard import CostGuard
 from app.hardening.fast_path import match_fast_path
 from app.hardening.rate_limit import RateLimiter
+from app.session.lock import get_session_lock
 from app.evaluation.regression import load_baseline
 from app.evaluation.runner import EvalRunner
 from app.evaluation.run_service import run_evaluation
@@ -66,6 +67,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
                            settings.hitl_confidence_threshold)
 
     # 生产加固（W3.5）
+    session_lock = get_session_lock()   # R4:会话级并发锁(单实例本地/多实例 Redis)
     rate_limiter = RateLimiter(settings.rate_limit_per_min)
     cost_guard = CostGuard(settings.daily_request_budget)
     _admin_token = admin_token if admin_token is not None else settings.admin_token
@@ -106,21 +108,22 @@ def create_app(session_manager: Optional[SessionManager] = None,
             fp = match_fast_path(req.message)
             if fp:
                 agent = manager.get_or_create(req.session_id, req.user_id)
-                with manager.get_lock(req.session_id):
-                    msgs = getattr(agent, "raw_messages", None)
-                    if isinstance(msgs, list):
-                        msgs.append({"role": "user", "content": req.message})
-                        msgs.append({"role": "assistant", "content": json.dumps({
-                            "intent": fp.get("intent", "fast_path"), "confidence": 1.0,
-                            "reply": fp["reply"], "requires_human": False,
-                            "follow_up_question": None,
-                        }, ensure_ascii=False)})
-                        save = getattr(agent, "save", None)
-                        if callable(save):
-                            try:
-                                save()
-                            except Exception:  # noqa: BLE001 保存失败不影响本轮回复
-                                pass
+                with session_lock.guard(req.session_id) as got:
+                    if got:
+                        msgs = getattr(agent, "raw_messages", None)
+                        if isinstance(msgs, list):
+                            msgs.append({"role": "user", "content": req.message})
+                            msgs.append({"role": "assistant", "content": json.dumps({
+                                "intent": fp.get("intent", "fast_path"), "confidence": 1.0,
+                                "reply": fp["reply"], "requires_human": False,
+                                "follow_up_question": None,
+                            }, ensure_ascii=False)})
+                            save = getattr(agent, "save", None)
+                            if callable(save):
+                                try:
+                                    save()
+                                except Exception:  # noqa: BLE001 保存失败不影响本轮回复
+                                    pass
                 return _reply_stream(fp["reply"])
 
         # 4) 成本上限（防烧爆 API Key）
@@ -128,10 +131,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
             return _reply_stream("🛑 今日服务已达使用上限，请明天再来～")
 
         agent = manager.get_or_create(req.session_id, req.user_id)
-        lock = manager.get_lock(req.session_id)
 
         def event_stream():
-            with lock:  # 同一会话串行处理，避免并发踩状态
+            # 会话级并发锁:同一会话串行(单实例进程内锁/多实例 Redis 分布式锁)
+            with session_lock.guard(req.session_id) as got:
+                if not got:
+                    yield _sse_frame({"type": "reply",
+                                      "content": "⏳ 您的上一条消息还在处理中，请稍候再发～"})
+                    yield _sse_frame({"type": "done"})
+                    return
                 for event in run_agent_streaming(
                     agent, req.message, tracer=tracer,
                     session_id=req.session_id, guard_pipeline=guard_pipeline,

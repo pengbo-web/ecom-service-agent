@@ -6,10 +6,13 @@
 import pytest
 
 from app.session.store import FileSessionStore, set_session_store
+from app.session.lock import LocalSessionLock, set_session_lock
 
 
 @pytest.fixture(autouse=True)
-def _force_file_session_store():
-    set_session_store(FileSessionStore())
+def _force_local_session_backends():
+    set_session_store(FileSessionStore())   # 存储用 file
+    set_session_lock(LocalSessionLock())    # 锁用进程内(不依赖 redis/env)
     yield
     set_session_store(None)
+    set_session_lock(None)
