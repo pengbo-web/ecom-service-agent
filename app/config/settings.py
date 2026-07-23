@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     model_name: str = "gpt-4o-mini"
-    temperature: float = 0.7
+    temperature: float = 0.2   # 客服要确定性,低温降幻觉/发散(生产建议 0.1-0.3)
 
     # 模型容错（Phase 1：fallback + 熔断 + 错误分类重试）
     resilience_enabled: bool = True
@@ -100,6 +100,11 @@ class Settings(BaseSettings):
 
     # 多轮对话管理
     session_path: str = "app/sessions/session.json"
+
+    # 会话存储介质(R1):file=本地文件(默认,单机);redis=热会话共享+TTL(生产/多实例)
+    session_store_backend: str = "file"
+    redis_url: str = "redis://localhost:6379/0"
+    session_ttl: int = 3600   # redis 热会话过期(秒),每次访问续期
     history_threshold: int = 10  # (兼容保留)条数触发阈值,现主用 token 预算
     history_keep_recent: int = 3  # 压缩时保留最近 3 条原始消息
 

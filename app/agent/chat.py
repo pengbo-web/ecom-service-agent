@@ -3,7 +3,7 @@ from typing import Callable, Optional
 
 from openai import OpenAI
 
-from app.agent.storage import delete_session, load_session, save_session
+from app.session.store import get_session_store
 from app.agent.summarizer import summarize
 from app.config.settings import settings
 from app.prompts.customer_service import SYSTEM_PROMPT
@@ -72,7 +72,8 @@ class EcomAgent:
         # 事件发射器：默认 None（走控制台打印）；服务层可替换为队列写入等
         self.event_sink: Optional[Callable[[dict], None]] = None
 
-        loaded = load_session(self.session_path)
+        self.store = get_session_store()
+        loaded = self.store.load(self.session_path)
         if loaded:
             self.summary = loaded["summary"]
             self.raw_messages = loaded["messages"]
@@ -103,23 +104,26 @@ class EcomAgent:
         if estimate_tokens(self._build_messages()) > _budget:
             self._compress_history()
 
-        save_session(
-            self.session_path, self.raw_messages, self.summary,
-            short_term_memory=self.memory_manager.stm_to_dict(),
-        )
+        self.store.save(self.session_path, self._session_state())
         return result
+
+    def _session_state(self) -> dict:
+        """当前会话状态(交给 SessionStore 持久化;R2/R3 会补 status/step_seq/pending)。"""
+        return {
+            "version": 1,
+            "messages": self.raw_messages,
+            "summary": self.summary,
+            "short_term_memory": self.memory_manager.stm_to_dict(),
+        }
 
     def reset(self):
         self.raw_messages = []
         self.summary = None
         self.memory_manager.reset_short_term()
-        delete_session(self.session_path)
+        self.store.delete(self.session_path)
 
     def save(self) -> None:
-        save_session(
-            self.session_path, self.raw_messages, self.summary,
-            short_term_memory=self.memory_manager.stm_to_dict(),
-        )
+        self.store.save(self.session_path, self._session_state())
 
     def close(self):
         self.memory_manager.consolidate_to_long_term(self.raw_messages, self.summary)

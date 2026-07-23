@@ -45,10 +45,10 @@ class SessionManager:
             return self._agents[session_id]
 
     def peek_messages(self, session_id: str) -> list:
-        """只读取该会话已落盘的原始消息(不创建 agent),供历史回显。"""
-        from app.agent.storage import load_session
-        loaded = load_session(self._session_path(session_id))
-        return loaded["messages"] if loaded else []
+        """只读取该会话已存的原始消息(不创建 agent),供历史回显。"""
+        from app.session.store import get_session_store
+        state = get_session_store().load(self._session_path(session_id))
+        return state.get("messages", []) if state else []
 
     def get_lock(self, session_id: str) -> threading.Lock:
         with self._guard:
