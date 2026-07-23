@@ -2,16 +2,18 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development(推荐)或 superpowers:executing-plans 逐任务执行。步骤用 `- [ ]` 复选框跟踪。
 
-**Goal:** 把项目对齐行业电商客服 **Harness 架构**——在已有"领域路由"之上补齐"功能分工(出话/评估/润色)"、FTS5 记忆管理、Skill 自动化生成、PE 自动化数据飞轮(RL 除外),全部**手写**、保留**通用电商**业务。
+**Goal:** 把项目**严格对齐**行业电商客服 **Harness 架构**——领域路由改为 **售前/售中/售后**;补齐功能分工(出话/评估/润色 + **选择器动态调度 G1**)、FTS5 记忆管理 + **结构化记忆档案 G2**、Skill 自动化生成 **完整闭环 G3**、PE 自动化数据飞轮 + **标注数据采集 G4**(RL 除外),全部**手写**、保留**通用电商**业务。
 
-**Architecture:** 两层 Agent = 第一层领域路由(已有:售前/售后/投诉)+ 第二层功能分工(新增:总控内 出话→评估→润色 的 ReAct 编排,复用同一硬化引擎)。外围叠加 Harness 能力层:双层记忆(已有)+ FTS5 记忆管理(新)+ 上下文引擎(已有)+ Skills 管理(已有)+ Skill 自动生成(新)+ Tools/MCP(已有)+ HITL(已有)+ 数据飞轮 PE 自动化(新)。
+**Architecture:** 两层 Agent = 第一层领域路由(改为 **售前/售中/售后** 三域)+ 第二层功能分工(总控内 出话→评估→润色,由**选择器动态调度**、可循环,复用同一硬化引擎)。外围 Harness 能力层:双层记忆(短期已有 + 长期扩为**结构化档案**:base profile/行为标签/工单流转)+ FTS5 记忆管理(新)+ 上下文引擎(已有)+ Skills 管理(已有)+ **Skill 自动生成闭环**(创建/自改进/用户建模,新)+ Tools/MCP(已有)+ HITL(已有)+ 数据飞轮(PE 自动化 + **标注数据采集**,新)。
 
 **Tech Stack:** Python 3.11、现有 EcomAgent ReAct 引擎、SQLite FTS5(内置)、Redis(会话存储,已有)、OpenAI 兼容 LLM;测试用 fake client / fakeredis / 临时目录,不触网。
 
 ## Global Constraints
 
 - **手写实现,不引入 AutoGen / LangGraph 等重依赖**;对齐架构形态而非厂商。
+- **领域路由 = 售前 / 售中 / 售后 三域**(替代原 售前/售后/投诉;投诉并入售后)。
 - **保留通用电商业务**,不新建得物式尺码/spuid 工具与数据。
+- **严格对齐补齐 G1–G4**:选择器动态调度、结构化记忆档案、Skill 闭环、标注采集。高风险/重成本项(如 Skill 自改进、LLM 选择器)做**半自动/可关**,但形态必须在。
 - **分级门控**:功能层(评估/润色)仅"复杂轮"(本轮调用过工具)全走,简单轮直接用草稿,省 LLM 成本。
 - **每个新能力带 `settings` 开关,默认开、可关**;关闭即回退到改造前行为。
 - **接地铁律**:评估/重写必须带本轮工具真实结果,重写不脱离事实;评估器异常 **fail-open**(不阻断回复)。
@@ -23,16 +25,20 @@
 
 | 文件 | 阶段 | 责任 |
 |---|---|---|
+| `app/multi_agent/router.py` / `agents.py` / `app/prompts/agents.py`(改) | H1.0 | 领域改 售前/售中/售后 + 三域画像/工具子集 |
 | `app/prompts/reply_pipeline.py`(新) | H1 | 评估器 / 重写 / 润色 提示词 |
-| `app/agent/reply_pipeline.py`(新) | H1 | 出话→评估→(重写)→润色 手写编排 |
+| `app/agent/reply_pipeline.py`(新) | H1 | 出话/评估/(重写)/润色 + **选择器循环(G1)** |
 | `app/agent/chat.py`(改) | H1 | ReAct 产出草稿后接入流水线 + 接地上下文提取 |
 | `app/config/settings.py`(改) | H1-H4 | 各能力开关 |
 | `app/agent/memory/fts_store.py`(新) | H2 | SQLite FTS5 记忆全文索引:写入 / 关键词召回 |
-| `app/agent/memory/long_term.py`(改) | H2 | 事实写入/召回接 FTS5(与现有 LLM 策展并存) |
-| `app/agent/skills/synthesizer.py`(新) | H3 | 从归档会话聚类 → LLM 生成候选 skill markdown |
-| `app/scripts/synthesize_skills.py`(新) | H3 | 离线生成入口(半自动:产候选,人工审核入库) |
+| `app/agent/memory/profile.py`(新) | H2/G2 | **结构化用户档案**:base profile / 行为标签 / 工单流转 |
+| `app/agent/memory/long_term.py`(改) | H2 | 事实/档案 写入+召回接 FTS5(与 LLM 策展并存) |
+| `app/agent/skills/synthesizer.py`(新) | H3 | 归档聚类 → 生成候选 skill;**失败自改进(G3)** |
+| `app/agent/skills/user_modeling.py`(新) | H3/G3 | **从行为建模用户偏好** → 写档案/标签 |
+| `app/scripts/synthesize_skills.py`(新) | H3 | 离线闭环入口(创建/自改进/用户建模,半自动) |
+| `app/labeling/store.py`(新) | H4/G4 | **标注数据采集**:意图/话术/正确性/润色 标注表 + 半自动打标 |
 | `app/evaluation/pe_optimizer.py`(新) | H4 | 从标注数据产出提示词改进候选(供人工采纳) |
-| `tests/test_reply_pipeline.py` / `test_memory_fts.py` / `test_skill_synth.py` / `test_pe_optimizer.py`(新) | H1-H4 | 各阶段离线测试(fake client) |
+| `tests/test_reply_pipeline.py` / `test_memory_fts.py` / `test_memory_profile.py` / `test_skill_synth.py` / `test_user_modeling.py` / `test_labeling.py` / `test_pe_optimizer.py`(新) | H1-H4 | 各阶段离线测试(fake client) |
 
 ---
 
@@ -42,21 +48,31 @@
 - Consumes:现有 `EcomAgent._react_loop()` 的 `final_text`(= 出话草稿)、`self._step_seq`(>0 表本轮用过工具 = 复杂轮)、`self.raw_messages`(取本轮 tool 结果做接地)。
 - Produces:`ReplyPipeline.run(client, model, user_input, draft, grounding, complex_turn, emit) -> str`(最终回复);发 `evaluate`/`polish` 事件供 trace。
 
+### Task H1.0 — 领域路由改 售前/售中/售后
+- [ ] **写测试**:`tests/test_orchestrator_unified.py` 更新——`profiles` 键为 `{"presale","midsale","aftersale"}`;售中含 `query_logistics/expedite_shipping/change_address/cancel_order`;售后含 `apply_refund/issue_invoice`;售前含 `query_product/query_coupons/negotiate_price`。
+- [ ] **实现**:`router.py` `VALID_AGENTS={"presale","midsale","aftersale"}`、`DEFAULT_AGENT="aftersale"`;`prompts/agents.py` 用 `PRESALE/MIDSALE/AFTERSALE_PROMPT`(投诉话术并入售后);`agents.py` 三域画像 + 工具子集(见上)。
+- [ ] 运行相关测试绿。提交:`refactor(multi-agent): H1.0 领域改 售前/售中/售后`。
+
 ### Task H1.1 — 提示词(评估/重写/润色)
 - [ ] **写测试**:`tests/test_reply_pipeline.py` 断言三提示词非空且含关键约束词("接地"/"不得改变任何事实")。
 - [ ] **实现** `app/prompts/reply_pipeline.py`:`EVALUATOR_PROMPT`(四维度:接地/准确/合规/完整,输出 JSON `{ok,issues,suggestion}`)、`REDRAFT_PROMPT`(据工具真实结果重写、不编造)、`POLISH_PROMPT`(小夕人设,铁律:金额/日期/状态/结论原样保留)。
 - [ ] 运行:`.venv/Scripts/python.exe -m pytest tests/test_reply_pipeline.py -q` → 提示词测试通过。
 - [ ] 提交。
 
-### Task H1.2 — ReplyPipeline 编排(手写)
+### Task H1.2 — ReplyPipeline + 选择器动态调度(G1)
+> 对齐 SelectorGroupChat 的"动态选下一个功能 Agent、可循环"形态,但用**规则选择器**(确定性、零额外 LLM 成本)手写;预留 LLM 选择器接口(可关)。
 - [ ] **写测试**(fake client 脚本化):
   - 简单轮(`complex_turn=False`)→ 原样返回草稿(门控)。
-  - 复杂轮 + 评估 `ok=true` → 只润色(草稿→润色文本)。
-  - 复杂轮 + 评估 `ok=false` → 重写→润色。
+  - 复杂轮 + 评估 `ok=true` → 选择器路径 = draft→evaluate→polish→done(润色文本)。
+  - 复杂轮 + 评估 `ok=false` → 选择器**循环**:draft→evaluate→**redraft→evaluate**→polish→done(验证重写后**再评估**)。
+  - 达 `max_rounds` 仍不 ok → 停止循环、直接润色当前稿(不无限重写)。
   - `reply_pipeline_enabled=False` → 原样返回草稿。
-  - 评估返回坏 JSON → fail-open(当作 ok,继续润色,不抛错)。
-- [ ] **实现** `app/agent/reply_pipeline.py`:`ReplyPipeline.run(...)` 按"门控→评估→(重写)→润色";`_chat/_evaluate/_redraft/_polish` 各一次 LLM 调用;评估解析失败 fail-open;重写/润色异常返回空回退到上一版。
-- [ ] 运行该测试文件绿。提交。
+  - 评估坏 JSON → fail-open(当作 ok)。
+- [ ] **实现** `app/agent/reply_pipeline.py`:
+  - `FunctionalSelector.choose(state) -> role`(role ∈ draft/evaluate/redraft/polish/done):规则——有草稿未评估→evaluate;评估不 ok 且未达 max→redraft(→再 evaluate);评估 ok 或达上限→polish;润色后→done。
+  - `ReplyPipeline.run(...)`:`state={draft, verdict, polished, rounds}`;`while (role:=selector.choose(state)) != "done"` 分派 `_evaluate/_redraft/_polish`;每次派发发对应事件(`select`/`evaluate`/`polish`)供 trace。
+  - `settings.reply_pipeline_max_rounds`(默认 2)。异常 fail-open/回退上一版。
+- [ ] 运行该测试文件绿。提交:`feat(agent): H1 出话/评估/润色 + 选择器动态调度(G1)`。
 
 ### Task H1.3 — 接入 EcomAgent + 分级门控 + 接地上下文
 - [ ] **写测试**:用现有裸 agent 模式(`test_react_degrade` 风格)驱动 `chat()`,断言:复杂轮(mock `_step_seq>0`)会调用 pipeline;简单轮不调用;`_grounding_context()` 只取"最后一条 user 之后的 tool 结果"。
@@ -92,7 +108,14 @@
 - [ ] **冒烟**:多轮对话后,相关 query 能召回对应历史事实。
 - [ ] 提交:`feat(memory): H2 FTS5 记忆全文索引召回(混合)`。
 
-**验收**:记忆按 query 关键词精准召回、按 user 隔离;记忆多时不再全量塞 prompt。**工作量**:~1.5 人日。
+### Task H2.3 — 结构化用户档案(G2:base profile / 行为标签 / 工单流转)
+- [ ] **写测试**:`tests/test_memory_profile.py`——`UserProfile` 有 `base`(会员等级/联系方式等)/`tags`(行为标签)/`tickets`(工单流转记录);`update_base/add_tag/add_ticket` 落库(SQLite,按 user_id);`to_prompt()` 生成注入片段;向后兼容(无档案返回空片段)。
+- [ ] **实现** `app/agent/memory/profile.py`:`UserProfile` + SQLite 表 `user_profile(user_id, base_json, tags_json, updated_at)` 与 `user_tickets(user_id, ticket_id, status, reason, ts)`(工单流转);读写方法。
+  - **base profile 来源**:会员等级/联系方式从 `users`/account_ops 同步;**行为标签**来源见 H3 用户建模(先留写接口);**工单流转**:HITL 升级时写一条 ticket(接 `hitl.escalate`)。
+- [ ] **接入**:`LongTermMemory.build_memory_prompt_sections` 增注入 `UserProfile.to_prompt()`;`hitl.escalate` 落工单记录;受 `settings.memory_profile_enabled`(默认开)门控。
+- [ ] 运行全量离线绿。提交:`feat(memory): H2/G2 结构化用户档案(profile/行为标签/工单流转)`。
+
+**验收**:记忆按 query 关键词精准召回、按 user 隔离;长期记忆含结构化档案(会员/标签/工单)并注入 prompt;转人工时工单流转有记录。**工作量**:~2.5 人日(含 G2)。
 
 ---
 
@@ -118,7 +141,23 @@
 - [ ] **冒烟**:造几条同类归档 → 跑脚本 → `_candidates/` 出现候选 skill markdown,`_parse_frontmatter` 能解析。
 - [ ] 提交:`feat(skills): H3 Skill 自动化生成 v1(半自动,离线合成候选)`。
 
-**验收**:能从真实归档会话产出结构合法的候选 skill,人工审核即可入库。**工作量**:~3 人日(风险:合成质量靠 prompt 调,故做半自动)。
+### Task H3.3 — Skill 失败自改进(G3)
+- [ ] **写测试**:`tests/test_skill_synth.py` 增——给"某 skill + 该 skill 相关的失败会话(转人工/低分)"→ `improve_skill(client, model, skill, failure_cases)` 产出改进版 skill 候选;无失败样本→不改。
+- [ ] **实现** `synthesizer.py::improve_skill`:LLM 输入 现 skill body + 失败案例 → 输出改进版(写 `_candidates/`,人工审核替换)。失败案例来源:trace 低分 / HITL 升级且当轮 load 过该 skill。
+- [ ] 提交。
+
+### Task H3.4 — 用户建模(G3:从行为推断偏好)
+- [ ] **写测试**:`tests/test_user_modeling.py`(fake client)——给某用户归档会话样本 → `model_user(client, model, user_id, samples)` 产出行为标签列表(如"偏好红色/常问物流/价格敏感")→ 写入 H2 的 `UserProfile.tags`;空样本→空。
+- [ ] **实现** `app/agent/skills/user_modeling.py::model_user`:LLM 从行为归纳偏好标签 → `UserProfile.add_tag`。
+- [ ] 提交。
+
+### Task H3.5 — 自述化闭环入口
+- [ ] **实现** `app/scripts/synthesize_skills.py` 扩为完整离线闭环:读归档 → ①用户建模(写档案标签)②聚类创建候选 skill ③对已入库 skill 跑失败自改进 → 全部产候选/更新供人工确认;打印摘要。
+- [ ] `settings.skill_synth_enabled`(默认 False,离线手动)。
+- [ ] **冒烟**:造归档样本 → 跑脚本 → 产出 候选 skill + 用户标签更新 + skill 改进候选。
+- [ ] 提交:`feat(skills): H3/G3 Skill 自动化闭环(创建/自改进/用户建模,半自动)`。
+
+**验收**:离线闭环能从归档产出——①合法候选 skill ②用户行为标签(写入档案)③失败 skill 的改进候选;均半自动(产候选,人工确认)。**工作量**:~4 人日(风险最高,故全程半自动)。
 
 ---
 
@@ -127,8 +166,14 @@
 > 从标注数据(回复正确性标注 / 优秀客服润色数据 / 转人工原因)离线产出**提示词改进候选**,供人工采纳。轻量、与现有 eval 回归门禁衔接;**不自动改线上 prompt**。
 
 **Interfaces:**
-- Consumes:eval 失败用例 / `session_archive` / trace 的低分会话。
+- Consumes:**H4.0 的 `reply_labels`**(正确性/润色标注)+ eval 失败用例 / trace 低分会话。
 - Produces:`propose_prompt_tweaks(client, model, bad_cases) -> list[str]`(改进建议)。
+
+### Task H4.0 — 标注数据采集(G4:半自动)
+> 图里数据飞轮吃 意图/话术/正确性/润色 标注。做**最小半自动采集**:评估器 verdict 自动打"正确性标注",HITL 坐席纠正为"金标",润色前后成对存"优秀润色数据"。
+- [ ] **写测试**:`tests/test_labeling.py`(临时 db)——`label_reply(session_id, intent, draft, final, verdict, corrected)` 落库 `reply_labels`;`list_labels(kind)` 取"正确性/润色/意图"三类;半自动来源:评估器 ok→auto 正确标、坐席纠正→gold。
+- [ ] **实现** `app/labeling/store.py`:表 `reply_labels(id, session_id, intent, draft, final, correct, source[auto/hitl], ts)`;`label_reply/list_labels`;在 `ReplyPipeline`(评估后自动打标)与 HITL(坐席纠正打 gold)处埋点采集;`settings.labeling_enabled`(默认开,best-effort)。
+- [ ] 运行绿。提交:`feat(labeling): H4/G4 标注数据采集(评估器/HITL 半自动打标)`。
 
 ### Task H4.1 — 失败用例归纳 + 改进建议
 - [ ] **写测试**:`tests/test_pe_optimizer.py`(fake client):给若干"低分/转人工"用例 → 产出结构化改进建议列表;空 → 空列表;坏输出 → 跳过。
@@ -146,14 +191,19 @@
 
 ## 总量与顺序
 
-H1(2.5d)→ H2(1.5d)→ H3(3d)→ H4(2d),共 **~9 人日**。H1 最核心先做;H3 风险最高、做半自动。每阶段独立可交付、可回退。
+H1(含 H1.0 领域改 + G1 选择器,~3.5d)→ H2(含 G2 结构化档案,~2.5d)→ H3(含 G3 自改进/用户建模闭环,~4d)→ H4(含 G4 标注采集,~2.5d),共 **~12.5 人日**。H1 最核心先做;H3 风险最高、全程半自动。每阶段独立可交付、可回退。
 
-## Self-Review(写完自查)
+## Self-Review(写完自查 —— 覆盖两图 + G1–G4)
 
-- **覆盖**:两图的功能型多Agent(H1)、FTS5 记忆管理(H2)、Skill 自动生成(H3)、PE 自动化数据飞轮(H4)均有任务;RL 明确排除;领域路由/双层记忆/上下文压缩/Tools/HITL/consent/生命周期已存在,不重复。
-- **占位符扫描**:无 TBD;关键新模块给了接口签名与行为;提示词/门控/接地规则明确。
-- **一致性**:`ReplyPipeline.run` 签名、`MemoryFtsStore.index/search`、`synthesize_skills`、`propose_prompt_tweaks` 在文内一致;开关命名 `*_enabled` 统一。
-- **风险点**:H3 合成质量、H1 每轮 3x LLM(已用分级门控缓解)、FTS5 可用性(已给 LIKE 降级)。
+- **逐组件覆盖核对**(对照大图):
+  - 总控Agent(React/记忆/业务权限/生命周期)✅已有;领域子Agent→**H1.0 改售前/售中/售后**;功能型多Agent(出话/评估/润色)→**H1**;**选择器动态调度**→**H1.2/G1**。
+  - Memory 长期(base profile/行为标签/工单流转)→**H2.3/G2**;Conversation 短期✅已有;记忆管理 SQLite WAL+FTS5→**H2**;上下文引擎✅已有。
+  - Skill自动化生成(策划/创建/**自改进**/FTS5召回/**用户建模**/自述化循环)→**H3+H3.3/H3.4/H3.5(G3)**;Skills/Tools/MCP/HITL✅已有。
+  - 数据飞轮 PE自动化→**H4**;**数据层标注**(意图/话术/正确性/润色)→**H4.0/G4**;RL🤝排除。
+- **占位符扫描**:无 TBD;新模块均给接口签名/行为/来源;门控/接地/半自动策略明确。
+- **一致性**:`ReplyPipeline.run`+`FunctionalSelector.choose`、`MemoryFtsStore`、`UserProfile`、`synthesize_skills/improve_skill/model_user`、`reply_labels/label_reply`、`propose_prompt_tweaks` 命名一致;开关 `*_enabled` 统一。
+- **诚实标注的简化**:G1 用**规则选择器**(非 LLM 选择器,零额外成本,预留 LLM 接口);G3 全程**半自动**(产候选人工确认,不自动改线上);G4 **半自动打标**(评估器 auto + 坐席 gold),非全人工标注平台。这些是取舍,形态已对齐。
+- **风险点**:H3 合成/自改进质量(半自动缓解)、H1 复杂轮多次 LLM(分级门控+max_rounds 缓解)、FTS5 可用性(LIKE 降级)、G2 档案与现有 users/account 表同步一致性(单一写入口)。
 
 ## Execution Handoff
 
