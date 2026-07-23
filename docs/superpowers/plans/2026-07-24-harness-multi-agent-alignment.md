@@ -14,7 +14,7 @@
 - **领域路由 = 售前 / 售中 / 售后 三域**(替代原 售前/售后/投诉;投诉并入售后)。
 - **保留通用电商业务**,不新建得物式尺码/spuid 工具与数据。
 - **严格对齐补齐 G1–G4**:选择器动态调度、结构化记忆档案、Skill 闭环、标注采集。高风险/重成本项(如 Skill 自改进、LLM 选择器)做**半自动/可关**,但形态必须在。
-- **分级门控**:功能层(评估/润色)仅"复杂轮"(本轮调用过工具)全走,简单轮直接用草稿,省 LLM 成本。
+- **分级门控**:功能层(选择器/评估/润色)仅"复杂轮"(本轮调用过工具)全走,简单轮直接用草稿,省 LLM 成本(尤其 LLM 选择器每步一次调用,更需门控)。
 - **每个新能力带 `settings` 开关,默认开、可关**;关闭即回退到改造前行为。
 - **接地铁律**:评估/重写必须带本轮工具真实结果,重写不脱离事实;评估器异常 **fail-open**(不阻断回复)。
 - **向后兼容**:记忆/存储改动兼容旧 JSON / 旧库;老会话可读。
@@ -27,8 +27,8 @@
 |---|---|---|
 | `app/multi_agent/orchestrator.py`(改) | H1.0 | **显式化"总控 Agent"**:内聚暴露 react/memory/permissions/lifecycle 四项职责 |
 | `app/multi_agent/router.py` / `agents.py` / `app/prompts/agents.py`(改) | H1.0 | 领域改 售前/售中/售后 + 三域画像/工具子集 |
-| `app/prompts/reply_pipeline.py`(新) | H1 | 评估器 / 重写 / 润色 提示词 |
-| `app/agent/reply_pipeline.py`(新) | H1 | 出话/评估/(重写)/润色 + **选择器循环(G1)** |
+| `app/prompts/reply_pipeline.py`(新) | H1 | 评估器 / 重写 / 润色 / **选择器(G1)** 提示词 |
+| `app/agent/reply_pipeline.py`(新) | H1 | 出话/评估/(重写)/润色 + **LLM ReAct 选择器循环(G1,规则兜底)** |
 | `app/agent/chat.py`(改) | H1 | ReAct 产出草稿后接入流水线 + 接地上下文提取 |
 | `app/config/settings.py`(改) | H1-H4 | 各能力开关 |
 | `app/agent/memory/fts_store.py`(新) | H2 | SQLite FTS5 记忆全文索引:写入 / 关键词召回 |
@@ -72,20 +72,21 @@
 - [ ] 运行:`.venv/Scripts/python.exe -m pytest tests/test_reply_pipeline.py -q` → 提示词测试通过。
 - [ ] 提交。
 
-### Task H1.2 — ReplyPipeline + 选择器动态调度(G1)
-> 对齐 SelectorGroupChat 的"动态选下一个功能 Agent、可循环"形态,但用**规则选择器**(确定性、零额外 LLM 成本)手写;预留 LLM 选择器接口(可关)。
+### Task H1.2 — ReplyPipeline + LLM ReAct 选择器动态调度(G1,默认 LLM,规则兜底)
+> 100% 对齐图中"总控 ReAct 编排出话/评估/润色":**总控每步真用 LLM 推理决定下一个功能 Agent**(next ∈ evaluate/redraft/polish/done),可循环;`selector_mode` 默认 `llm`,LLM 失败/关闭时退回**规则选择器**保稳。
 - [ ] **写测试**(fake client 脚本化):
   - 简单轮(`complex_turn=False`)→ 原样返回草稿(门控)。
-  - 复杂轮 + 评估 `ok=true` → 选择器路径 = draft→evaluate→polish→done(润色文本)。
-  - 复杂轮 + 评估 `ok=false` → 选择器**循环**:draft→evaluate→**redraft→evaluate**→polish→done(验证重写后**再评估**)。
-  - 达 `max_rounds` 仍不 ok → 停止循环、直接润色当前稿(不无限重写)。
-  - `reply_pipeline_enabled=False` → 原样返回草稿。
-  - 评估坏 JSON → fail-open(当作 ok)。
+  - **LLM 选择器**:脚本让选择器依次吐 `evaluate`→(评估 ok)→`polish`→`done` → 得润色文本;验证每步"选择"来自 LLM 输出。
+  - **循环**:选择器吐 `evaluate`→(评估 not ok)→`redraft`→`evaluate`→`polish`→`done`,验证重写后**再评估**。
+  - 达 `max_rounds` → 强制收敛到 polish→done(选择器再想 redraft 也不再执行)。
+  - `selector_mode="rule"` 或 LLM 选择器输出非法 → 退回规则选择器,流程仍走通。
+  - `reply_pipeline_enabled=False` → 原样返回草稿;评估坏 JSON → fail-open。
+- [ ] **实现** `app/prompts/reply_pipeline.py` 增 `SELECTOR_PROMPT`(输入:用户问题/当前草稿/最近评估结论/已进行轮次;输出 JSON `{"next": "evaluate|redraft|polish|done", "reason": "..."}`)。
 - [ ] **实现** `app/agent/reply_pipeline.py`:
-  - `FunctionalSelector.choose(state) -> role`(role ∈ draft/evaluate/redraft/polish/done):规则——有草稿未评估→evaluate;评估不 ok 且未达 max→redraft(→再 evaluate);评估 ok 或达上限→polish;润色后→done。
-  - `ReplyPipeline.run(...)`:`state={draft, verdict, polished, rounds}`;`while (role:=selector.choose(state)) != "done"` 分派 `_evaluate/_redraft/_polish`;每次派发发对应事件(`select`/`evaluate`/`polish`)供 trace。
-  - `settings.reply_pipeline_max_rounds`(默认 2)。异常 fail-open/回退上一版。
-- [ ] 运行该测试文件绿。提交:`feat(agent): H1 出话/评估/润色 + 选择器动态调度(G1)`。
+  - `FunctionalSelector`:`choose_llm(client, model, state) -> role`(LLM 推理选下一步,解析失败抛出)+ `choose_rule(state) -> role`(规则兜底:未评估→evaluate;评估不 ok 且未达 max→redraft;否则 polish;润色后 done)。
+  - `ReplyPipeline.run(...)`:`state={draft, verdict, polished, rounds}`;循环 `role = selector(mode)`,`selector_mode=="llm"` 先试 `choose_llm`、异常/非法则 `choose_rule`;按 role 分派 `_evaluate/_redraft/_polish`;达 `max_rounds` 后选择器只允许 polish/done(防 LLM 无限重写);每步发 `select`(带 next+reason)/`evaluate`/`polish` 事件供 trace。
+  - `settings.reply_pipeline_max_rounds`(默认 2)、`settings.selector_mode`(默认 `"llm"`)。异常 fail-open/回退上一版。
+- [ ] 运行该测试文件 + 全量离线绿。提交:`feat(agent): H1 出话/评估/润色 + LLM ReAct 选择器动态调度(G1)`。
 
 ### Task H1.3 — 接入 EcomAgent + 分级门控 + 接地上下文
 - [ ] **写测试**:用现有裸 agent 模式(`test_react_degrade` 风格)驱动 `chat()`,断言:复杂轮(mock `_step_seq>0`)会调用 pipeline;简单轮不调用;`_grounding_context()` 只取"最后一条 user 之后的 tool 结果"。
@@ -215,7 +216,7 @@ H1(含 H1.0 领域改 + G1 选择器,~3.5d)→ H2(含 G2 结构化档案,~2.5d)�
   - 数据飞轮 PE自动化→**H4**;**数据层标注**(意图/话术/正确性/润色)→**H4.0/G4**;RL🤝排除。
 - **占位符扫描**:无 TBD;新模块均给接口签名/行为/来源;门控/接地/半自动策略明确。
 - **一致性**:`ReplyPipeline.run`+`FunctionalSelector.choose`、`MemoryFtsStore`、`UserProfile`、`synthesize_skills/improve_skill/model_user`、`reply_labels/label_reply`、`propose_prompt_tweaks` 命名一致;开关 `*_enabled` 统一。
-- **诚实标注的简化**:G1 用**规则选择器**(非 LLM 选择器,零额外成本,预留 LLM 接口);G3 全程**半自动**(产候选人工确认,不自动改线上);G4 **半自动打标**(评估器 auto + 坐席 gold),非全人工标注平台。这些是取舍,形态已对齐。
+- **诚实标注的简化**:G1 **默认 LLM ReAct 选择器**(每步真 LLM 推理选下一个功能 Agent,100% 对齐图),规则选择器仅作兜底;G3 全程**半自动**(产候选人工确认,不自动改线上);G4 **半自动打标**(评估器 auto + 坐席 gold),非全人工标注平台。
 - **风险点**:H3 合成/自改进质量(半自动缓解)、H1 复杂轮多次 LLM(分级门控+max_rounds 缓解)、FTS5 可用性(LIKE 降级)、G2 档案与现有 users/account 表同步一致性(单一写入口)。
 
 ## Execution Handoff
