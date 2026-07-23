@@ -22,6 +22,11 @@ def set_current_session(session_id: Optional[str]) -> None:
     _current_session_id.set(session_id)
 
 
+def get_current_session() -> Optional[str]:
+    """当前会话 id(供幂等键等跨切面读取)。"""
+    return _current_session_id.get()
+
+
 def _resolve_floor(list_price: float, floor_price: Optional[float]) -> float:
     """底价：商品设了 floor_price 用它，否则按标价 × 系数回退。"""
     if floor_price is not None:

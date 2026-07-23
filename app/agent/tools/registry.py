@@ -332,13 +332,33 @@ TOOL_DEFINITIONS.append({
 })
 
 
+# 有副作用的写工具:执行前查幂等键,成功后写幂等键(防重复副作用)
+_WRITE_TOOLS = frozenset({"apply_refund", "cancel_order", "change_address", "negotiate_price"})
+
+
 def execute_tool(name: str, arguments: dict) -> str:
-    """根据工具名称分发执行，返回 JSON 字符串结果。"""
+    """根据工具名称分发执行，返回 JSON 字符串结果。写工具带幂等保护(R6)。"""
     func = _TOOL_MAP.get(name)
     if not func:
         return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
+
+    idem = None
+    if name in _WRITE_TOOLS:
+        from app.session.idempotency import get_idempotency_store, idempotency_key
+        from app.agent.tools.bargain import get_current_session
+        store = get_idempotency_store()
+        key = idempotency_key(get_current_session(), name, arguments)
+        cached = store.get(key)
+        if cached is not None:
+            return cached          # 已成功执行过 → 返回缓存,不重复副作用
+        idem = (store, key)
+
     try:
         result = func(**arguments)
     except Exception as e:
         result = {"error": f"工具执行出错: {e}"}
-    return json.dumps(result, ensure_ascii=False)
+    out = json.dumps(result, ensure_ascii=False)
+
+    if idem is not None and isinstance(result, dict) and result.get("success"):
+        idem[0].put(idem[1], out)   # 仅缓存成功的写结果
+    return out
