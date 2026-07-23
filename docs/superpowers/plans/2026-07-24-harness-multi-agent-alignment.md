@@ -4,13 +4,14 @@
 
 **Goal:** 把项目**严格对齐**行业电商客服 **Harness 架构**——领域路由改为 **售前/售中/售后**;补齐功能分工(出话/评估/润色 + **选择器动态调度 G1**)、FTS5 记忆管理 + **结构化记忆档案 G2**、Skill 自动化生成 **完整闭环 G3**、PE 自动化数据飞轮 + **标注数据采集 G4**(RL 除外),全部**手写**、保留**通用电商**业务。
 
-**Architecture:** 两层 Agent = 第一层领域路由(改为 **售前/售中/售后** 三域)+ 第二层功能分工(总控内 出话→评估→润色,由**选择器动态调度**、可循环,复用同一硬化引擎)。外围 Harness 能力层:双层记忆(短期已有 + 长期扩为**结构化档案**:base profile/行为标签/工单流转)+ FTS5 记忆管理(新)+ 上下文引擎(已有)+ Skills 管理(已有)+ **Skill 自动生成闭环**(创建/自改进/用户建模,新)+ Tools/MCP(已有)+ HITL(已有)+ 数据飞轮(PE 自动化 + **标注数据采集**,新)。
+**Architecture:** **总控 Agent(多 Agent 编排)= 唯一运行架构**,移除"单 Agent 独立模式";`EcomAgent` 降为被总控驱动的**内部 ReAct 引擎**(不删,B1 已统一复用)。两层 Agent = 第一层领域路由(**售前/售中/售后** 三域)+ 第二层功能分工(总控内 出话→评估→润色,由 **LLM ReAct 选择器**动态调度、可循环)。外围 Harness 能力层:双层记忆(短期已有 + 长期扩为**结构化档案**:base profile/行为标签/工单流转)+ FTS5 记忆管理(新)+ 上下文引擎(已有)+ Skills 管理(已有)+ **Skill 自动生成闭环**(创建/自改进/用户建模,新)+ Tools/MCP(已有)+ HITL(已有)+ 数据飞轮(PE 自动化 + **标注数据采集**,新)。
 
 **Tech Stack:** Python 3.11、现有 EcomAgent ReAct 引擎、SQLite FTS5(内置)、Redis(会话存储,已有)、OpenAI 兼容 LLM;测试用 fake client / fakeredis / 临时目录,不触网。
 
 ## Global Constraints
 
 - **手写实现,不引入 AutoGen / LangGraph 等重依赖**;对齐架构形态而非厂商。
+- **总控(多 Agent)为唯一运行架构**:移除单 Agent 独立模式——API/CLI 入口恒走总控;`EcomAgent` 保留为总控驱动的内部引擎(不删);`multi_agent_enabled` 废弃(恒 True)。单元测试仍可直接构造 `EcomAgent` 测引擎。
 - **领域路由 = 售前 / 售中 / 售后 三域**(替代原 售前/售后/投诉;投诉并入售后)。
 - **保留通用电商业务**,不新建得物式尺码/spuid 工具与数据。
 - **严格对齐补齐 G1–G4**:选择器动态调度、结构化记忆档案、Skill 闭环、标注采集。高风险/重成本项(如 Skill 自改进、LLM 选择器)做**半自动/可关**,但形态必须在。
@@ -26,6 +27,7 @@
 | 文件 | 阶段 | 责任 |
 |---|---|---|
 | `app/multi_agent/orchestrator.py`(改) | H1.0 | **显式化"总控 Agent"**:内聚暴露 react/memory/permissions/lifecycle 四项职责 |
+| `app/api/session_manager.py` / `main.py` / `run_eval.py`(改) | H1.0-C | **移除单 Agent 模式**:工厂恒建总控;`multi_agent_enabled` 废弃 |
 | `app/multi_agent/router.py` / `agents.py` / `app/prompts/agents.py`(改) | H1.0 | 领域改 售前/售中/售后 + 三域画像/工具子集 |
 | `app/prompts/reply_pipeline.py`(新) | H1 | 评估器 / 重写 / 润色 / **选择器(G1)** 提示词 |
 | `app/agent/reply_pipeline.py`(新) | H1 | 出话/评估/(重写)/润色 + **LLM ReAct 选择器循环(G1,规则兜底)** |
@@ -65,6 +67,18 @@
   - 断言 `capabilities()` 返回这四项的清单(供自省/文档)。
 - [ ] **实现**:在 `orchestrator.py` 给 `MultiAgentOrchestrator` 加类 docstring 明确"总控 Agent"定位 + 上述四个 `@property`/方法(多为对已有能力的**内聚暴露**,不改行为):`react`→`self.engine`;`memory`→`self.engine.memory_manager`;`permissions`→`{"risk_actions": RISK_ACTIONS, "consent": True, "idempotency": True, "escalation(HITL)": True}`;`lifecycle`→委托 save/close/reset(已有)+ `status`/`step_seq`(读 engine);`capabilities()` 汇总四项名称。
 - [ ] 运行相关测试 + 全量离线绿。提交:`refactor(multi-agent): H1.0 显式化总控Agent + 领域改售前/售中/售后`。
+
+**C) 移除单 Agent 运行模式(总控为唯一入口)**
+> 只保留多 Agent(总控)架构;`EcomAgent` 不删,继续作为被总控驱动的内部 ReAct 引擎。
+- [ ] **写测试**:`tests/test_session_manager.py`(或新增)——`SessionManager._default_factory` 恒返回 `MultiAgentOrchestrator`(不再依赖 `multi_agent_enabled`);API 走 `/api/chat` 时 `manager.get_or_create` 得到总控实例。
+- [ ] **实现**:
+  - `session_manager.py::_default_factory`:去掉 `if settings.multi_agent_enabled` 分支,**恒建 `MultiAgentOrchestrator`**。
+  - `settings.multi_agent_enabled`:标注**废弃**(保留字段避免破坏 .env,值恒当 True 处理)或删除并清理引用(`app.py` 的 eval `_mode`、`run_eval.py` 默认改为 multi)。
+  - `EcomAgent` 类 docstring 更新:"内部 ReAct 引擎,由总控 Agent(MultiAgentOrchestrator)驱动;不再作为独立运行模式"。
+  - `main.py`(CLI):改为构造 `MultiAgentOrchestrator`(与 API 一致),或标注 CLI 仅供引擎级调试。
+- [ ] 运行全量离线绿(注意:直接构造 `EcomAgent` 的单元测试仍有效,测的是引擎;走工厂/streaming 的测试现在拿到总控)。
+- [ ] **端到端冒烟**:真 Redis 起服务,默认(无需设 `MULTI_AGENT_ENABLED`)聊一句 → 事件流出现 `route`(总控路由),确认走的是总控。
+- [ ] 提交:`refactor(multi-agent): H1.0 移除单Agent模式,总控为唯一运行架构`。
 
 ### Task H1.1 — 提示词(评估/重写/润色)
 - [ ] **写测试**:`tests/test_reply_pipeline.py` 断言三提示词非空且含关键约束词("接地"/"不得改变任何事实")。
@@ -210,6 +224,7 @@ H1(含 H1.0 领域改 + G1 选择器,~3.5d)→ H2(含 G2 结构化档案,~2.5d)�
 ## Self-Review(写完自查 —— 覆盖两图 + G1–G4)
 
 - **逐组件覆盖核对**(对照大图):
+  - **架构收敛**:**H1.0-C 移除单 Agent 模式**,总控为唯一运行入口(`EcomAgent` 降为内部引擎,不删)。
   - **总控Agent**(React/记忆/业务权限/生命周期):能力已有但散落 → **H1.0 显式化为一处入口**(orchestrator 暴露 react/memory/permissions/lifecycle);领域子Agent→**H1.0 改售前/售中/售后**;功能型多Agent(出话/评估/润色)→**H1**;**选择器动态调度**→**H1.2/G1**。
   - Memory 长期(base profile/行为标签/工单流转)→**H2.3/G2**;Conversation 短期✅已有;记忆管理 SQLite WAL+FTS5→**H2**;上下文引擎✅已有。
   - Skill自动化生成(策划/创建/**自改进**/FTS5召回/**用户建模**/自述化循环)→**H3+H3.3/H3.4/H3.5(G3)**;Skills/Tools/MCP/HITL✅已有。
@@ -217,7 +232,7 @@ H1(含 H1.0 领域改 + G1 选择器,~3.5d)→ H2(含 G2 结构化档案,~2.5d)�
 - **占位符扫描**:无 TBD;新模块均给接口签名/行为/来源;门控/接地/半自动策略明确。
 - **一致性**:`ReplyPipeline.run`+`FunctionalSelector.choose`、`MemoryFtsStore`、`UserProfile`、`synthesize_skills/improve_skill/model_user`、`reply_labels/label_reply`、`propose_prompt_tweaks` 命名一致;开关 `*_enabled` 统一。
 - **诚实标注的简化**:G1 **默认 LLM ReAct 选择器**(每步真 LLM 推理选下一个功能 Agent,100% 对齐图),规则选择器仅作兜底;G3 全程**半自动**(产候选人工确认,不自动改线上);G4 **半自动打标**(评估器 auto + 坐席 gold),非全人工标注平台。
-- **风险点**:H3 合成/自改进质量(半自动缓解)、H1 复杂轮多次 LLM(分级门控+max_rounds 缓解)、FTS5 可用性(LIKE 降级)、G2 档案与现有 users/account 表同步一致性(单一写入口)。
+- **风险点**:H3 合成/自改进质量(半自动缓解)、H1 复杂轮多次 LLM(分级门控+max_rounds 缓解)、FTS5 可用性(LIKE 降级)、G2 档案与现有 users/account 表同步一致性(单一写入口);**H1.0-C 移除单 Agent 后需清理 CLI/eval 的 single 模式引用**,直接构造 `EcomAgent` 的单元测试保持有效(测引擎)。
 
 ## Execution Handoff
 
