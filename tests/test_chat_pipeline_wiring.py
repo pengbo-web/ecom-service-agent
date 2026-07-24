@@ -151,7 +151,7 @@ def test_simple_turn_passes_complex_turn_false(monkeypatch):
 def test_grounding_context_only_current_turn_tools_truncated_and_ordered():
     a = EcomAgent.__new__(EcomAgent)
 
-    long_content = "Z" * 600
+    long_content = "Z" * (settings.grounding_result_max_chars + 100)
 
     a.raw_messages = [
         {"role": "user", "content": "第一轮问题"},
@@ -170,5 +170,39 @@ def test_grounding_context_only_current_turn_tools_truncated_and_ordered():
     assert "OLD" not in ctx
     lines = ctx.split("\n")
     assert lines[0] == "A"
-    assert lines[1] == ("B" + long_content)[:500]
-    assert len(lines[1]) == 500
+    assert lines[1] == ("B" + long_content)[: settings.grounding_result_max_chars]
+    assert len(lines[1]) == settings.grounding_result_max_chars
+
+
+def test_grounding_context_keeps_typical_tool_result_whole():
+    """回归:真实缺陷——list_user_orders 结果约 775 字,旧 500 字截断把第 4 单
+    拦腰切断、第 5 单切没,评估器把正确草稿判为编造、重写反把回复改坏。
+    典型工具结果(<2000 字)必须完整保留。"""
+    a = EcomAgent.__new__(EcomAgent)
+    orders_like = "X" * 775   # 与 list_user_orders 实测长度同量级
+
+    a.raw_messages = [
+        {"role": "user", "content": "查一下我的订单"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "1"}]},
+        {"role": "tool", "tool_call_id": "1", "content": orders_like},
+    ]
+
+    ctx = a._grounding_context()
+    assert ctx == orders_like          # 完整,一个字不截
+
+
+def test_grounding_context_total_budget_keeps_most_recent():
+    """总预算生效时,优先保住最近的工具结果(逆序累计,超预算即停)。"""
+    a = EcomAgent.__new__(EcomAgent)
+    per = settings.grounding_result_max_chars
+    n = settings.grounding_total_max_chars // per + 2   # 超总预算的条数
+
+    msgs = [{"role": "user", "content": "q"}]
+    for i in range(n):
+        msgs.append({"role": "tool", "tool_call_id": str(i), "content": f"{i}:" + "Y" * per})
+    a.raw_messages = msgs
+
+    ctx = a._grounding_context()
+    assert len(ctx) <= settings.grounding_total_max_chars + n   # 换行符余量
+    assert f"{n-1}:" in ctx            # 最近的一定在
+    assert "0:" not in ctx             # 最早的被总预算挤掉

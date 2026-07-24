@@ -278,13 +278,27 @@ class EcomAgent:
         return result_str
 
     def _grounding_context(self) -> str:
-        """取本轮(最近一条 user 之后)的工具真实结果,供评估/重写接地。每条截断 500 字。"""
+        """取本轮(最近一条 user 之后)的工具真实结果,供评估/重写接地。
+
+        截断教训:每条 500 字会把常见工具结果(如 list_user_orders ~775 字)拦腰
+        切断,评估器把草稿里真实存在的内容判为"编造"→ 重写反而把正确回复改坏
+        (丢单/编造"信息未同步")。故上限提到可配置的 grounding_result_max_chars
+        (默认 2000,覆盖绝大多数工具结果全文;超大结果已被 R 系列落盘留指针),
+        并加总预算防多工具轮爆 prompt。
+        """
+        per_cap = settings.grounding_result_max_chars
+        total_cap = settings.grounding_total_max_chars
         collected = []
+        total = 0
         for msg in reversed(self.raw_messages):
             if msg.get("role") == "user":
                 break
             if msg.get("role") == "tool":
-                collected.append((msg.get("content") or "")[:500])
+                piece = (msg.get("content") or "")[:per_cap]
+                if total + len(piece) > total_cap:
+                    break   # 逆序遍历,优先保住最近的工具结果
+                collected.append(piece)
+                total += len(piece)
         return "\n".join(reversed(collected))
 
     def _extract_structured_response(self, text: str) -> CustomerServiceResponse:

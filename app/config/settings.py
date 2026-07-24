@@ -132,6 +132,11 @@ class Settings(BaseSettings):
     tool_result_preview_chars: int = 1500 # 落盘时在历史里保留的预览长度
     tool_result_dir: str = "app/sessions/tool_results"  # 超大工具结果存档目录
 
+    # H1 接地上下文(评估/重写用的本轮工具真实结果)截断预算
+    # 教训:500 字会把常见结果拦腰切断,评估器误判草稿"编造"、重写反把正确回复改坏
+    grounding_result_max_chars: int = 2000   # 单条工具结果上限
+    grounding_total_max_chars: int = 8000    # 本轮全部工具结果总预算(优先保最近)
+
     model_config = {"env_file": ".env"}
 
 
