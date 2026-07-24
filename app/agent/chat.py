@@ -28,7 +28,8 @@ class EcomAgent:
             from app.resilience.factory import make_resilient_client
             self.client = make_resilient_client()
         else:
-            self.client = OpenAI(
+            from app.observability.langfuse_client import make_openai_client
+            self.client = make_openai_client(
                 api_key=settings.openai_api_key,
                 base_url=settings.openai_base_url,
             )

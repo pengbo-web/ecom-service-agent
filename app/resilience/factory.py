@@ -1,14 +1,14 @@
 """按 settings 构造 ResilientChatClient（主 + 可选备用）。"""
 
-from openai import OpenAI
-
 from app.config.settings import settings
+from app.observability.langfuse_client import make_openai_client
 from app.resilience.breaker import CircuitBreaker
 from app.resilience.llm_client import ResilientChatClient
 
 
 def make_resilient_client() -> ResilientChatClient:
-    primary = OpenAI(
+    # make_openai_client:langfuse_enabled 时为 drop-in 观测包装,否则原生 OpenAI
+    primary = make_openai_client(
         api_key=settings.openai_api_key,
         base_url=settings.openai_base_url,
         max_retries=0,                 # SDK 重试关掉,由本层统一管
@@ -17,7 +17,7 @@ def make_resilient_client() -> ResilientChatClient:
 
     secondary = None
     if settings.fallback_model and settings.fallback_base_url:
-        secondary = OpenAI(
+        secondary = make_openai_client(
             api_key=settings.fallback_api_key or settings.openai_api_key,
             base_url=settings.fallback_base_url,
             max_retries=0,

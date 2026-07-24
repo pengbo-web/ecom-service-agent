@@ -132,6 +132,12 @@ class Settings(BaseSettings):
     tool_result_preview_chars: int = 1500 # 落盘时在历史里保留的预览长度
     tool_result_dir: str = "app/sessions/tool_results"  # 超大工具结果存档目录
 
+    # Langfuse 观测平台接入(可选体验层,自托管 localhost:3000)
+    langfuse_enabled: bool = False     # 开=LLM 调用自动上报 Langfuse(需 pip install langfuse)
+    langfuse_public_key: str = ""      # 在 Langfuse UI 建项目后生成(pk-lf-...)
+    langfuse_secret_key: str = ""      # (sk-lf-...);均放 .env,勿提交
+    langfuse_host: str = "http://localhost:3000"
+
     # H1 接地上下文(评估/重写用的本轮工具真实结果)截断预算
     # 教训:500 字会把常见结果拦腰切断,评估器误判草稿"编造"、重写反把正确回复改坏
     grounding_result_max_chars: int = 2000   # 单条工具结果上限
