@@ -17,7 +17,7 @@ def _tool_names(tm):
 def test_engine_is_hardened_ecomagent(tmp_path, monkeypatch):
     o = _orch(tmp_path, monkeypatch)
     assert isinstance(o.engine, EcomAgent)          # 复用同一硬化引擎
-    assert set(o.profiles) == {"presale", "postsale", "complaint"}
+    assert set(o.profiles) == {"presale", "midsale", "aftersale"}
 
 
 def test_delegates_state_to_engine(tmp_path, monkeypatch):
@@ -31,10 +31,14 @@ def test_delegates_state_to_engine(tmp_path, monkeypatch):
 def test_profiles_expose_only_allowed_tools(tmp_path, monkeypatch):
     o = _orch(tmp_path, monkeypatch)
     presale = _tool_names(o.profiles["presale"]["tool_manager"])
-    postsale = _tool_names(o.profiles["postsale"]["tool_manager"])
-    assert "apply_refund" in postsale          # 售后能退款
+    midsale = _tool_names(o.profiles["midsale"]["tool_manager"])
+    aftersale = _tool_names(o.profiles["aftersale"]["tool_manager"])
+    assert "apply_refund" in aftersale         # 售后能退款
     assert "apply_refund" not in presale       # 售前不能退款(工具隔离)
-    assert "query_product" in presale
+    assert "query_product" in presale          # 售前能查商品
+    assert "change_address" in midsale         # 售中能改地址
+    assert "change_address" not in presale     # 售前不能改地址
+    assert "apply_refund" not in midsale       # 售中不做退款(交给售后)
 
 
 def test_chat_switches_profile_and_delegates(tmp_path, monkeypatch):
@@ -42,7 +46,7 @@ def test_chat_switches_profile_and_delegates(tmp_path, monkeypatch):
     events = []
     o.event_sink = lambda e: events.append(e)
 
-    monkeypatch.setattr(o.router, "route", lambda *a, **k: "postsale")
+    monkeypatch.setattr(o.router, "route", lambda *a, **k: "aftersale")
     captured = {}
 
     def fake_chat(user_input):
@@ -55,9 +59,9 @@ def test_chat_switches_profile_and_delegates(tmp_path, monkeypatch):
     out = o.chat("我要退款")
 
     assert out == "ok"
-    # 切到了售后画像:prompt + 工具子集都换成 postsale 的
-    assert o.profiles["postsale"]["prompt"] == captured["system_prompt"]
+    # 切到了售后画像:prompt + 工具子集都换成 aftersale 的
+    assert o.profiles["aftersale"]["prompt"] == captured["system_prompt"]
     assert "apply_refund" in captured["tools"]
     # event_sink 透传给了引擎;并发了 route 事件
     assert captured["event_sink"] is not None
-    assert any(e.get("type") == "route" and e.get("key") == "postsale" for e in events)
+    assert any(e.get("type") == "route" and e.get("key") == "aftersale" for e in events)

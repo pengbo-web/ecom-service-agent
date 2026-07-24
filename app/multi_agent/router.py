@@ -6,8 +6,8 @@ from openai import OpenAI
 
 from app.prompts.agents import ROUTER_PROMPT
 
-VALID_AGENTS = {"presale", "postsale", "complaint"}
-DEFAULT_AGENT = "postsale"
+VALID_AGENTS = {"presale", "midsale", "aftersale"}
+DEFAULT_AGENT = "aftersale"
 
 
 class Router:
@@ -18,7 +18,7 @@ class Router:
         self.model = model
 
     def route(self, user_input: str, history: Optional[List[dict]] = None) -> str:
-        """返回子 Agent 标识: "presale" / "postsale" / "complaint"。"""
+        """返回子 Agent 标识: "presale" / "midsale" / "aftersale"。"""
         recent_context = ""
         if history:
             recent = [
