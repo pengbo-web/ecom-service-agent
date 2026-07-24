@@ -52,7 +52,7 @@ export function ChatView({ sessionId, userId, onUserId }: {
     sessionId,
     userId,
     onEvent: (e) => {
-      if (["thought", "tool_call", "tool_result", "guard"].includes(e.type)) patch((t) => ({ ...t, activity: [...t.activity, e] }));
+      if (["thought", "tool_call", "tool_result", "guard", "route", "select", "evaluate", "polish"].includes(e.type)) patch((t) => ({ ...t, activity: [...t.activity, e] }));
       else if (e.type === "reply") patch((t) => ({ ...t, reply: e.content }));
       else if (e.type === "metadata") patch((t) => ({ ...t, meta: { intent: e.intent, confidence: e.confidence, requires_human: e.requires_human, follow_up_question: e.follow_up_question } }));
       else if (e.type === "handoff") patch((t) => ({ ...t, handoff: e.reasons || [] }));
