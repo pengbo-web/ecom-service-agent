@@ -7,9 +7,10 @@
   支持则建 `mem_fts` 虚拟表,否则降级建普通表 `mem_like`,两条路径对外接口一致。
 - **中文召回鲁棒性**:FTS5 默认分词器(unicode61)不切分中文,直接 MATCH 整句
   对中文几乎不可用。因此无论后端是否为 FTS5,`search` 一律采用方案①:
-  对 query 做归一化 + 分词,再用 `content LIKE '%term%'` 逐词匹配打分——
-  简单可靠,对任意长度的中文关键词都有效。FTS5 表在此仅作为存储载体
-  (为未来切换到真正的 MATCH 召回预留),当前查询路径统一走 LIKE。
+  SQL 层只按 user_id 取出该用户记录,再在 Python 侧对 query 分词后用
+  `content.count(term)` 逐词子串计数打分——简单可靠,对任意长度的中文关键词
+  都有效,且天然无 SQL 注入/通配符风险。FTS5 表在此仅作为存储载体
+  (为未来切换到真正的 MATCH 召回预留)。
 - 本文件为纯新增,不依赖/不修改 long_term.py、manager.py。
 """
 
@@ -80,10 +81,8 @@ class MemoryFtsStore:
         """把 query 归一化并切成关键词词元。
 
         中文没有天然分隔符,这里采取朴素但有效的策略:
-        - 先按非中文的常见分隔符(空格/逗号/顿号等)切分出候选片段;
-        - 若切分后仍是较长的连续中文串(用户直接传整句作为 query 的常见情况),
-          不做进一步分词——保留整句作为一个词元用于 LIKE 匹配,
-          同时也把逐字符 2-gram 作为补充词元,提升子串命中概率。
+        按常见分隔符(空格/逗号/顿号等)切分出候选词元并去重;连续中文串
+        (用户直接传整句/整词的常见情况)整体保留为一个词元,交给子串计数匹配。
         """
         query = query.strip()
         if not query:
@@ -101,9 +100,9 @@ class MemoryFtsStore:
     def search(self, user_id: str, query: str, top_k: int = 5) -> list[str]:
         """在该 user_id 名下按 query 关键词召回,返回命中的 content 列表。
 
-        采用方案①:无论后端是 FTS5 表还是 LIKE 表,一律用逐词 LIKE 匹配打分,
-        对中文任意长度关键词均可稳定工作。排序按"命中词数(去重后)+ 出现次数"
-        的朴素相关度降序,无命中返回 []。
+        采用方案①:SQL 只按 user_id 过滤,Python 侧对每条 content 逐词
+        `count(term)` 计数打分,对中文任意长度关键词均可稳定工作。
+        排序按出现次数总和的朴素相关度降序,无命中返回 []。
         """
         terms = self._tokenize(query)
         if not terms:
