@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     memory_user_id: str = "default"
     max_ltm_facts: int = 50
     memory_curation_enabled: bool = False   # Phase 5:长期记忆 LLM 策展(合并/纠正/按重要性淘汰);关则用 add_facts
+    memory_fts_enabled: bool = True         # H2 FTS 记忆全文索引召回;关闭回退全量注入
 
     # Skill 配置（第8期）
     skills_enabled: bool = True

@@ -47,13 +47,16 @@ class MemoryManager:
             return
         self.stm.update(self.client, self.model, recent_messages)
 
-    def build_memory_prompt_sections(self) -> list[dict]:
-        """生成所有记忆相关的 system prompt 消息列表。"""
+    def build_memory_prompt_sections(self, query: str | None = None) -> list[dict]:
+        """生成所有记忆相关的 system prompt 消息列表。
+
+        query 透传给长期记忆,用于命中优先注入(见 LongTermMemory.build_prompt_section)。
+        """
         if not self.memory_enabled:
             return []
 
         sections = []
-        ltm_section = self.ltm.build_prompt_section()
+        ltm_section = self.ltm.build_prompt_section(query)
         if ltm_section:
             sections.append({"role": "system", "content": ltm_section})
         stm_section = self.stm.build_prompt_section()

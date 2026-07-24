@@ -343,7 +343,12 @@ class EcomAgent:
         messages: list[dict] = [
             {"role": "system", "content": system_content}
         ]
-        messages.extend(self.memory_manager.build_memory_prompt_sections())
+        last_user = next(
+            (m.get("content") for m in reversed(self.raw_messages)
+             if m.get("role") == "user"),
+            None,
+        )
+        messages.extend(self.memory_manager.build_memory_prompt_sections(query=last_user))
         if self.summary:
             messages.append(
                 {

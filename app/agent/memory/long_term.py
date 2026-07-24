@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import asdict, dataclass
@@ -16,6 +17,8 @@ from typing import Optional
 from openai import OpenAI
 
 from app.agent.memory.extraction import extract_long_term_facts
+from app.agent.memory.fts_store import MemoryFtsStore
+from app.config.settings import settings
 
 
 @dataclass
@@ -43,10 +46,23 @@ class LongTermMemory:
         self.curate_enabled = curate_enabled
         self.facts: list[MemoryFact] = []
         self.interaction_summaries: list[dict] = []
+        self._fts: MemoryFtsStore | None = None
 
     @property
     def memory_path(self) -> Path:
         return self.memory_dir / f"{self.user_id}.json"
+
+    def _ensure_fts(self) -> MemoryFtsStore | None:
+        """按 settings.memory_fts_enabled 门控懒建 FTS 索引存储。
+
+        关闭时恒返回 None,不建库、不落任何多余文件,行为与改造前完全一致。
+        """
+        if not settings.memory_fts_enabled:
+            return None
+        if self._fts is None:
+            self.memory_dir.mkdir(parents=True, exist_ok=True)
+            self._fts = MemoryFtsStore(str(self.memory_dir / "memory_fts.db"))
+        return self._fts
 
     def load(self) -> None:
         """从 JSON 文件加载用户的长期记忆。"""
@@ -83,6 +99,15 @@ class LongTermMemory:
         with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, self.memory_path)
+
+        # 全量重同步 FTS 索引:facts 列表可能被 curate 整体替换,增量同步易漂移,
+        # n<=max_facts(<=50)时全量重建成本可忽略。
+        fts = self._ensure_fts()
+        if fts is not None:
+            fts.clear(self.user_id)
+            for fact in self.facts:
+                fact_id = hashlib.md5(fact.content.encode("utf-8")).hexdigest()[:12]
+                fts.index(self.user_id, fact_id, fact.content)
 
     def add_facts(self, new_facts: list[MemoryFact]) -> None:
         """添加新事实，自动去重并裁剪到 max_facts。"""
@@ -133,17 +158,64 @@ class LongTermMemory:
                 return
         self.add_facts(new_facts)
 
-    def build_prompt_section(self) -> str | None:
-        """生成注入 system prompt 的长期记忆片段。"""
+    def recall(self, query: str, top_k: int = 5) -> list[str]:
+        """按 query 通过 FTS 索引召回相关事实 content 列表。
+
+        FTS 不可用(门控关闭/未建库)或 query 为空时返回 []。
+        """
+        if not query:
+            return []
+        fts = self._ensure_fts()
+        if fts is None:
+            return []
+        return fts.search(self.user_id, query, top_k)
+
+    def build_prompt_section(self, query: str | None = None) -> str | None:
+        """生成注入 system prompt 的长期记忆片段。
+
+        query 为 None、FTS 不可用或无命中时,facts 部分保持原有全量单段格式，
+        与改造前完全一致。有命中时，facts 部分拆成"与当前问题相关的记忆"
+        （命中事实，按召回顺序）与"其他历史记忆"（其余事实，原顺序，
+        不与命中段重复）两段。
+        """
         if not self.facts and not self.interaction_summaries:
             return None
 
         parts = []
         if self.facts:
-            facts_text = "\n".join(
-                f"- [{f.category}] {f.content}" for f in self.facts
-            )
-            parts.append(f"该用户的历史记忆（来自过往会话）：\n{facts_text}")
+            hit_contents = self.recall(query, top_k=5) if query else []
+
+            hit_facts: list[MemoryFact] = []
+            if hit_contents:
+                by_content: dict[str, MemoryFact] = {}
+                for f in self.facts:
+                    by_content.setdefault(f.content, f)
+                seen: set[str] = set()
+                for content in hit_contents:
+                    f = by_content.get(content)
+                    if f is not None and f.content not in seen:
+                        hit_facts.append(f)
+                        seen.add(f.content)
+
+            if hit_facts:
+                hit_set = {f.content for f in hit_facts}
+                other_facts = [f for f in self.facts if f.content not in hit_set]
+
+                relevant_text = "\n".join(
+                    f"- [{f.category}] {f.content}" for f in hit_facts
+                )
+                parts.append(f"与当前问题相关的记忆：\n{relevant_text}")
+
+                if other_facts:
+                    other_text = "\n".join(
+                        f"- [{f.category}] {f.content}" for f in other_facts
+                    )
+                    parts.append(f"其他历史记忆：\n{other_text}")
+            else:
+                facts_text = "\n".join(
+                    f"- [{f.category}] {f.content}" for f in self.facts
+                )
+                parts.append(f"该用户的历史记忆（来自过往会话）：\n{facts_text}")
 
         if self.interaction_summaries:
             recent = self.interaction_summaries[-3:]
@@ -153,8 +225,11 @@ class LongTermMemory:
         return "\n\n".join(parts)
 
     def reset(self) -> None:
-        """清空该用户的长期记忆（文件也删除）。"""
+        """清空该用户的长期记忆（文件也删除，FTS 索引也清空）。"""
         self.facts = []
         self.interaction_summaries = []
         if self.memory_path.exists():
             self.memory_path.unlink()
+        fts = self._ensure_fts()
+        if fts is not None:
+            fts.clear(self.user_id)
