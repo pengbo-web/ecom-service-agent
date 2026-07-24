@@ -39,9 +39,15 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
     # 挂起动作随会话持久化在 agent 上(R3),重启/换实例后仍在。
     pending = getattr(agent, "_pending", None) if confirmed else None
 
+    # Langfuse 桥(可选体验层):门控关/未装时为 None,零开销
+    from app.observability.langfuse_bridge import langfuse_turn
+    lf_turn = langfuse_turn(session_id, getattr(agent, "user_id", None), user_input)
+
     def sink(ev: dict) -> None:
         if tracer is not None:
             tracer.on_event(ev)
+        if lf_turn is not None:
+            lf_turn.on_event(ev)
         q.put(ev)
 
     # ── 观察/变换阶段(observe):不能否决已发生的动作,只做变换与埋点 ──
@@ -140,21 +146,25 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         return _normal_flow(_sink)
 
     def worker():
+        from contextlib import nullcontext
         real_client = getattr(agent, "client", None)
         agent.event_sink = sink
         try:
-            if tracer is None:
-                _drive(sink)
-            else:
-                from app.observability.client_proxy import TracingClient
-                with tracer.start_trace(session_id, user_input) as trace:
-                    if real_client is not None:
-                        agent.client = TracingClient(real_client, tracer)
-                    try:
-                        trace.intent = _drive(sink)
-                    finally:
+            # Langfuse 根上下文须在 worker 线程内进入(OTel 上下文按线程传播,
+            # drop-in 的 generation 才会嵌进本轮的阶段 span 下)
+            with (lf_turn if lf_turn is not None else nullcontext()):
+                if tracer is None:
+                    _drive(sink)
+                else:
+                    from app.observability.client_proxy import TracingClient
+                    with tracer.start_trace(session_id, user_input) as trace:
                         if real_client is not None:
-                            agent.client = real_client
+                            agent.client = TracingClient(real_client, tracer)
+                        try:
+                            trace.intent = _drive(sink)
+                        finally:
+                            if real_client is not None:
+                                agent.client = real_client
         except Exception as e:  # noqa: BLE001
             q.put({"type": "error", "message": str(e)})
         finally:

@@ -115,7 +115,12 @@ class EcomAgent:
         self._step_seq = 0
         self._checkpoint("in_flight")   # 回合开始:持久化用户消息 + 标记进行中
 
-        final_text = self._react_loop()
+        # stage 事件:供观测层(自研 tracer/Langfuse 桥)组装阶段 span 树
+        self._emit({"type": "stage", "status": "start", "name": "react"})
+        try:
+            final_text = self._react_loop()
+        finally:
+            self._emit({"type": "stage", "status": "end", "name": "react"})
 
         # H1:出话草稿 → 评估/重写/润色流水线(仅复杂轮;简单轮/关开关时 run() 内部直接原样返回)
         final_text = self._reply_pipeline.run(

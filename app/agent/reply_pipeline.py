@@ -115,6 +115,16 @@ class ReplyPipeline:
 
         # 总步数硬上限：防任何异常路径（例如规则/LLM 均判断异常）导致死循环。
         max_steps = max(max_rounds, 1) * 4 + 4
+        # stage 事件:供观测层组装阶段 span 树(与业务事件 select/evaluate/polish 并存)
+        _emit(emit, {"type": "stage", "status": "start", "name": "reply_pipeline"})
+        try:
+            self._run_loop(client, model, state, selector, mode, max_rounds, max_steps, emit)
+        finally:
+            _emit(emit, {"type": "stage", "status": "end", "name": "reply_pipeline"})
+
+        return state["polished"] if state["polished"] is not None else state["draft"]
+
+    def _run_loop(self, client, model, state, selector, mode, max_rounds, max_steps, emit) -> None:
         for _ in range(max_steps):
             # 润色是终态步：一旦已润色即收敛到 done，不再询问选择器。
             # （真 LLM 选择器润色后常反复返回 polish；不短路会白烧十几次 LLM 调用。）
@@ -141,16 +151,14 @@ class ReplyPipeline:
 
             if role == "done":
                 break
-            if role == "evaluate":
-                self._evaluate(client, model, state, emit)
-            elif role == "redraft":
-                self._redraft(client, model, state, emit)
-            elif role == "polish":
-                self._polish(client, model, state, emit)
+            if role in ("evaluate", "redraft", "polish"):
+                _emit(emit, {"type": "stage", "status": "start", "name": role})
+                try:
+                    getattr(self, f"_{role}")(client, model, state, emit)
+                finally:
+                    _emit(emit, {"type": "stage", "status": "end", "name": role})
             else:
                 break   # 理论不会发生：choose_rule/choose_llm 已收敛到四选一
-
-        return state["polished"] if state["polished"] is not None else state["draft"]
 
     def _evaluate(self, client, model: str, state: dict, emit) -> None:
         messages = [
