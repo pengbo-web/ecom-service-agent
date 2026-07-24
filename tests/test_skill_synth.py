@@ -261,6 +261,25 @@ def test_improve_skill_bad_output_returns_none_no_crash(tmp_path):
     assert out_path is None
 
 
+def test_improve_skill_renamed_output_discarded(tmp_path):
+    """name 一致性兜底:LLM 改名(可能撞上并覆盖其他候选)→ 视为坏输出丢弃。"""
+    renamed = IMPROVED_REFUND_SKILL_MD.replace(
+        "name: refund-fast-track", "name: other-candidate"
+    )
+    # 预置一个不相关候选,验证不被误覆盖
+    victim_dir = tmp_path / "other-candidate"
+    victim_dir.mkdir(parents=True)
+    (victim_dir / "SKILL.md").write_text("victim", encoding="utf-8")
+
+    client = FakeClient([renamed])
+    skill = {"name": "refund-fast-track", "content": REFUND_SKILL_MD}
+    out_path = improve_skill(client, "test-model", skill, FAILURE_CASES, str(tmp_path))
+
+    assert out_path is None
+    assert (victim_dir / "SKILL.md").read_text(encoding="utf-8") == "victim"
+    assert not (tmp_path / "refund-fast-track").exists()
+
+
 def test_list_recent_archives_respects_limit_and_order(tmp_path):
     from app.db import Database
 

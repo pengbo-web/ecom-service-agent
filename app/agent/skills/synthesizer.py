@@ -237,6 +237,9 @@ def improve_skill(
     name = str(meta.get("name") or "").strip()
     if not name:
         return None
+    # name 一致性兜底:LLM 意外改名会让候选目录漂移,甚至静默覆盖其他候选——按坏输出丢弃。
+    if name != str(skill.get("name") or "").strip():
+        return None
 
     skill_dir = Path(out_dir) / name
     skill_dir.mkdir(parents=True, exist_ok=True)
