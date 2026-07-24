@@ -198,6 +198,31 @@ def test_llm_selector_invalid_json_falls_back_to_rule(monkeypatch):
     assert out == "润色文本"
 
 
+# ---- 5c. 真 LLM 复现：选择器润色后仍反复返回 polish,必须一次润色即收敛 done ----
+def test_llm_selector_repeated_polish_still_converges(monkeypatch):
+    monkeypatch.setattr(settings, "reply_pipeline_enabled", True)
+    monkeypatch.setattr(settings, "selector_mode", "llm")
+    monkeypatch.setattr(settings, "reply_pipeline_max_rounds", 2)
+    script = [
+        json.dumps({"next": "evaluate", "reason": "先查"}),
+        json.dumps({"ok": True, "issues": [], "suggestion": ""}),
+        json.dumps({"next": "polish", "reason": "润色"}),
+        "润色文本",
+        # 之后即便选择器还想 polish,也不该再被执行(短路到 done)
+        json.dumps({"next": "polish", "reason": "又想润色"}),
+        json.dumps({"next": "polish", "reason": "还想润色"}),
+    ]
+    client = FakeClient(script)
+    events, emit = _collect_emit()
+    out = ReplyPipeline().run(
+        client=client, model="test", user_input="问题",
+        draft="草稿", grounding="工具结果", complex_turn=True, emit=emit,
+    )
+    assert out == "润色文本"
+    assert len([e for e in events if e.get("type") == "polish"]) == 1   # 只润色一次
+    assert _select_events(events)[-1]["next"] == "done"
+
+
 # ---- 6. fail-open：评估器坏 JSON 不阻断；总开关关闭原样返回 draft ----
 def test_evaluator_bad_json_fails_open(monkeypatch):
     monkeypatch.setattr(settings, "reply_pipeline_enabled", True)

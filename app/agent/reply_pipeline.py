@@ -116,6 +116,11 @@ class ReplyPipeline:
         # 总步数硬上限：防任何异常路径（例如规则/LLM 均判断异常）导致死循环。
         max_steps = max(max_rounds, 1) * 4 + 4
         for _ in range(max_steps):
+            # 润色是终态步：一旦已润色即收敛到 done，不再询问选择器。
+            # （真 LLM 选择器润色后常反复返回 polish；不短路会白烧十几次 LLM 调用。）
+            if state["polished"] is not None:
+                _emit(emit, {"type": "select", "next": "done", "reason": "already_polished"})
+                break
             if mode == "llm":
                 try:
                     role = selector.choose_llm(client, model, state)
