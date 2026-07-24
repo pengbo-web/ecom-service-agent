@@ -197,3 +197,47 @@ def test_escalate_records_ticket_via_agent_user_id(tmp_path, monkeypatch):
     assert profile.tickets[0]["ticket_id"] == hid
     assert profile.tickets[0]["status"] == "escalated"
     assert "low_confidence" in profile.tickets[0]["reason"]
+
+
+# ---- 跨线程回归:单例连接被 FastAPI 线程池不同 worker 线程访问必须可用 ----
+def test_store_usable_across_threads(tmp_path, monkeypatch):
+    """复现评审发现:连接在主线程创建、在 worker 线程读写,不得抛
+    sqlite3.ProgrammingError(否则生产环境工单/注入会静默失效)。"""
+    import threading
+
+    store = UserProfileStore(str(tmp_path / "p.db"))   # 主线程建连接
+    errors: list[BaseException] = []
+
+    def worker():
+        try:
+            store.update_base("u_thread", {"member_level": "钻石会员"})
+            store.add_ticket("u_thread", "t1", "escalated", "test")
+            assert store.get("u_thread").base["member_level"] == "钻石会员"
+        except BaseException as e:   # noqa: BLE001 —— 测试要捕获线程内一切异常
+            errors.append(e)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    assert errors == [], f"跨线程访问失败: {errors}"
+    assert len(store.get("u_thread").tickets) == 1
+
+
+def test_fts_store_usable_across_threads(tmp_path):
+    import threading
+    from app.agent.memory.fts_store import MemoryFtsStore
+
+    store = MemoryFtsStore(str(tmp_path / "f.db"))
+    errors: list[BaseException] = []
+
+    def worker():
+        try:
+            store.index("u_thread", "f1", "用户喜欢红色运动鞋")
+            assert store.search("u_thread", "红色") != []
+        except BaseException as e:   # noqa: BLE001
+            errors.append(e)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    assert errors == [], f"跨线程访问失败: {errors}"

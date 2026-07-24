@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 from pathlib import Path
 
 
@@ -31,7 +32,10 @@ class MemoryFtsStore:
         if str(parent) not in ("", "."):
             parent.mkdir(parents=True, exist_ok=True)
 
-        self._conn = sqlite3.connect(self.db_path)
+        # FastAPI 线程池会让同一实例被不同 worker 线程访问:
+        # check_same_thread=False 允许跨线程,配合 self._lock 串行化所有读写。
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._lock = threading.Lock()
         self._conn.execute("PRAGMA journal_mode=WAL")
 
         self.fts5_available = self._probe_fts5()
@@ -66,15 +70,16 @@ class MemoryFtsStore:
 
     def index(self, user_id: str, fact_id: str, content: str) -> None:
         """写入/更新一条记忆(同 (user_id, fact_id) 视为同一条,先删旧再插)。"""
-        self._conn.execute(
-            f"DELETE FROM {self._table} WHERE user_id = ? AND fact_id = ?",
-            (user_id, fact_id),
-        )
-        self._conn.execute(
-            f"INSERT INTO {self._table}(user_id, fact_id, content) VALUES (?, ?, ?)",
-            (user_id, fact_id, content),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                f"DELETE FROM {self._table} WHERE user_id = ? AND fact_id = ?",
+                (user_id, fact_id),
+            )
+            self._conn.execute(
+                f"INSERT INTO {self._table}(user_id, fact_id, content) VALUES (?, ?, ?)",
+                (user_id, fact_id, content),
+            )
+            self._conn.commit()
 
     @staticmethod
     def _tokenize(query: str) -> list[str]:
@@ -108,10 +113,11 @@ class MemoryFtsStore:
         if not terms:
             return []
 
-        rows = self._conn.execute(
-            f"SELECT fact_id, content FROM {self._table} WHERE user_id = ?",
-            (user_id,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT fact_id, content FROM {self._table} WHERE user_id = ?",
+                (user_id,),
+            ).fetchall()
 
         scored: list[tuple[int, str, str]] = []
         for fact_id, content in rows:
@@ -130,13 +136,14 @@ class MemoryFtsStore:
 
     def clear(self, user_id: str | None = None) -> None:
         """清空索引:给 user_id 则只清该用户,否则清全部。"""
-        if user_id is None:
-            self._conn.execute(f"DELETE FROM {self._table}")
-        else:
-            self._conn.execute(
-                f"DELETE FROM {self._table} WHERE user_id = ?", (user_id,)
-            )
-        self._conn.commit()
+        with self._lock:
+            if user_id is None:
+                self._conn.execute(f"DELETE FROM {self._table}")
+            else:
+                self._conn.execute(
+                    f"DELETE FROM {self._table} WHERE user_id = ?", (user_id,)
+                )
+            self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()

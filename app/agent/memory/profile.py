@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -59,7 +60,10 @@ class UserProfileStore:
         if str(parent) not in ("", "."):
             parent.mkdir(parents=True, exist_ok=True)
 
-        self._conn = sqlite3.connect(self.db_path)
+        # 进程级单例会被 FastAPI 线程池的不同 worker 线程访问:
+        # check_same_thread=False 允许跨线程,配合 self._lock 串行化所有读写。
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self._lock = threading.Lock()
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS user_profile ("
@@ -72,18 +76,18 @@ class UserProfileStore:
         self._conn.commit()
 
     def get(self, user_id: str) -> UserProfile:
-        row = self._conn.execute(
-            "SELECT base_json, tags_json FROM user_profile WHERE user_id = ?",
-            (user_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT base_json, tags_json FROM user_profile WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            ticket_rows = self._conn.execute(
+                "SELECT ticket_id, status, reason, ts FROM user_tickets "
+                "WHERE user_id = ? ORDER BY ts ASC",
+                (user_id,),
+            ).fetchall()
         base = json.loads(row[0]) if row and row[0] else {}
         tags = json.loads(row[1]) if row and row[1] else []
-
-        ticket_rows = self._conn.execute(
-            "SELECT ticket_id, status, reason, ts FROM user_tickets "
-            "WHERE user_id = ? ORDER BY ts ASC",
-            (user_id,),
-        ).fetchall()
         tickets = [
             {"ticket_id": r[0], "status": r[1], "reason": r[2], "ts": r[3]}
             for r in ticket_rows
@@ -92,51 +96,54 @@ class UserProfileStore:
 
     def update_base(self, user_id: str, patch: dict) -> None:
         """合并式更新:读旧 base、dict.update(patch)、写回。"""
-        row = self._conn.execute(
-            "SELECT base_json, tags_json FROM user_profile WHERE user_id = ?",
-            (user_id,),
-        ).fetchone()
-        base = json.loads(row[0]) if row and row[0] else {}
-        tags_json = row[1] if row and row[1] else json.dumps([])
-        base.update(patch)
-        now = datetime.now().isoformat()
-        self._conn.execute(
-            "INSERT INTO user_profile (user_id, base_json, tags_json, updated_at) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET base_json = ?, updated_at = ?",
-            (user_id, json.dumps(base, ensure_ascii=False), tags_json, now,
-             json.dumps(base, ensure_ascii=False), now),
-        )
-        self._conn.commit()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT base_json, tags_json FROM user_profile WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            base = json.loads(row[0]) if row and row[0] else {}
+            tags_json = row[1] if row and row[1] else json.dumps([])
+            base.update(patch)
+            now = datetime.now().isoformat()
+            self._conn.execute(
+                "INSERT INTO user_profile (user_id, base_json, tags_json, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET base_json = ?, updated_at = ?",
+                (user_id, json.dumps(base, ensure_ascii=False), tags_json, now,
+                 json.dumps(base, ensure_ascii=False), now),
+            )
+            self._conn.commit()
 
     def add_tag(self, user_id: str, tag: str) -> None:
         """去重追加行为标签。"""
-        row = self._conn.execute(
-            "SELECT base_json, tags_json FROM user_profile WHERE user_id = ?",
-            (user_id,),
-        ).fetchone()
-        base_json = row[0] if row and row[0] else json.dumps({})
-        tags = json.loads(row[1]) if row and row[1] else []
-        if tag not in tags:
-            tags.append(tag)
-        now = datetime.now().isoformat()
-        self._conn.execute(
-            "INSERT INTO user_profile (user_id, base_json, tags_json, updated_at) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(user_id) DO UPDATE SET tags_json = ?, updated_at = ?",
-            (user_id, base_json, json.dumps(tags, ensure_ascii=False), now,
-             json.dumps(tags, ensure_ascii=False), now),
-        )
-        self._conn.commit()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT base_json, tags_json FROM user_profile WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            base_json = row[0] if row and row[0] else json.dumps({})
+            tags = json.loads(row[1]) if row and row[1] else []
+            if tag not in tags:
+                tags.append(tag)
+            now = datetime.now().isoformat()
+            self._conn.execute(
+                "INSERT INTO user_profile (user_id, base_json, tags_json, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET tags_json = ?, updated_at = ?",
+                (user_id, base_json, json.dumps(tags, ensure_ascii=False), now,
+                 json.dumps(tags, ensure_ascii=False), now),
+            )
+            self._conn.commit()
 
     def add_ticket(self, user_id: str, ticket_id: str, status: str, reason: str) -> None:
         ts = datetime.now().isoformat()
-        self._conn.execute(
-            "INSERT INTO user_tickets (user_id, ticket_id, status, reason, ts) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (user_id, ticket_id, status, reason, ts),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO user_tickets (user_id, ticket_id, status, reason, ts) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, ticket_id, status, reason, ts),
+            )
+            self._conn.commit()
 
     def sync_base_from_db(self, user_id: str) -> None:
         """best-effort 从业务库 users 表同步 name;查不到/异常静默跳过。"""
