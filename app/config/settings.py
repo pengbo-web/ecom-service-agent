@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     # Skill 配置（第8期）
     skills_enabled: bool = True
     skills_dir: str = "app/agent/skills/definitions"
+    # H3 Skill 离线合成入口开关（默认关，仅离线手动跑；产出候选，人工审核后才移入 definitions/ 生效）
+    skill_synth_enabled: bool = False
 
     # Evaluation 配置（第9期，离线评估工具，无聊天开关）
     eval_dataset_path: str = "app/evaluation/cases.json"

@@ -239,6 +239,28 @@ class Database:
         finally:
             conn.close()
 
+    def list_recent_archives(self, limit: int = 50) -> list[dict]:
+        """H3 离线合成入口用:按 id DESC 取近 N 条会话归档,messages json.loads 成 list。
+
+        坏 JSON（messages 字段无法解析）的记录直接跳过，不让单条脏数据崩离线脚本。
+        """
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM session_archive ORDER BY id DESC LIMIT ?", (limit,),
+            ).fetchall()
+            results = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["messages"] = json.loads(item["messages"]) if item["messages"] else []
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                results.append(item)
+            return results
+        finally:
+            conn.close()
+
     def set_shipping_address(self, order_id: str, address: str) -> bool:
         conn = self.connect()
         try:

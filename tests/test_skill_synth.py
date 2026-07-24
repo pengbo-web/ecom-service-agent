@@ -165,3 +165,50 @@ def test_skill_manager_does_not_load_candidates(tmp_path):
     assert "track-order" in sm.skill_names
     assert "refund-fast-track" not in sm.skill_names
     assert sm.skill_count == 1
+
+
+# ============================================================
+# H3.2：list_recent_archives（离线合成入口的 db 支撑方法）
+# ============================================================
+
+def test_list_recent_archives_returns_list_and_skips_bad_json(tmp_path):
+    from app.db import Database
+
+    db = Database(str(tmp_path / "t.db"))
+    db.init_schema()
+    db.archive_session("s1", "u1", [{"role": "user", "content": "hi"}], "summary1")
+    db.archive_session("s2", "u2", [{"role": "user", "content": "bye"}], "summary2")
+
+    # 手动插入一条坏 JSON 记录，验证该条被跳过而不崩
+    conn = db.connect()
+    try:
+        conn.execute(
+            "INSERT INTO session_archive (session_id, user_id, messages, summary, "
+            "msg_count, archived_at) VALUES (?, ?, ?, ?, ?, ?)",
+            ("s3", "u3", "{not valid json", "bad", 0, "2026-01-01 00:00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    archives = db.list_recent_archives(limit=10)
+
+    assert len(archives) == 2  # 坏 JSON 那条被跳过
+    session_ids = {a["session_id"] for a in archives}
+    assert session_ids == {"s1", "s2"}
+    for a in archives:
+        assert isinstance(a["messages"], list)
+
+
+def test_list_recent_archives_respects_limit_and_order(tmp_path):
+    from app.db import Database
+
+    db = Database(str(tmp_path / "t.db"))
+    db.init_schema()
+    db.archive_session("s1", "u1", [{"role": "user", "content": "a"}], None)
+    db.archive_session("s2", "u1", [{"role": "user", "content": "b"}], None)
+    db.archive_session("s3", "u1", [{"role": "user", "content": "c"}], None)
+
+    archives = db.list_recent_archives(limit=2)
+    assert len(archives) == 2
+    assert [a["session_id"] for a in archives] == ["s3", "s2"]  # id DESC，最近优先
