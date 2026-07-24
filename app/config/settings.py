@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # 字段保留仅为兼容既有 .env,不再影响运行时选择(工厂不再读它)。
     multi_agent_enabled: bool = False
 
+    # 回复流水线（Phase H1：出话草稿 → 评估 → 重写 → 润色，可关）
+    reply_pipeline_enabled: bool = True     # 总开关；关闭则原样返回草稿，不调用流水线内任何 LLM
+    reply_pipeline_max_rounds: int = 2      # 评估-重写最多轮次；达到后强制 polish/done 收敛
+    selector_mode: str = "llm"              # 总控选择下一步的方式：llm(默认，LLM 推理动态调度)/ rule(规则兜底)
+
     # Memory 配置（第7期）
     memory_enabled: bool = True
     memory_dir: str = "app/sessions/memory"
