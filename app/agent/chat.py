@@ -11,6 +11,7 @@ from app.schemas.response import CustomerServiceResponse, IntentType
 from app.agent.tools.manager import ToolManager
 from app.agent.history_utils import estimate_tokens, sanitize_tool_pairs
 from app.agent.tools.bargain import set_current_session
+from app.agent.reply_pipeline import ReplyPipeline
 
 
 class EcomAgent:
@@ -79,6 +80,8 @@ class EcomAgent:
         # 事件发射器：默认 None（走控制台打印）；服务层可替换为队列写入等
         self.event_sink: Optional[Callable[[dict], None]] = None
 
+        self._reply_pipeline = ReplyPipeline()
+
         self.store = get_session_store()
         loaded = self.store.load(self.session_path)
         if loaded:
@@ -108,6 +111,12 @@ class EcomAgent:
         self._checkpoint("in_flight")   # 回合开始:持久化用户消息 + 标记进行中
 
         final_text = self._react_loop()
+
+        # H1:出话草稿 → 评估/重写/润色流水线(仅复杂轮;简单轮/关开关时 run() 内部直接原样返回)
+        final_text = self._reply_pipeline.run(
+            self.client, self.model, user_input, final_text,
+            self._grounding_context(), self._step_seq > 0, self._emit,
+        )
 
         result = self._extract_structured_response(final_text)
 
@@ -263,6 +272,16 @@ class EcomAgent:
         self._step_seq += 1
         self._checkpoint("in_flight")   # 步级 checkpoint:每个工具步后落盘
         return result_str
+
+    def _grounding_context(self) -> str:
+        """取本轮(最近一条 user 之后)的工具真实结果,供评估/重写接地。每条截断 500 字。"""
+        collected = []
+        for msg in reversed(self.raw_messages):
+            if msg.get("role") == "user":
+                break
+            if msg.get("role") == "tool":
+                collected.append((msg.get("content") or "")[:500])
+        return "\n".join(reversed(collected))
 
     def _extract_structured_response(self, text: str) -> CustomerServiceResponse:
         """从最终文本中提取结构化元数据（意图、置信度等）。"""
