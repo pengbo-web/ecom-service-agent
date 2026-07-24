@@ -15,7 +15,11 @@
 skill 多嵌套一层（`_candidates` 本身不含 SKILL.md），因此不会被误加载
 （细节见 app/agent/skills/loader.py::_discover）。
 
-H3.3 会在本文件追加 `improve_skill`；H3.5 复用本文件全部函数。
+H3.3 追加 `improve_skill`：针对已有 skill 的失败会话样本（转人工/低分），让 LLM
+在现有 SKILL.md 基础上产出改进版，同样只写候选（`out_dir/<name>/SKILL.md`），
+绝不覆盖 `definitions/` 正式目录，人工确认后才替换生效。失败案例采集（trace 低分 /
+HITL 升级且当轮 load 过该 skill）不在本文件实现，由 H3.5 闭环入口拼装后传入。
+H3.5 复用本文件全部函数。
 """
 
 from __future__ import annotations
@@ -53,6 +57,25 @@ description: <一句话描述适用场景与关键词，供路由匹配>
 ---
 - frontmatter 之后是 Markdown body，写出处理该类问题的步骤化流程
   （参考：第一步...第二步...注意事项，风格对齐已有 skill）。
+"""
+
+IMPROVE_SYSTEM_PROMPT = """你是电商客服 Skill 改进器。
+
+下面会给你一份现有的 SKILL.md 全文，以及若干条该 skill 处理失败（转人工/
+低分）的历史会话样本（已截断）。请分析这些失败案例暴露出的问题，在**保留
+原有适用场景**的前提下改进这份 SKILL.md（补充遗漏步骤、修正错误处理逻辑、
+增加注意事项等）。
+
+严格要求：
+- 只输出一份改进后的完整 SKILL.md 文本，不要任何额外说明、不要用 markdown
+  代码块包裹。
+- frontmatter 中的 `name` 字段必须与原 skill 保持完全一致（不改名）。
+- 必须保留如下 frontmatter 格式：
+---
+name: <与原 skill 相同>
+description: <可更新为更准确的描述>
+---
+- frontmatter 之后是 Markdown body，风格对齐原 skill（步骤化流程）。
 """
 
 
@@ -157,3 +180,66 @@ def synthesize_skills(client, model: str, samples: list[dict], out_dir: str) -> 
         written.append(skill_file)
 
     return written
+
+
+def _build_improve_prompt(skill: dict, failure_cases: list[dict]) -> str:
+    lines = [
+        "现有 SKILL.md 全文：",
+        "```",
+        str(skill.get("content") or ""),
+        "```",
+        "",
+        "以下是该 skill 处理失败（转人工/低分）的历史会话样本（已截断）：",
+        "",
+    ]
+    for i, sample in enumerate((_truncate_sample(s) for s in failure_cases), start=1):
+        lines.append(f"## 失败案例 {i}")
+        if sample.get("summary"):
+            lines.append(f"摘要：{sample['summary']}")
+        for m in sample["messages"]:
+            lines.append(f"- {m.get('role')}: {m.get('content')}")
+        lines.append("")
+    lines.append("请基于以上失败案例改进这份 SKILL.md（只输出改进后的完整文本）。")
+    return "\n".join(lines)
+
+
+def improve_skill(
+    client, model: str, skill: dict, failure_cases: list[dict], out_dir: str
+) -> Path | None:
+    """针对失败会话样本改进已有 skill，产出候选（不自动生效）。
+
+    - `skill`：`{"name": str, "content": <现 SKILL.md 全文>}`，由调用方从
+      definitions 读出。
+    - `failure_cases`：与该 skill 相关的失败会话样本（转人工/低分），形状同
+      归档 dict（`messages` list / `summary`）。失败案例采集本身（trace 低分
+      / HITL 升级且当轮 load 过该 skill）不在本函数实现，H3.5 的闭环入口
+      会拼装好样本后传入。
+    - 空失败样本 → 返回 None，不改、不调 LLM。
+    - LLM 输出经 `_parse_frontmatter` 校验；解析失败或 name 丢失（坏输出）
+      → 返回 None，不崩、不写文件。
+    - 产物写 `out_dir/<name>/SKILL.md`（与 H3.1 候选同名则覆盖，均为候选，
+      以新为准），返回写出的文件路径。
+    """
+    if not failure_cases:
+        return None
+
+    prompt = _build_improve_prompt(skill, failure_cases)
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": IMPROVE_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+    )
+    content = response.choices[0].message.content or ""
+
+    meta = _parse_frontmatter(content)
+    name = str(meta.get("name") or "").strip()
+    if not name:
+        return None
+
+    skill_dir = Path(out_dir) / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(content, encoding="utf-8")
+    return skill_file

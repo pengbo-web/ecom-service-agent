@@ -3,7 +3,12 @@ H3.2：离线合成入口的 db 支撑方法 `list_recent_archives`。
 """
 
 from app.agent.skills.loader import _parse_frontmatter, SkillManager
-from app.agent.skills.synthesizer import group_samples, synthesize_one, synthesize_skills
+from app.agent.skills.synthesizer import (
+    group_samples,
+    improve_skill,
+    synthesize_one,
+    synthesize_skills,
+)
 
 
 class _FakeCompletions:
@@ -198,6 +203,62 @@ def test_list_recent_archives_returns_list_and_skips_bad_json(tmp_path):
     assert session_ids == {"s1", "s2"}
     for a in archives:
         assert isinstance(a["messages"], list)
+
+
+# ============================================================
+# H3.3：improve_skill（skill 失败自改进，只产候选）
+# ============================================================
+
+IMPROVED_REFUND_SKILL_MD = """---
+name: refund-fast-track
+description: 当用户想退款/退货时使用的快速处理流程（已根据失败案例改进）。
+---
+
+## 处理流程
+
+### 第一步
+确认订单与退款原因，特别注意用户情绪激动时先安抚。
+
+### 第二步
+若超过 7 天无物流更新，直接升级人工。
+"""
+
+FAILURE_CASES = [
+    _sample([("user", "退货申请一直没人处理，很生气"), ("assistant", "抱歉给您带来不便")]),
+    _sample([("user", "退款流程太复杂了，我要投诉"), ("assistant", "非常抱歉")]),
+]
+
+
+def test_improve_skill_returns_path_with_improved_content(tmp_path):
+    client = FakeClient([IMPROVED_REFUND_SKILL_MD])
+    skill = {"name": "refund-fast-track", "content": REFUND_SKILL_MD}
+    out_path = improve_skill(client, "test-model", skill, FAILURE_CASES, str(tmp_path))
+
+    assert out_path is not None
+    assert out_path.exists()
+    assert out_path.name == "SKILL.md"
+    text = out_path.read_text(encoding="utf-8")
+    assert text == IMPROVED_REFUND_SKILL_MD
+    meta = _parse_frontmatter(text)
+    assert meta["name"] == "refund-fast-track"
+
+
+def test_improve_skill_empty_failure_cases_returns_none_no_calls(tmp_path):
+    client = FakeClient([])
+    skill = {"name": "refund-fast-track", "content": REFUND_SKILL_MD}
+    out_path = improve_skill(client, "test-model", skill, [], str(tmp_path))
+
+    assert out_path is None
+    assert client.calls == []
+    assert not (tmp_path / "refund-fast-track").exists()
+
+
+def test_improve_skill_bad_output_returns_none_no_crash(tmp_path):
+    client = FakeClient([BAD_SKILL_MD])
+    skill = {"name": "refund-fast-track", "content": REFUND_SKILL_MD}
+    out_path = improve_skill(client, "test-model", skill, FAILURE_CASES, str(tmp_path))
+
+    assert out_path is None
 
 
 def test_list_recent_archives_respects_limit_and_order(tmp_path):
