@@ -84,6 +84,10 @@ class MultiAgentOrchestrator:
         return self.engine.memory_manager
 
     @property
+    def skill_manager(self):                 # 委托:CLI /skills 等按引擎的技能管理器工作
+        return self.engine.skill_manager
+
+    @property
     def session_id(self):
         return self.engine.session_id
 

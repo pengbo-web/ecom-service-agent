@@ -26,6 +26,12 @@ def test_memory_entry_is_memory_manager(tmp_path, monkeypatch):
     assert o.memory is o.engine.memory_manager
 
 
+def test_skill_manager_delegates_to_engine(tmp_path, monkeypatch):
+    # 恢复 CLI /skills:总控须把 skill_manager 透传给内部引擎
+    o = _orch(tmp_path, monkeypatch)
+    assert o.skill_manager is o.engine.skill_manager
+
+
 def test_permissions_entry(tmp_path, monkeypatch):
     o = _orch(tmp_path, monkeypatch)
     perms = o.permissions
