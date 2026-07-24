@@ -174,8 +174,9 @@ class Sandbox:
         ))
 
     def _tool_managers(self, agent) -> list:
-        if self.mode == "multi" and hasattr(agent, "agents"):
-            return [a.tool_manager for a in agent.agents.values()]
+        # B1/H1.0 后总控暴露 profiles(画像含各自 tool_manager),不再有 .agents
+        if self.mode == "multi" and hasattr(agent, "profiles"):
+            return [p["tool_manager"] for p in agent.profiles.values()]
         if hasattr(agent, "tool_manager"):
             return [agent.tool_manager]
         return []
