@@ -1,5 +1,4 @@
-from app.agent.chat import EcomAgent
-from app.config.settings import settings
+from app.multi_agent.orchestrator import MultiAgentOrchestrator
 from app.schemas.response import IntentType
 from app.utils.console import enable_utf8_stdout
 
@@ -19,13 +18,9 @@ INTENT_LABELS = {
 
 def main():
     enable_utf8_stdout()
-    if settings.multi_agent_enabled:
-        from app.multi_agent.orchestrator import MultiAgentOrchestrator
-        agent = MultiAgentOrchestrator()
-        mode = "Multi-Agent 协作模式"
-    else:
-        agent = EcomAgent()
-        mode = "ReAct + MCP + RAG"
+    # H1.0-C:总控 Agent(MultiAgentOrchestrator)为唯一入口,与 API 一致。
+    agent = MultiAgentOrchestrator()
+    mode = "总控 Agent · 售前/售中/售后"
 
     print("=" * 50)
     print(f"  并夕夕 · 智能客服「小夕」({mode})")

@@ -97,8 +97,8 @@ def main():
     )
     parser.add_argument(
         "--mode", choices=["single", "multi"],
-        default="multi" if settings.multi_agent_enabled else "single",
-        help="被测 Agent 模式（默认据 multi_agent_enabled）",
+        default="multi",   # H1.0-C:总控 Agent 唯一入口,默认 multi
+        help="被测 Agent 模式（默认 multi;single 已废弃）",
     )
     parser.add_argument(
         "--judge", dest="judge", action="store_true", default=settings.eval_use_judge,

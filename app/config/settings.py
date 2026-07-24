@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     chroma_collection: str = "ecom_kb"
 
     # Multi-Agent 配置（第6期）
+    # 【已废弃】H1.0-C 起总控 Agent(MultiAgentOrchestrator)为唯一入口,恒当 True。
+    # 字段保留仅为兼容既有 .env,不再影响运行时选择(工厂不再读它)。
     multi_agent_enabled: bool = False
 
     # Memory 配置（第7期）

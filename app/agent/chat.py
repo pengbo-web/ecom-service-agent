@@ -14,7 +14,11 @@ from app.agent.tools.bargain import set_current_session
 
 
 class EcomAgent:
-    """电商客服 Agent —— 第八期：Skill 可复用能力模块"""
+    """内部 ReAct 引擎,由总控 Agent(MultiAgentOrchestrator)驱动;不再作为独立运行模式。
+
+    承载工具循环 / 记忆 / consent / 持久化 / 事件流等全部硬化能力。总控 Agent 按路由
+    切换画像(system prompt + 工具子集)后复用本引擎执行——它不再直接对外作为运行入口。
+    """
 
     def __init__(self, session_path: Optional[str] = None, session_id: Optional[str] = None,
                  user_id: Optional[str] = None):

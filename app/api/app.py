@@ -78,7 +78,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
     admin_auth = make_admin_auth(_admin_token)
 
     _baseline_path = _ROOT / settings.eval_baseline_path
-    _mode = "multi" if settings.multi_agent_enabled else "single"
+    _mode = "multi"   # H1.0-C:总控 Agent 唯一入口,恒 multi
     if eval_runner is None:
         eval_runner = EvalRunner(
             eval_fn=lambda: run_evaluation(mode=_mode, use_judge=False),

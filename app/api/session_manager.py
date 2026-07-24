@@ -12,13 +12,10 @@ from typing import Callable, Optional
 
 
 def _default_factory(session_path: str, user_id: str | None = None):
-    from app.config.settings import settings
-    if settings.multi_agent_enabled:
-        from app.multi_agent.orchestrator import MultiAgentOrchestrator
-        return MultiAgentOrchestrator(session_path=session_path, user_id=user_id)
-    from app.agent.chat import EcomAgent
-    return EcomAgent(session_path=session_path, session_id=Path(session_path).stem,
-                     user_id=user_id)
+    # H1.0-C:总控 Agent(MultiAgentOrchestrator)是系统唯一入口——不再有单 Agent 运行模式。
+    # (settings.multi_agent_enabled 已废弃,恒当 True;此处不再分支判断。)
+    from app.multi_agent.orchestrator import MultiAgentOrchestrator
+    return MultiAgentOrchestrator(session_path=session_path, user_id=user_id)
 
 
 class SessionManager:

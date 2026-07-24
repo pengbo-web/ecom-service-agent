@@ -1,6 +1,8 @@
 import threading
 
-from app.api.session_manager import SessionManager
+from app.api.session_manager import SessionManager, _default_factory
+from app.config.settings import settings
+from app.multi_agent.orchestrator import MultiAgentOrchestrator
 
 
 class FakeAgent:
@@ -73,3 +75,26 @@ def test_reset_clears_bargain_state(tmp_path):
     mgr.get_or_create("s1")
     mgr.reset("s1")
     assert db.get_bargain_state("s1", "P1") is None
+
+
+# ---- H1.0-C:移除单 Agent 模式,默认工厂恒建总控 Agent ----
+def test_default_factory_returns_orchestrator(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "memory_dir", str(tmp_path))
+    agent = _default_factory(str(tmp_path / "s.json"), user_id="u1")
+    assert isinstance(agent, MultiAgentOrchestrator)
+
+
+def test_factory_orchestrator_even_when_flag_false(tmp_path, monkeypatch):
+    """开关已废弃(恒当 True):即使显式置 False,仍返回总控 Agent。"""
+    monkeypatch.setattr(settings, "memory_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "multi_agent_enabled", False)
+    agent = _default_factory(str(tmp_path / "s.json"), user_id="u1")
+    assert isinstance(agent, MultiAgentOrchestrator)
+
+
+def test_session_manager_get_or_create_returns_orchestrator(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "memory_dir", str(tmp_path))
+    monkeypatch.setattr(settings, "multi_agent_enabled", False)
+    sm = SessionManager(base_dir=str(tmp_path / "api"))
+    agent = sm.get_or_create("sess-1", user_id="u1")
+    assert isinstance(agent, MultiAgentOrchestrator)
