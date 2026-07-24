@@ -16,7 +16,19 @@ from app.agent.tools.manager import ToolManager
 
 
 class MultiAgentOrchestrator:
-    """路由到领域画像,用同一硬化引擎执行。委托历史/记忆/持久化给引擎。"""
+    """**总控 Agent(Controller Agent)**:系统对外的唯一 Agent 入口。
+
+    它把用户请求路由到领域画像(售前/售中/售后),用同一个经过硬化的 ReAct 引擎
+    (EcomAgent)执行,并统一内聚以下四项职责,对外只读暴露(不改变底层行为):
+
+    - **react**   :底层 ReAct 引擎(EcomAgent,含 `_react_loop` / 工具循环)。
+    - **memory**  :记忆管理(短期/长期记忆巩固与召回)。
+    - **permissions**:权限与安全门(风险动作 consent、幂等、升级)。
+    - **lifecycle**:生命周期(save / close / reset)与当前运行状态。
+
+    委托历史/记忆/持久化给引擎;对外接口与 EcomAgent 一致。
+    调用 `capabilities()` 可列出这四项职责名称。
+    """
 
     def __init__(self, session_path: Optional[str] = None, user_id: Optional[str] = None):
         from app.agent.chat import EcomAgent
@@ -82,6 +94,43 @@ class MultiAgentOrchestrator:
     @property
     def history_size(self) -> int:
         return self.engine.history_size
+
+    # ---- 总控 Agent 的四项职责入口(只读暴露,不改行为)----
+    @property
+    def react(self):
+        """ReAct 引擎(EcomAgent,含 _react_loop / 工具循环)。"""
+        return self.engine
+
+    @property
+    def memory(self):
+        """记忆管理(短期/长期记忆)。"""
+        return self.engine.memory_manager
+
+    @property
+    def permissions(self) -> dict:
+        """权限与安全门:风险动作 consent、幂等、升级。"""
+        from app.agent.consent import RISK_ACTIONS
+        return {
+            "risk_actions": RISK_ACTIONS,
+            "consent": True,
+            "idempotency": True,
+            "escalation": True,
+        }
+
+    @property
+    def lifecycle(self) -> dict:
+        """生命周期视图:save/close/reset(可调用)+ 当前运行状态(status/step_seq)。"""
+        return {
+            "save": self.save,
+            "close": self.close,
+            "reset": self.reset,
+            "status": self.engine._status,
+            "step_seq": self.engine._step_seq,
+        }
+
+    def capabilities(self) -> list:
+        """列出总控 Agent 内聚的四项职责名称。"""
+        return ["react", "memory", "permissions", "lifecycle"]
 
     def reset(self):
         self.engine.reset()
