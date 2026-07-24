@@ -49,13 +49,18 @@
 
 **Interfaces:**
 - Consumes:现有 `EcomAgent._react_loop()` 的 `final_text`(= 出话草稿)、`self._step_seq`(>0 表本轮用过工具 = 复杂轮)、`self.raw_messages`(取本轮 tool 结果做接地)。
-- Produces:`ReplyPipeline.run(client, model, user_input, draft, grounding, complex_turn, emit) -> str`(最终回复);发 `evaluate`/`polish` 事件供 trace。
+- Produces:`ReplyPipeline.run(client, model, user_input, draft, grounding, complex_turn, emit) -> str`(最终回复);发 `select`(选择器每步选谁)/`evaluate`/`polish` 事件供 trace。
+- **归属说明**:功能流水线运行在**引擎 `EcomAgent.chat()` 内**、由**总控驱动**(总控 `.react` == engine);与 H1.0-C"总控唯一入口"一致——总控经其引擎拥有出话/评估/润色编排。
 
 ### Task H1.0 — 显式化总控 Agent + 领域路由改 售前/售中/售后
 
 **A) 领域路由改 售前/售中/售后**
-- [ ] **写测试**:`tests/test_orchestrator_unified.py` 更新——`profiles` 键为 `{"presale","midsale","aftersale"}`;售中含 `query_logistics/expedite_shipping/change_address/cancel_order`;售后含 `apply_refund/issue_invoice`;售前含 `query_product/query_coupons/negotiate_price`。
-- [ ] **实现**:`router.py` `VALID_AGENTS={"presale","midsale","aftersale"}`、`DEFAULT_AGENT="aftersale"`;`prompts/agents.py` 用 `PRESALE/MIDSALE/AFTERSALE_PROMPT`(投诉话术并入售后);`agents.py` 三域画像 + 工具子集(见上)。
+- 三域工具子集(**公共**:每域都含 `search_knowledge/recall_user_memory/load_skill/read_tool_result`):
+  - **售前 presale**:+ `query_product/query_coupons/negotiate_price/list_user_orders`
+  - **售中 midsale**:+ `query_order/query_logistics/expedite_shipping/change_address/cancel_order/list_user_orders`
+  - **售后 aftersale**(含原投诉):+ `query_order/query_logistics/apply_refund/issue_invoice/list_user_orders`
+- [ ] **写测试**:`tests/test_orchestrator_unified.py` 更新——`profiles` 键为 `{"presale","midsale","aftersale"}`;按上表断言各域含/不含关键工具(如 `apply_refund` 在售后不在售前;`change_address` 在售中)。
+- [ ] **实现**:`router.py` `VALID_AGENTS={"presale","midsale","aftersale"}`、`DEFAULT_AGENT="aftersale"`、`ROUTER_PROMPT` 三域意图描述;`prompts/agents.py` 用 `PRESALE/MIDSALE/AFTERSALE_PROMPT`(投诉话术并入售后);`agents.py` 三域画像 + 上表工具子集。
 
 **B) 显式化"总控 Agent"(把散落的四项能力内聚成一处入口)**
 > 目标:架构图里那个蓝盒子在代码里有对应的**一个类/一处入口**,四项能力(React 机制、记忆管理、业务权限、生命周期)显式可见、可指认——不再隐式散落。`MultiAgentOrchestrator` 即"总控 Agent"。
