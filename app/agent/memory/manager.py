@@ -11,6 +11,7 @@ from openai import OpenAI
 
 from app.agent.memory.long_term import LongTermMemory
 from app.agent.memory.short_term import ShortTermMemory
+from app.config.settings import settings
 
 
 class MemoryManager:
@@ -56,6 +57,17 @@ class MemoryManager:
             return []
 
         sections = []
+        if settings.memory_profile_enabled:
+            try:
+                from app.agent.memory.profile import get_profile_store
+
+                store = get_profile_store()
+                if store is not None:
+                    profile_section = store.get(self.ltm.user_id).to_prompt()
+                    if profile_section:
+                        sections.append({"role": "system", "content": profile_section})
+            except Exception:
+                pass
         ltm_section = self.ltm.build_prompt_section(query)
         if ltm_section:
             sections.append({"role": "system", "content": ltm_section})

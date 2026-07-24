@@ -82,6 +82,9 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                 hid = hitl.escalate(session_id, user_input, reply,
                                     result.intent.value, result.confidence,
                                     reasons, recent_context=recent)
+                from app.agent.memory.profile import record_ticket
+                record_ticket(getattr(agent, "user_id", None), hid, "escalated",
+                              ";".join(reasons))
                 _sink({"type": "handoff", "reasons": reasons, "handoff_id": hid})
         return result.intent.value
 
