@@ -106,6 +106,10 @@ class EcomAgent:
     def chat(self, user_input: str) -> CustomerServiceResponse:
         """处理用户输入：ReAct 循环 → 结构化提取 → 返回结果"""
         set_current_session(self.session_id)
+        # 每轮刷新记忆工具的当前 manager:多 agent 并存时防 recall_user_memory 串户
+        if settings.memory_enabled:
+            from app.agent.tools.memory_tool import set_memory_manager
+            set_memory_manager(self.memory_manager)
         self.raw_messages.append({"role": "user", "content": user_input})
         self._step_seq = 0
         self._checkpoint("in_flight")   # 回合开始:持久化用户消息 + 标记进行中
