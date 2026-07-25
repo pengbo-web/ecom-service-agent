@@ -100,11 +100,16 @@ class SessionManager:
                     except Exception:
                         pass
                 self._archiver.archive(session_id, agent)   # 冷归档(best-effort)
-                try:
-                    from app.db import get_db
-                    get_db().close_conversation(session_id, "idle")   # 生命周期:空闲即翻篇
-                except Exception:
-                    pass
+                # 默认不自动结束会话:仅巩固记忆+回收内存,会话保持 open,
+                # 下次打开由 open_or_reuse 复用原会话。开 conversation_idle_close_enabled
+                # 才置 closed(工单式,空闲翻篇)。
+                from app.config.settings import settings
+                if settings.conversation_idle_close_enabled:
+                    try:
+                        from app.db import get_db
+                        get_db().close_conversation(session_id, "idle")
+                    except Exception:
+                        pass
             with self._guard:
                 self._agents.pop(session_id, None)
                 self._last_active.pop(session_id, None)

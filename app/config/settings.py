@@ -102,6 +102,10 @@ class Settings(BaseSettings):
     auto_consolidate_enabled: bool = True
     session_idle_ttl: int = 1800      # 会话空闲多久（秒）后自动巩固记忆并从内存回收
     reaper_interval: int = 120        # 后台扫描间隔（秒）
+    # 空闲回收时是否把会话置 closed(工单式,下次打开翻篇开新会话)。
+    # False(默认)=不自动结束会话:仍巩固记忆+回收内存,但会话保持 open,
+    # 下次打开由 open_or_reuse 复用原会话(持久会话式,更贴 Web 聊天习惯)。
+    conversation_idle_close_enabled: bool = False
 
     # 生产加固（W3.5）
     admin_token: str = ""              # 管理接口令牌；空=本地不鉴权

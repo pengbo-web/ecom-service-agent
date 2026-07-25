@@ -76,17 +76,39 @@ def test_only_idle_ones_reaped_mixed():
     assert "old" not in mgr._agents and "fresh" in mgr._agents
 
 
-def test_reaper_closes_conversation(tmp_path, monkeypatch):
-    """空闲回收时会话置 closed(reason=idle)。"""
+def test_reaper_keeps_conversation_open_by_default(tmp_path, monkeypatch):
+    """默认不自动结束会话:空闲回收后会话仍 open(下次打开复用原会话)。"""
     from app.db import Database, get_db
+    from app.config.settings import settings
     temp_db = Database(str(tmp_path / "t.db"))
     temp_db.init_schema()
     monkeypatch.setattr("app.db._DB", temp_db)
+    monkeypatch.setattr(settings, "conversation_idle_close_enabled", False)
 
     cid = temp_db.create_conversation("u1")["conversation_id"]
     mgr, clock = _mgr()
-    mgr.get_or_create(cid)           # 活跃于 t=1000
-    clock.t = 1000 + 301             # 空闲超过 300s
+    mgr.get_or_create(cid)
+    clock.t = 1000 + 301
     reaped = mgr.sweep(idle_ttl=300)
-    assert reaped == [cid]
+    assert reaped == [cid]                                    # 仍巩固+回收内存
+    assert get_db().get_conversation(cid)["status"] == "open" # 但会话不结束
+    # open_or_reuse 会复用它(每次打开还是原会话)
+    from app.api.conversations import open_or_reuse
+    assert open_or_reuse(get_db(), "u1")["conversation_id"] == cid
+
+
+def test_reaper_closes_conversation_when_gated_on(tmp_path, monkeypatch):
+    """开 conversation_idle_close_enabled 时:空闲回收置 closed(工单式翻篇)。"""
+    from app.db import Database, get_db
+    from app.config.settings import settings
+    temp_db = Database(str(tmp_path / "t.db"))
+    temp_db.init_schema()
+    monkeypatch.setattr("app.db._DB", temp_db)
+    monkeypatch.setattr(settings, "conversation_idle_close_enabled", True)
+
+    cid = temp_db.create_conversation("u1")["conversation_id"]
+    mgr, clock = _mgr()
+    mgr.get_or_create(cid)
+    clock.t = 1000 + 301
+    mgr.sweep(idle_ttl=300)
     assert get_db().get_conversation(cid)["close_reason"] == "idle"
