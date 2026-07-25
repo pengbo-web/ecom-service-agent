@@ -154,6 +154,14 @@ class Settings(BaseSettings):
     grounding_result_max_chars: int = 2000   # 单条工具结果上限
     grounding_total_max_chars: int = 8000    # 本轮全部工具结果总预算(优先保最近)
 
+    # 统一召回层(Unified Recall):存储分离、召回统一——每轮预检索注入,
+    # 政策类知识不再依赖模型自觉调 search_knowledge(实测触发率低,是编造空档)
+    recall_kb_enabled: bool = True        # KB 预召回开关;关=回到纯工具式
+    recall_kb_top_k: int = 2              # 每轮最多注入的 KB 片段数
+    recall_kb_min_score: float = 0.30     # 相似度阈值,低于不注入(防无关知识污染上下文)
+    recall_kb_max_chars: int = 1200       # 注入段字符预算,超出丢弃后续片段
+    recall_kb_min_query_chars: int = 4    # 问题太短(如"嗯")不触发,省一次 embedding
+
     # 极简登录态(两档用户体系:先创建才可用 + 身份从签名 token 解出)
     auth_enabled: bool = True          # 关=完全回退自报 user_id(测试/教学)
     auth_secret: str = "dev-secret-change-in-prod"   # 生产必须换(env AUTH_SECRET)
