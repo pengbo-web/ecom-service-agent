@@ -37,6 +37,7 @@ def test_rule_ack_words_skip_llm():
 def test_rule_pure_order_id():
     qu = understand("ORD-20240115-001", [], _client(raises=True), "m")
     assert qu.need_kb is False and qu.intent == "订单事务" and qu.source == "rule"
+    assert qu.domain == "midsale"    # 纯单号定向售中,防粘在缺订单工具的 presale
 
 
 def test_rule_human_handoff():

@@ -60,8 +60,10 @@ class MultiAgentOrchestrator:
         # 替代独立路由;关开关=回退老 Router(每轮必检索,无门控无改写)
         if settings.query_understanding_enabled:
             from app.agent import understanding
+            # 用 self.client(streaming 层每轮注入的 TracingClient):QU 调用进当前 trace,
+            # token/延迟完整入账;engine.client 在下面 :81 才被覆盖,用它会漏记首轮
             qu = understanding.understand(user_input, self.engine.raw_messages,
-                                          self.engine.client, self.engine.model)
+                                          self.client, self.engine.model)
             key = qu.domain or self._last_key or DEFAULT_AGENT
         else:
             qu = None

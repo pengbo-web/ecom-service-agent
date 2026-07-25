@@ -35,11 +35,13 @@ class QueryUnderstanding:
     source: str = "llm"            # rule/llm/fallback,供 route 事件与观测
 
 
+# (意图, 判定正则, 规则可确定的 domain——None=交给粘性路由)
 _RULE_TABLE = [
-    ("闲聊寒暄", re.compile(r"^(嗯+|哦+|噢|好的?|好嘞|行吧?|可以|ok|okay|收到|明白了?|知道了)[\s!！~。.,，]*$", re.IGNORECASE)),
-    ("闲聊寒暄", re.compile(r"^(你好|您好|哈喽|嗨|在吗|再见|拜拜|谢谢|感谢)[\s!！~。.,，]*$", re.IGNORECASE)),
-    ("订单事务", re.compile(r"^ORD-\d{8}-\d{3}$", re.IGNORECASE)),
-    ("转人工", re.compile(r"^(转人工|人工客服|找人工|叫真人|人工)[\s!！~。.]*$")),
+    ("闲聊寒暄", re.compile(r"^(嗯+|哦+|噢|好的?|好嘞|行吧?|可以|ok|okay|收到|明白了?|知道了)[\s!！~。.,，]*$", re.IGNORECASE), None),
+    ("闲聊寒暄", re.compile(r"^(你好|您好|哈喽|嗨|在吗|再见|拜拜|谢谢|感谢)[\s!！~。.,，]*$", re.IGNORECASE), None),
+    # 纯订单号≈查单/物流意图,定向 midsale——粘在 presale 会缺 query_order/query_logistics 工具
+    ("订单事务", re.compile(r"^ORD-\d{8}-\d{3}$", re.IGNORECASE), "midsale"),
+    ("转人工", re.compile(r"^(转人工|人工客服|找人工|叫真人|人工)[\s!！~。.]*$"), None),
 ]
 
 _QU_PROMPT = """你是电商客服的查询理解模块。分析用户最新消息,输出严格 JSON(不要任何解释、不要代码块):
@@ -67,9 +69,10 @@ def understand(user_input: str, history: list[dict], client, model: str) -> Quer
     """三层查询理解;任何失败兜底为"多检索、走默认"。"""
     text = (user_input or "").strip()
     if len(text) <= _RULE_MAX_CHARS:
-        for intent, pat in _RULE_TABLE:
+        for intent, pat, domain in _RULE_TABLE:
             if pat.match(text):
-                return QueryUnderstanding(intent=intent, need_kb=False, source="rule")
+                return QueryUnderstanding(domain=domain, intent=intent,
+                                          need_kb=False, source="rule")
 
     users = [m.get("content", "") for m in (history or []) if m.get("role") == "user"]
     context = "\n".join(f"- {u}" for u in users[-5:] if u) or "(无)"
