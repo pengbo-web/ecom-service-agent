@@ -21,6 +21,7 @@ class ToolManager:
         allowed_tools: Optional[set] = None,
     ):
         self._mcp_client = None
+        self._shared_mcp = False
         self._tool_source: dict[str, str] = {}
         self._tool_defs: list[dict] = []
 
@@ -39,33 +40,30 @@ class ToolManager:
             self._tool_source[td["function"]["name"]] = "local"
 
     def _init_mcp(self, server_url: str):
-        """连接 MCP Server 加载工具；失败时降级到本地工具。"""
-        from app.mcp_client import MCPClient
+        """从进程级共享连接取 MCP 工具;失败降级本地。"""
+        from app.mcp_client import get_shared_mcp_client
 
-        try:
-            self._mcp_client = MCPClient(server_url)
-            mcp_tools = self._mcp_client.connect()
-            print(f"🔗 [MCP] 已连接 {server_url}，发现 {len(mcp_tools)} 个工具")
-
-            mcp_names = set()
-            for td in mcp_tools:
-                name = td["function"]["name"]
-                mcp_names.add(name)
-                self._tool_source[name] = "mcp"
-            self._tool_defs = list(mcp_tools)
-
-            for td in LOCAL_TOOL_DEFINITIONS:
-                name = td["function"]["name"]
-                if name not in mcp_names:
-                    self._tool_defs.append(td)
-                    self._tool_source[name] = "local"
-
-        except Exception as e:
-            print(f"⚠️  [MCP] 连接失败 ({e})，降级使用本地工具")
-            if self._mcp_client:
-                self._mcp_client.close()
-                self._mcp_client = None
+        shared = get_shared_mcp_client(server_url)
+        if shared is None:
+            print(f"⚠️  [MCP] 连接失败,降级使用本地工具")
             self._init_local()
+            return
+
+        self._mcp_client, mcp_tools = shared
+        self._shared_mcp = True
+
+        mcp_names = set()
+        for td in list(mcp_tools):            # 拷贝,不改共享列表
+            name = td["function"]["name"]
+            mcp_names.add(name)
+            self._tool_source[name] = "mcp"
+        self._tool_defs = list(mcp_tools)
+
+        for td in LOCAL_TOOL_DEFINITIONS:
+            name = td["function"]["name"]
+            if name not in mcp_names:
+                self._tool_defs.append(td)
+                self._tool_source[name] = "local"
 
     def _filter_tools(self, allowed: set):
         """只保留白名单中的工具，用于子 Agent 工具隔离。"""
@@ -121,7 +119,7 @@ class ToolManager:
         }, ensure_ascii=False)
 
     def close(self):
-        """清理 MCP 连接。"""
-        if self._mcp_client:
+        """清理:仅关闭本 ToolManager 独占的 MCP 连接;共享连接由 reset_shared_mcp/进程管。"""
+        if self._mcp_client and not self._shared_mcp:
             self._mcp_client.close()
-            self._mcp_client = None
+        self._mcp_client = None

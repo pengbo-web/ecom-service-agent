@@ -50,3 +50,36 @@ def test_reset_closes_and_reconnects(monkeypatch):
     assert client.closed is True              # reset 关旧连接
     shared.get_shared_mcp_client("http://x/mcp")
     assert _FakeMCP.instances == 2            # reset 后重连
+
+
+def test_toolmanager_uses_shared_and_close_keeps_it(monkeypatch):
+    import app.mcp_client.shared as sh
+    from app.agent.tools.manager import ToolManager
+
+    class _C:
+        def __init__(self): self.closed = False
+        def close(self): self.closed = True
+        def call_tool(self, name, args): return "{}"
+    fake = _C()
+    tools = [{"type": "function", "function": {"name": "query_order", "parameters": {"type": "object", "properties": {}}}}]
+    sh.set_shared_mcp_for_test(fake, tools)
+    # 两个 ToolManager 都用同一个共享 client
+    tm1 = ToolManager(use_mcp=True, mcp_server_url="test")
+    tm2 = ToolManager(use_mcp=True, mcp_server_url="test")
+    assert tm1._mcp_client is fake and tm2._mcp_client is fake
+    assert tm1._shared_mcp is True
+    tm1.close()                               # 一个会话结束
+    assert fake.closed is False               # 共享 client 不被关(tm2 还在用)
+    tm2.close()
+    assert fake.closed is False               # 共享 client 始终由 reset/进程管
+    sh.reset_shared_mcp()
+
+
+def test_toolmanager_degrades_when_shared_none(monkeypatch):
+    import app.mcp_client.shared as sh
+    from app.agent.tools.manager import ToolManager
+    monkeypatch.setattr(sh, "get_shared_mcp_client", lambda url: None)
+    tm = ToolManager(use_mcp=True, mcp_server_url="test")
+    names = {d["function"]["name"] for d in tm.tool_definitions}
+    assert "list_user_orders" in names        # 降级本地工具(local 独有)
+    assert tm._mcp_client is None
