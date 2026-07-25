@@ -3,7 +3,7 @@
 部署形态:全定义/选择性启用——镜像全在本地,默认只跑核心 9 容器。
 
 ## 服务地址
-- Web 界面: http://127.0.0.1:3100/web/
+- Web 界面: http://127.0.0.1:3100/
 - API 文档: http://127.0.0.1:8100/docs
 
 ## 按需启用/关闭重量级组件
@@ -14,7 +14,7 @@
     docker compose --profile docray up -d      # 开重型文档解析(8G 预留,md 语料用不到)
 
 ## 一次性初始化(用户在浏览器操作)
-1. 打开 http://127.0.0.1:3100/web/ ,注册账号(首个账号即管理员)并登录
+1. 打开 http://127.0.0.1:3100/ ,注册账号(首个账号即管理员)并登录
 2. 模型提供商:设置 → 模型服务商 → 添加 OpenAI 兼容提供商,
    Base URL 与 API Key 填 ecom 项目 .env 里的 OPENAI_BASE_URL / OPENAI_API_KEY;
    确认 embedding 模型(text-embedding-3-small 或提供商等价物)与一个对话模型可用,
