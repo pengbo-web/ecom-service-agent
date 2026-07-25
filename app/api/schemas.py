@@ -15,3 +15,12 @@ class ResetRequest(BaseModel):
 
 class OpenConversationRequest(BaseModel):
     user_id: str = "default"
+
+
+class CreateUserRequest(BaseModel):
+    user_id: str
+    name: str = ""
+
+
+class LoginRequest(BaseModel):
+    user_id: str

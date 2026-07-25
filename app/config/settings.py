@@ -143,6 +143,11 @@ class Settings(BaseSettings):
     grounding_result_max_chars: int = 2000   # 单条工具结果上限
     grounding_total_max_chars: int = 8000    # 本轮全部工具结果总预算(优先保最近)
 
+    # 极简登录态(两档用户体系:先创建才可用 + 身份从签名 token 解出)
+    auth_enabled: bool = True          # 关=完全回退自报 user_id(测试/教学)
+    auth_secret: str = "dev-secret-change-in-prod"   # 生产必须换(env AUTH_SECRET)
+    auth_token_ttl: int = 86400        # token 有效期(秒)
+
     model_config = {"env_file": ".env"}
 
 

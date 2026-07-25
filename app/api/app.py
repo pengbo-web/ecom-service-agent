@@ -1,17 +1,19 @@
 """FastAPI 应用工厂：SSE 流式对话 + 会话重置 + 静态前端 + 可观测性看板。"""
 
 import json
+import re
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.conversations import ensure_active, open_or_reuse
-from app.api.schemas import ChatRequest, OpenConversationRequest, ResetRequest
+from app.api.schemas import ChatRequest, CreateUserRequest, LoginRequest, OpenConversationRequest, ResetRequest
 from app.api.session_manager import SessionManager
 from app.api.streaming import run_agent_streaming
+from app.auth.token import sign_token, verify_token
 from app.config.settings import settings
 from app.db import get_db
 from app.guardrails.pipeline import build_default_pipeline
@@ -101,6 +103,44 @@ def create_app(session_manager: Optional[SessionManager] = None,
     @app.get("/api/health")
     def health():
         return {"status": "ok"}
+
+    _UID_RE = re.compile(r"^[\w一-龥-]{1,32}$")
+
+    def _token_user(request: Request):
+        """从 Authorization: Bearer 解出 user_id;无/无效返回 None。"""
+        auth = request.headers.get("Authorization") or ""
+        if not auth.startswith("Bearer "):
+            return None
+        return verify_token(auth[7:], settings.auth_secret)
+
+    def _issue(user_id: str, name: str):
+        return {"user_id": user_id, "name": name,
+                "token": sign_token(user_id, settings.auth_secret, settings.auth_token_ttl),
+                "expires_in": settings.auth_token_ttl}
+
+    @app.post("/api/users")
+    def create_user(req: CreateUserRequest):
+        if not _UID_RE.match(req.user_id or ""):
+            raise HTTPException(422, "user_id 只允许中英文/数字/下划线/连字符,1-32 位")
+        name = (req.name or req.user_id).strip() or req.user_id
+        if not get_db().create_user(req.user_id, name):
+            raise HTTPException(409, "用户已存在,请直接登录")
+        return _issue(req.user_id, name)
+
+    @app.post("/api/auth/login")
+    def login(req: LoginRequest):
+        u = get_db().get_user(req.user_id)
+        if u is None:
+            raise HTTPException(404, "用户不存在,请先创建")
+        return _issue(u["user_id"], u.get("name") or u["user_id"])
+
+    @app.get("/api/auth/me")
+    def me(request: Request):
+        uid = _token_user(request)
+        if uid is None:
+            raise HTTPException(401, "未登录或登录已过期")
+        u = get_db().get_user(uid)
+        return {"user_id": uid, "name": (u or {}).get("name") or uid}
 
     @app.post("/api/chat")
     def chat(req: ChatRequest):

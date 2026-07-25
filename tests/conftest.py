@@ -20,9 +20,12 @@ def _force_local_session_backends():
     settings.reply_pipeline_enabled = False   # 既有语料默认不跑流水线;需要的测试自行开启
     _orig_lf = settings.langfuse_enabled
     settings.langfuse_enabled = False         # 测试不上报 Langfuse(本机 .env 可能开着)
+    _orig_auth = settings.auth_enabled
+    settings.auth_enabled = False      # 既有测试不带 token;auth 专项测试自行开启
     yield
     settings.reply_pipeline_enabled = _orig_rp
     settings.langfuse_enabled = _orig_lf
+    settings.auth_enabled = _orig_auth
     set_session_store(None)
     set_session_lock(None)
     set_idempotency_store(None)
