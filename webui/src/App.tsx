@@ -37,6 +37,7 @@ export default function App() {
     const clean = uid.trim() || "default";
     setUserId(clean);
     setUid(clean);
+    setAuthedUser(clean);   // 与 token 对应的登录用户保持一致,防陈旧值(评审建议)
   }
 
   async function onReset() {
