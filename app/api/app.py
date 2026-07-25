@@ -175,10 +175,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
         mm = getattr(agent, "memory_manager", None)
         if mm is None or not getattr(mm, "memory_enabled", False):
             return {"enabled": False, "count": 0, "facts": []}
+        from app.observability.langfuse_bridge import background_trace
         with manager.get_lock(session_id):
-            mm.consolidate_to_long_term(
-                getattr(agent, "raw_messages", []), getattr(agent, "summary", None),
-            )
+            # 手动巩固的 LLM 调用也归到命名 trace 下(与 reaper 自动巩固同名)
+            with background_trace("consolidate_memory", session_id=session_id,
+                                  user_id=user_id,
+                                  input={"session_id": session_id, "trigger": "manual"}):
+                mm.consolidate_to_long_term(
+                    getattr(agent, "raw_messages", []), getattr(agent, "summary", None),
+                )
             facts = [
                 {"content": f.content, "category": f.category, "created_at": f.created_at}
                 for f in mm.ltm.facts

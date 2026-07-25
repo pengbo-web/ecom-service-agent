@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 
 from app.config.settings import settings
 
@@ -42,6 +43,40 @@ def langfuse_turn(session_id: str, user_id: str | None, user_input: str):
         return _LangfuseTurn(get_client(), session_id, user_id, user_input)
     except Exception:
         return None
+
+
+@contextmanager
+def background_trace(name: str, session_id: str | None = None,
+                     user_id: str | None = None, input=None):
+    """后台任务(记忆巩固等)的命名根 trace:期间发生的 LLM 调用(drop-in
+    generation)自动嵌到该根下,不再以 OpenAI-generation 游离成条。
+
+    门控关/未装/异常时 yield None 且零副作用(调用方无需判空,with 即可)。
+    """
+    if not settings.langfuse_enabled:
+        yield None
+        return
+    try:
+        _ensure_env()
+        from langfuse import get_client, propagate_attributes
+        root_cm = get_client().start_as_current_observation(
+            as_type="span", name=name, input=input,
+        )
+        root = root_cm.__enter__()
+        prop_cm = propagate_attributes(session_id=session_id or None,
+                                       user_id=user_id or None)
+        prop_cm.__enter__()
+    except Exception:
+        yield None
+        return
+    try:
+        yield root
+    finally:
+        for cm in (prop_cm, root_cm):
+            try:
+                cm.__exit__(None, None, None)
+            except Exception:
+                pass
 
 
 class _LangfuseTurn:

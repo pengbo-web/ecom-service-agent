@@ -101,3 +101,20 @@ def test_on_event_swallows_exceptions():
     t._root = _FakeObs([], "root")
     t.on_event({"type": "stage", "status": "start", "name": "x"})   # 不炸即可
     t.on_event({"type": "不认识的类型"})
+
+
+# ---- background_trace(后台任务命名根) ----
+def test_background_trace_disabled_yields_none(monkeypatch):
+    from app.observability.langfuse_bridge import background_trace
+    monkeypatch.setattr(settings, "langfuse_enabled", False)
+    with background_trace("consolidate_memory", session_id="s1") as root:
+        assert root is None      # 门控关:零副作用
+
+
+def test_background_trace_setup_failure_yields_none(monkeypatch):
+    """开了开关但初始化异常(未装/坏配置)→ 静默回退 None,业务不受影响。"""
+    import app.observability.langfuse_bridge as mod
+    monkeypatch.setattr(settings, "langfuse_enabled", True)
+    monkeypatch.setattr(mod, "_ensure_env", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    with mod.background_trace("consolidate_memory") as root:
+        assert root is None

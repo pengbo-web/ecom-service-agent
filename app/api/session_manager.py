@@ -82,18 +82,23 @@ class SessionManager:
 
     def _consolidate_and_evict(self, session_id: str) -> None:
         """串行地保存+close(巩固长期记忆)该会话,再从内存移除;失败不影响其它会话。"""
+        from app.observability.langfuse_bridge import background_trace
         lock = self.get_lock(session_id)
         with lock:
             with self._guard:
                 agent = self._agents.get(session_id)
             if agent is not None:
-                try:
-                    if hasattr(agent, "save"):
-                        agent.save()
-                    if hasattr(agent, "close"):
-                        agent.close()   # → memory_manager.consolidate_to_long_term(...)
-                except Exception:
-                    pass
+                # 后台巩固的 LLM 调用归到命名 trace 下(而非游离的 OpenAI-generation)
+                with background_trace("consolidate_memory", session_id=session_id,
+                                      user_id=getattr(agent, "user_id", None),
+                                      input={"session_id": session_id, "trigger": "idle_reaper"}):
+                    try:
+                        if hasattr(agent, "save"):
+                            agent.save()
+                        if hasattr(agent, "close"):
+                            agent.close()   # → memory_manager.consolidate_to_long_term(...)
+                    except Exception:
+                        pass
                 self._archiver.archive(session_id, agent)   # 冷归档(best-effort)
             with self._guard:
                 self._agents.pop(session_id, None)
