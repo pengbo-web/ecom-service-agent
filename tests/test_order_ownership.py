@@ -106,3 +106,20 @@ def test_auth_on_no_user_list_empty(db, monkeypatch):
     monkeypatch.setattr(settings, "auth_enabled", True)
     set_current_user(None)
     assert list_user_orders()["count"] == 0            # 隐私 fail-closed
+
+
+def test_cancel_order_blocks_foreign(db, monkeypatch):
+    """最危险写操作:越权取消别人订单必须被拒。"""
+    from app.agent.tools.order_ops import cancel_order
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    set_current_user("alice")
+    assert cancel_order("O-B")["success"] is False       # bob 的单,alice 越权取消被拒
+
+
+def test_expedite_and_invoice_block_foreign(db, monkeypatch):
+    """催发/开票越权同样被拒(补齐写操作实证)。"""
+    from app.agent.tools.order_ops import expedite_shipping, issue_invoice
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    set_current_user("alice")
+    assert expedite_shipping("O-B")["success"] is False
+    assert issue_invoice("O-B")["success"] is False
