@@ -1,4 +1,3 @@
-from app.db import get_db
 from app.agent.tools.ownership import owned_order
 
 
