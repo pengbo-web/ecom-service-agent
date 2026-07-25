@@ -23,3 +23,16 @@ describe("AgentActivity", () => {
     expect(screen.getByText(/query_order/)).toBeInTheDocument();
   });
 });
+
+describe("AgentActivity recall", () => {
+  it("渲染 KB 预召回事件(文档/章节)", () => {
+    render(<AgentActivity events={[
+      { type: "recall", source: "kb", hits: [
+        { doc: "退换货政策", section: "七天无理由", score: 0.62 },
+        { doc: "会员权益", section: "钻石会员", score: 0.41 },
+      ] },
+    ]} defaultOpen />);
+    expect(screen.getByText(/退换货政策\/七天无理由/)).toBeInTheDocument();
+    expect(screen.getByText(/会员权益\/钻石会员/)).toBeInTheDocument();
+  });
+});
