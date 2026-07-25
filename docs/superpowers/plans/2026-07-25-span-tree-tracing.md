@@ -1,5 +1,11 @@
 # 自研 Agent 链路追踪 Span 树(借 OTel GenAI 语义) Implementation Plan
 
+> **状态:已取消(2026-07-25)**——用户决定直接接入 Langfuse(commit `5848c31`)替代自研 span 树。
+> 本方案的核心埋点(stage 事件协议:react/reply_pipeline/evaluate/redraft/polish)已在 Langfuse
+> 接入中落地并被事件桥消费;若未来需要"不依赖 Langfuse 的自研看板树 / traces.db parent_id /
+> OTLP 导出",T1/T2/T4/T5 仍可按本方案执行(T3 发射侧已完成)。
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development(推荐)或 superpowers:executing-plans 逐任务执行。步骤用 `- [ ]` 复选框跟踪。
 
 **Goal:** 把现有平铺 Trace 事件升级为**带父子层级和耗时的 Span 树**,回答"从用户发送到回复经历了哪些阶段、每段耗时多少",命名与属性**对齐 OTel GenAI 语义约定**(只借语义,不引 SDK),看板增加调用链树视图,并预留 OTLP 导出。
