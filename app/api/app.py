@@ -245,7 +245,10 @@ def create_app(session_manager: Optional[SessionManager] = None,
         """回显该会话已落盘的历史气泡(重启/刷新后聊天记录不再空白)。
 
         auth_enabled 时增归属校验:会话须存在且归属 token 用户,否则 403(旧格式 ID 也 403)。
+        热存储(peek_messages)为空时(会话过期/清空)兜底读冷快照(S3),快照自身也带
+        user_id 作二次归属防线。
         """
+        uid = None
         if settings.auth_enabled:
             uid = _token_user(request)
             if uid is None:
@@ -254,7 +257,16 @@ def create_app(session_manager: Optional[SessionManager] = None,
             if conv is None or conv.get("user_id") != uid:
                 raise HTTPException(403, "无权查看该会话")
         from app.api.history import reconstruct_bubbles
-        return {"session_id": session_id, "turns": reconstruct_bubbles(manager.peek_messages(session_id))}
+        messages = manager.peek_messages(session_id)
+        if not messages and settings.session_snapshot_enabled:
+            # 热存储已过期/清空 → 兜底冷快照(归属二次校验)
+            try:
+                snap = get_db().get_session_snapshot(session_id)
+                if snap and (uid is None or snap.get("user_id") == uid):
+                    messages = snap.get("messages") or []
+            except Exception:
+                messages = messages
+        return {"session_id": session_id, "turns": reconstruct_bubbles(messages)}
 
     @app.post("/api/session/{session_id}/consolidate", dependencies=[Depends(admin_auth)])
     def consolidate(session_id: str, request: Request, user_id: str = "default"):

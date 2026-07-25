@@ -117,3 +117,49 @@ def test_reset_rotates_conversation():
     assert body["conversation_id"] != cid
     from app.db import get_db
     assert get_db().get_conversation(cid)["close_reason"] == "reset"
+
+
+def test_history_falls_back_to_snapshot_when_hot_empty(tmp_path, monkeypatch):
+    from app.db import Database
+    temp_db = Database(str(tmp_path / "t.db"))
+    temp_db.init_schema()
+    monkeypatch.setattr("app.db._DB", temp_db)
+
+    client, mgr = _client()   # + 临时 db monkeypatch(同 auth 测试)
+    from app.db import get_db
+    from app.config.settings import settings
+    monkeypatch.setattr(settings, "auth_enabled", False)   # 先测纯 fallback 逻辑
+    # 造:conversations 有归属 + 快照有内容 + 热存储无(peek_messages 返回 [])
+    get_db().create_conversation("u1")   # 忽略返回,单独建一条已知 id
+    cid = "c-snaponly"
+    import sqlite3
+    conn = sqlite3.connect(get_db().db_path)
+    conn.execute("INSERT INTO conversations (conversation_id, user_id, status, created_at) "
+                 "VALUES (?,?,?,?)", (cid, "u1", "closed", "t"))
+    conn.commit(); conn.close()
+    get_db().upsert_session_snapshot(cid, "u1",
+        [{"role": "user", "content": "历史消息"}, {"role": "assistant", "content": "历史回复"}], None)
+    r = client.get(f"/api/session/{cid}/history")
+    turns = r.json()["turns"]
+    assert turns and any("历史消息" in str(t) for t in turns)   # 热为空,读到了快照
+
+
+def test_history_ownership_still_enforced_on_snapshot(tmp_path, monkeypatch):
+    """auth 开时,别人的快照读不到(归属二次校验)。"""
+    from app.db import Database
+    temp_db = Database(str(tmp_path / "t.db"))
+    temp_db.init_schema()
+    monkeypatch.setattr("app.db._DB", temp_db)
+
+    client, _ = _client()   # + 临时 db
+    from app.db import get_db
+    from app.config.settings import settings
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    # alice 建会话+快照
+    tok_a = client.post("/api/users", json={"user_id": "alice", "name": "alice"}).json()["token"]
+    ha = {"Authorization": f"Bearer {tok_a}"}
+    cid = client.post("/api/conversation/open", headers=ha, json={}).json()["conversation_id"]
+    get_db().upsert_session_snapshot(cid, "alice", [{"role": "user", "content": "私密"}], None)
+    tok_b = client.post("/api/users", json={"user_id": "bob", "name": "bob"}).json()["token"]
+    hb = {"Authorization": f"Bearer {tok_b}"}
+    assert client.get(f"/api/session/{cid}/history", headers=hb).status_code == 403
