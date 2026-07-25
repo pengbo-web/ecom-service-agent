@@ -8,18 +8,26 @@ import { Composer } from "@/components/Composer";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { consolidateMemory, getHistory, type ConsolidateResult } from "@/lib/api";
+import {
+  consolidateMemory, getHistory, openConversation, listConversations,
+  type ConsolidateResult, type ConversationMeta, type HistoryTurn,
+} from "@/lib/api";
 
 type Turn = { id: number; userText: string; activity: SSEEvent[]; reply?: string; meta?: Meta; handoff?: string[] };
 
-export function ChatView({ sessionId, userId, onUserId }: {
+export function ChatView({ sessionId, userId, onUserId, onConversation }: {
   sessionId: string; userId: string; onUserId: (uid: string) => void;
+  onConversation: (conversationId: string) => void;
 }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [mem, setMem] = useState<ConsolidateResult | null>(null);
   const [memBusy, setMemBusy] = useState(false);
   const [memErr, setMemErr] = useState<string | null>(null);
   const [uidDraft, setUidDraft] = useState(userId);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [convList, setConvList] = useState<ConversationMeta[] | null>(null);
+  const [pastConv, setPastConv] = useState<string | null>(null);
+  const [pastBubbles, setPastBubbles] = useState<HistoryTurn[] | null>(null);
   const idRef = useRef(0);
   const cur = useRef<number>(-1);
 
@@ -40,7 +48,13 @@ export function ChatView({ sessionId, userId, onUserId }: {
 
   async function onConsolidate() {
     setMemBusy(true); setMemErr(null);
-    try { setMem(await consolidateMemory(sessionId, userId)); }
+    try {
+      setMem(await consolidateMemory(sessionId, userId));
+      // 巩固=结束本会话:服务端新开一个会话翻篇,聊天区清屏(长期记忆面板照常展示巩固结果)
+      const c = await openConversation(userId);
+      onConversation(c.conversation_id);
+      setTurns([]);
+    }
     catch (e) { setMemErr(String(e)); }
     finally { setMemBusy(false); }
   }
@@ -52,7 +66,9 @@ export function ChatView({ sessionId, userId, onUserId }: {
     sessionId,
     userId,
     onEvent: (e) => {
-      if (["thought", "tool_call", "tool_result", "guard", "route", "select", "evaluate", "polish"].includes(e.type)) patch((t) => ({ ...t, activity: [...t.activity, e] }));
+      // 首帧可能缺席(人工接管/限流/成本上限三个短路分支无此事件):只在收到且 rotated 时才换发,不等待不依赖
+      if (e.type === "conversation") { if (e.status === "rotated") onConversation(e.conversation_id); }
+      else if (["thought", "tool_call", "tool_result", "guard", "route", "select", "evaluate", "polish"].includes(e.type)) patch((t) => ({ ...t, activity: [...t.activity, e] }));
       else if (e.type === "reply") patch((t) => ({ ...t, reply: e.content }));
       else if (e.type === "metadata") patch((t) => ({ ...t, meta: { intent: e.intent, confidence: e.confidence, requires_human: e.requires_human, follow_up_question: e.follow_up_question } }));
       else if (e.type === "handoff") patch((t) => ({ ...t, handoff: e.reasons || [] }));
@@ -65,6 +81,20 @@ export function ChatView({ sessionId, userId, onUserId }: {
     cur.current = id;
     setTurns((ts) => [...ts, { id, userText: text, activity: [] }]);
     send(text);
+  }
+
+  async function toggleHistory() {
+    const next = !historyOpen;
+    setHistoryOpen(next);
+    if (next) {
+      setPastConv(null); setPastBubbles(null);
+      setConvList(await listConversations(userId));
+    }
+  }
+
+  async function openPastConv(conversationId: string) {
+    setPastConv(conversationId);
+    setPastBubbles(await getHistory(conversationId));
   }
 
   return (
@@ -85,11 +115,60 @@ export function ChatView({ sessionId, userId, onUserId }: {
           切换
         </Button>
         <span className="text-xs text-muted-foreground">当前:<b>{userId}</b> · 会话 {sessionId}</span>
-        <Button variant="outline" size="sm" className="ml-auto h-7 text-xs"
+        <Button variant="ghost" size="sm" className="ml-auto h-7 text-xs" onClick={toggleHistory}>
+          {historyOpen ? "收起历史" : "历史会话"}
+        </Button>
+        <Button variant="outline" size="sm" className="h-7 text-xs"
                 disabled={memBusy} onClick={onConsolidate}>
           {memBusy ? "巩固中…" : "结束会话·巩固记忆"}
         </Button>
       </div>
+      {historyOpen && (
+        <div className="max-h-64 overflow-auto border-b bg-secondary/30 px-6 py-3">
+          {pastConv ? (
+            <div>
+              <button className="mb-2 text-xs text-muted-foreground hover:text-foreground" onClick={() => { setPastConv(null); setPastBubbles(null); }}>
+                ← 返回列表
+              </button>
+              <div className="text-xs text-muted-foreground mb-2">只读回看：{pastConv}</div>
+              {pastBubbles === null ? (
+                <div className="text-xs text-muted-foreground">加载中…</div>
+              ) : pastBubbles.length === 0 ? (
+                <div className="text-xs text-muted-foreground">该会话暂无消息记录。</div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {pastBubbles.map((b, i) => (
+                    <MessageBubble key={i} role={b.role}>{b.content}</MessageBubble>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : convList === null ? (
+            <div className="text-xs text-muted-foreground">加载中…</div>
+          ) : convList.length === 0 ? (
+            <div className="text-xs text-muted-foreground">暂无历史会话。</div>
+          ) : (
+            <ul className="flex flex-col gap-1">
+              {convList.map((c) => (
+                <li key={c.conversation_id}>
+                  <button
+                    className="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-xs hover:bg-secondary"
+                    onClick={() => openPastConv(c.conversation_id)}
+                  >
+                    <span className="font-mono">{c.conversation_id}</span>
+                    <span className="text-muted-foreground">{c.created_at}</span>
+                    <Badge variant={c.status === "open" ? "default" : "outline"} className="shrink-0">
+                      {c.status === "open" ? "进行中" : "已结束"}
+                    </Badge>
+                    {c.close_reason && <span className="text-muted-foreground">({c.close_reason})</span>}
+                    {c.conversation_id === sessionId && <span className="ml-auto text-muted-foreground">当前</span>}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       {memErr && <div className="border-b bg-destructive/10 px-6 py-2 text-xs text-destructive">巩固失败：{memErr}</div>}
       {mem && (
         <div className="border-b bg-secondary/40 px-6 py-3">

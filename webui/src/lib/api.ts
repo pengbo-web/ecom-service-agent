@@ -1,13 +1,19 @@
-function getBaseToken(): string {
-  let b = localStorage.getItem("xiaoxi_base");
-  if (!b) { b = Math.random().toString(36).slice(2, 10); localStorage.setItem("xiaoxi_base", b); }
-  return b;
+// 会话 ID 由服务端签发(conversation_id = "c-" + uuid4().hex[:16]),前端不再自造。
+// 挂载/切用户时调用 openConversation:同用户已有 open 会话则复用,否则服务端新开一个。
+export async function openConversation(userId: string): Promise<{ conversation_id: string }> {
+  const r = await fetch("/api/conversation/open", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId }),
+  });
+  return r.json();
 }
-// 会话归属于用户:session_id 带上 user_id,切换用户即切到该用户自己的会话线程(各自历史/上下文)
-export function getSessionId(userId: string): string {
-  const safe = (userId || "default").replace(/[^a-zA-Z0-9_-]/g, "_");
-  return `${safe}--${getBaseToken()}`;
+
+export type ConversationMeta = { conversation_id: string; status: string; created_at: string; close_reason?: string | null };
+export async function listConversations(userId: string): Promise<ConversationMeta[]> {
+  const r = await fetch(`/api/conversations?user_id=${encodeURIComponent(userId)}`);
+  return (await r.json()).conversations;
 }
+
 export function getUserId(): string {
   return localStorage.getItem("xiaoxi_uid") || "default";
 }
