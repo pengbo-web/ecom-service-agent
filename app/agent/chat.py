@@ -411,10 +411,15 @@ class EcomAgent:
         # 每轮缓存:react 循环内多次组消息不重复检索(KB 预检索有 embedding 开销)。
         from app.agent.recall.service import build_recall_sections
         if self._turn_recall is None or self._turn_recall[0] != last_user:
-            rr = build_recall_sections(self.memory_manager, last_user)
+            # 先改写(多轮指代/省略消解),再统一召回;缓存键仍是 last_user(轮身份)
+            from app.agent.recall.rewrite import rewrite_for_recall
+            recall_query = rewrite_for_recall(self.client, self.model,
+                                              self.raw_messages, last_user)
+            rr = build_recall_sections(self.memory_manager, recall_query)
             self._turn_recall = (last_user, rr)
             if rr.kb_hits:   # 首次计算且 KB 有命中才发事件(前端思考面板+tracer 各消费一次)
-                self._emit({"type": "recall", "source": "kb", "hits": rr.kb_hits})
+                self._emit({"type": "recall", "source": "kb",
+                            "query": recall_query, "hits": rr.kb_hits})
         messages.extend(self._turn_recall[1].sections)
         if self.summary:
             messages.append(

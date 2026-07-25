@@ -171,6 +171,10 @@ class Settings(BaseSettings):
     aperag_collection_id: str = ""     # 知识库 collection id(col_ 开头)
     aperag_rerank: bool = False        # 预召回热路径默认关重排(省延迟);深查精度可开
 
+    # 多轮查询改写(预召回前置):"那运费呢?"→"退货运费谁承担"。失败/首问回退原句
+    recall_rewrite_enabled: bool = True
+    recall_rewrite_max_turns: int = 6  # 改写时参考的最近用户消息条数
+
     # 极简登录态(两档用户体系:先创建才可用 + 身份从签名 token 解出)
     auth_enabled: bool = True          # 关=完全回退自报 user_id(测试/教学)
     auth_secret: str = "dev-secret-change-in-prod"   # 生产必须换(env AUTH_SECRET)

@@ -50,6 +50,13 @@ def test_empty_items_is_no_hit_not_degrade(monkeypatch):
     assert aperag_search("无关问题") == []          # [] 表示正常无命中
 
 
+def test_non_dict_item_returns_none(monkeypatch):
+    _cfg(monkeypatch)
+    monkeypatch.setattr(ext.httpx, "post",
+                        lambda *a, **k: _Resp(200, {"items": ["not-a-dict"]}))
+    assert aperag_search("退货政策") is None
+
+
 def test_http_error_returns_none(monkeypatch):
     _cfg(monkeypatch)
     monkeypatch.setattr(ext.httpx, "post",

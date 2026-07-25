@@ -84,6 +84,17 @@ def test_backend_dispatch_aperag_used_when_available(monkeypatch):
     assert local_called == []                        # 外部可用则不碰本地
 
 
+def test_aperag_empty_hits_does_not_degrade_to_local(monkeypatch):
+    monkeypatch.setattr(settings, "kb_backend", "aperag")
+    monkeypatch.setattr("app.agent.recall.external_kb.aperag_search", lambda q: [])
+    local_called = []
+    monkeypatch.setattr(kb_mod, "search_knowledge",
+                        lambda q, top_k: local_called.append(q))
+    r = kb_recall("退货政策是什么")
+    assert r.section is None and r.backend == "aperag"
+    assert local_called == []            # [] = 正常无命中,不降级本地
+
+
 def test_backend_dispatch_falls_back_to_local(monkeypatch):
     monkeypatch.setattr(settings, "kb_backend", "aperag")
     monkeypatch.setattr("app.agent.recall.external_kb.aperag_search", lambda q: None)

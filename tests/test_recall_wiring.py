@@ -69,6 +69,30 @@ def test_no_hits_no_event(monkeypatch):
     assert [e for e in events if e["type"] == "recall"] == []
 
 
+def test_recall_uses_rewritten_query_and_event_carries_it(monkeypatch):
+    calls = []
+
+    def fake_recall(mm, query):
+        calls.append(query)
+        return RecallResult(
+            sections=[{"role": "system", "content": "【平台知识(自动检索)】X"}],
+            kb_hits=[{"doc": "d", "section": "s", "score": 0.9}],
+        )
+
+    monkeypatch.setattr("app.agent.recall.service.build_recall_sections", fake_recall)
+    monkeypatch.setattr("app.agent.recall.rewrite.rewrite_for_recall",
+                        lambda client, model, messages, q: "改写后的自包含查询")
+    agent = _agent()
+    events = []
+    agent.event_sink = events.append
+    agent.raw_messages.append({"role": "user", "content": "那运费呢?"})
+    agent._turn_recall = None
+    agent._build_messages()
+    assert calls == ["改写后的自包含查询"]            # 召回吃的是改写后查询
+    ev = [e for e in events if e["type"] == "recall"][0]
+    assert ev["query"] == "改写后的自包含查询"        # 事件带上实际检索查询
+
+
 def test_tracer_records_recall_span(tmp_path):
     store = TraceStore(str(tmp_path / "tr.db"))
     store.init_schema()

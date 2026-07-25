@@ -37,16 +37,16 @@ def aperag_search(query: str) -> list[dict] | None:
             logger.warning("aperag search http %s: %s", resp.status_code, resp.text[:200])
             return None
         items = resp.json().get("items") or []
+        rows = []
+        for it in items:
+            src = str(it.get("source") or "")
+            rows.append({
+                "doc": src.replace("\\", "/").rsplit("/", 1)[-1] or "知识库",
+                "section": str(it.get("recall_type") or ""),
+                "score": float(it.get("score") or 0.0),
+                "text": str(it.get("content") or ""),
+            })
+        return rows
     except Exception:
         logger.warning("aperag search failed", exc_info=True)
         return None
-    rows = []
-    for it in items:
-        src = str(it.get("source") or "")
-        rows.append({
-            "doc": src.replace("\\", "/").rsplit("/", 1)[-1] or "知识库",
-            "section": str(it.get("recall_type") or ""),
-            "score": float(it.get("score") or 0.0),
-            "text": str(it.get("content") or ""),
-        })
-    return rows
