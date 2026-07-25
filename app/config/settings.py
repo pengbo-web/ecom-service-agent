@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     max_react_steps: int = 5
 
     # MCP 配置
+    # 开启前需:①MCP server 常驻(mcp_server/server.py 或 compose 的 mcp-server)②身份透传已实现(P1)
+    # ——否则订单类工具在 server 进程拿不到用户上下文;连不上会自动降级本地工具(不崩)
     mcp_enabled: bool = False
     mcp_server_url: str = "http://127.0.0.1:9123/mcp"
 
