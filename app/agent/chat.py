@@ -138,7 +138,10 @@ class EcomAgent:
         if (settings.faq_cache_enabled and self._turn_qu is not None
                 and self._turn_qu.need_kb):
             from app.agent.faq_cache import get_faq_cache
-            _hit = get_faq_cache().lookup(self._turn_qu.kb_query or user_input)
+            try:
+                _hit = get_faq_cache().lookup(self._turn_qu.kb_query or user_input)
+            except Exception:      # 容错红线:缓存任何异常(如坏emb条目)=未命中,绝不打断主流程
+                _hit = None
             if _hit is not None:
                 self._emit({"type": "faq_cache", "matched": _hit["question"],
                             "score": _hit["score"]})
