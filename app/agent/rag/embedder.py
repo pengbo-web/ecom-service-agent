@@ -19,8 +19,15 @@ class Embedder:
         base_url: str,
         model: str = "text-embedding-3-small",
         batch_size: int = 10,  # DashScope text-embedding-v3 单批上限为 10
+        timeout: float | None = None,       # None=SDK 默认(离线建索引可容忍慢);热路径应显式传短超时
+        max_retries: int | None = None,     # None=SDK 默认(2);热路径应传 0——重试累积曾致单次 906s
     ):
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        client_kwargs: dict = {"api_key": api_key, "base_url": base_url}
+        if timeout is not None:
+            client_kwargs["timeout"] = timeout
+        if max_retries is not None:
+            client_kwargs["max_retries"] = max_retries
+        self._client = OpenAI(**client_kwargs)
         self._model = model
         self._batch_size = batch_size
 

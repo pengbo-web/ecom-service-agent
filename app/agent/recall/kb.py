@@ -8,10 +8,13 @@
 返回空结果,绝不阻塞回复主流程。
 """
 
+import logging
 from dataclasses import dataclass, field
 
 from app.config.settings import settings
 from app.agent.tools.knowledge import search_knowledge
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -35,8 +38,10 @@ def kb_recall(query: str | None) -> KbRecall:
     try:
         result = search_knowledge(query, top_k=settings.recall_kb_top_k)
     except Exception:
+        logger.warning("kb pre-recall search failed", exc_info=True)
         return KbRecall()
     if not result.get("success"):
+        logger.warning("kb pre-recall degraded: %s", result.get("error"))
         return KbRecall()
 
     lines: list[str] = []

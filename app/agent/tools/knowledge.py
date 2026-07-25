@@ -45,6 +45,9 @@ def _get_retriever() -> KnowledgeRetriever:
             api_key=settings.openai_api_key,
             base_url=settings.openai_base_url,
             model=settings.embedding_model,
+            # 热路径客户端(预召回+工具检索共用):显式短超时+零重试,挂起不能拖垮回复
+            timeout=settings.recall_kb_timeout_s,
+            max_retries=settings.recall_kb_embed_retries,
         )
         backend = _create_backend_from_settings()
         _retriever = KnowledgeRetriever(embedder=embedder, backend=backend)

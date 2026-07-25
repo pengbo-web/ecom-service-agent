@@ -13,10 +13,13 @@
 隔离原则:任一源抛错只丢该源,不影响其它源与主流程。
 """
 
+import logging
 from dataclasses import dataclass, field
 
 from app.config.settings import settings
 from app.agent.recall.kb import KbRecall, kb_recall
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -52,12 +55,14 @@ def build_recall_sections(memory_manager, query: str | None) -> RecallResult:
             try:
                 text = source(memory_manager, query)
             except Exception:
+                logger.warning("recall source %s failed", source.__name__, exc_info=True)
                 continue
             if text:
                 result.sections.append({"role": "system", "content": text})
     try:
         kb = kb_recall(query)
     except Exception:
+        logger.warning("recall source kb failed", exc_info=True)
         kb = KbRecall()
     if kb.section:
         result.sections.append({"role": "system", "content": kb.section})

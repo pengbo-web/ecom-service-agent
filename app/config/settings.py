@@ -161,6 +161,8 @@ class Settings(BaseSettings):
     recall_kb_min_score: float = 0.30     # 相似度阈值,低于不注入(防无关知识污染上下文)
     recall_kb_max_chars: int = 1200       # 注入段字符预算,超出丢弃后续片段
     recall_kb_min_query_chars: int = 4    # 问题太短(如"嗯")不触发,省一次 embedding
+    recall_kb_timeout_s: float = 6.0      # 检索 embedding 超时(热路径,每轮必经):快速失败,挂起不能拖垮回复
+    recall_kb_embed_retries: int = 0      # 热路径零重试(重试累积曾致后台单次906s,同教训)
 
     # 极简登录态(两档用户体系:先创建才可用 + 身份从签名 token 解出)
     auth_enabled: bool = True          # 关=完全回退自报 user_id(测试/教学)
