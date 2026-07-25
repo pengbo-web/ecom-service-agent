@@ -24,6 +24,8 @@ def _fake_recall(calls):
 
 
 def test_build_messages_injects_and_caches_per_turn(monkeypatch):
+    monkeypatch.setattr("app.agent.recall.rewrite.rewrite_for_recall",
+                        lambda client, model, messages, q: q)
     calls = []
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections", _fake_recall(calls))
     agent = _agent()
@@ -45,6 +47,8 @@ def test_build_messages_injects_and_caches_per_turn(monkeypatch):
 
 
 def test_new_user_turn_recomputes(monkeypatch):
+    monkeypatch.setattr("app.agent.recall.rewrite.rewrite_for_recall",
+                        lambda client, model, messages, q: q)
     calls = []
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections", _fake_recall(calls))
     agent = _agent()
@@ -58,6 +62,8 @@ def test_new_user_turn_recomputes(monkeypatch):
 
 
 def test_no_hits_no_event(monkeypatch):
+    monkeypatch.setattr("app.agent.recall.rewrite.rewrite_for_recall",
+                        lambda client, model, messages, q: q)
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections",
                         lambda mm, q: RecallResult())
     agent = _agent()
