@@ -11,7 +11,7 @@ from typing import Optional
 
 from app.config.settings import settings
 from app.multi_agent.agents import AGENT_CONFIGS
-from app.multi_agent.router import Router
+from app.multi_agent.router import DEFAULT_AGENT, Router
 from app.agent.tools.manager import ToolManager
 
 
@@ -35,6 +35,7 @@ class MultiAgentOrchestrator:
         sid = Path(session_path).stem if session_path else None
         self.engine = EcomAgent(session_path=session_path, session_id=sid, user_id=user_id)
         self.router = Router(self.engine.client, self.engine.model)
+        self._last_key: str | None = None   # 粘性路由:QU 未判定 domain 时沿用上轮
 
         # 每个画像 = 专属 prompt + 工具子集(独立 ToolManager,仅暴露该领域允许的工具)
         self.profiles: dict[str, dict] = {}
@@ -55,10 +56,24 @@ class MultiAgentOrchestrator:
         self.client = self.engine.client
 
     def chat(self, user_input: str):
-        key = self.router.route(user_input, self.engine.raw_messages)
+        # 统一查询理解(默认):一次调用出 domain/intent/need_kb/kb_query,
+        # 替代独立路由;关开关=回退老 Router(每轮必检索,无门控无改写)
+        if settings.query_understanding_enabled:
+            from app.agent import understanding
+            qu = understanding.understand(user_input, self.engine.raw_messages,
+                                          self.engine.client, self.engine.model)
+            key = qu.domain or self._last_key or DEFAULT_AGENT
+        else:
+            qu = None
+            key = self.router.route(user_input, self.engine.raw_messages)
+        self._last_key = key
+        self.engine.set_turn_understanding(qu)
         profile = self.profiles.get(key) or next(iter(self.profiles.values()))
         if self.event_sink:
-            self.event_sink({"type": "route", "agent": profile["name"], "key": key})
+            event = {"type": "route", "agent": profile["name"], "key": key}
+            if qu is not None:
+                event.update(intent=qu.intent, need_kb=qu.need_kb, source=qu.source)
+            self.event_sink(event)
         # 切画像:同一硬化引擎,换 prompt + 工具子集;透传 event_sink/client(含 tracer 包装)
         self.engine.system_prompt = profile["prompt"]
         self.engine.tool_manager = profile["tool_manager"]
