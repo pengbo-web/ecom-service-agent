@@ -329,7 +329,12 @@ TOOL_DEFINITIONS.extend([
         "type": "function",
         "function": {
             "name": "query_coupons",
-            "description": "查询当前可用的优惠券/折扣。用户问有无优惠、能否更便宜、有什么券时调用。",
+            "description": (
+                "查询当前用户【可领】的优惠券,已按其会员等级与新老客身份筛选。"
+                "无需参数(用户身份由服务端上下文确定)。返回 coupons(可领)与 "
+                "unavailable(不可领及原因);请只向用户介绍 coupons 里的券,"
+                "unavailable 仅供你判断,不要承诺用户能用不可领的券。"
+            ),
             "parameters": {"type": "object", "properties": {}, "required": []},
         },
     },

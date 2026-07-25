@@ -96,15 +96,54 @@ def issue_invoice(order_id: str, title: str = "个人", tax_id: str = "") -> dic
     }
 
 
-# 可用优惠券(mock 数据)
+# 可用优惠券(mock 数据)。audience: new=仅新客 / member=仅会员 / all=人人可领
 _COUPONS = [
-    {"code": "NEW20", "name": "新人券", "discount": "满100减20", "expires": "2026-12-31"},
-    {"code": "VIP90", "name": "会员9折券", "discount": "9折(最高减50)", "expires": "2026-09-30"},
-    {"code": "SHOE30", "name": "鞋类专享券", "discount": "满300减30", "expires": "2026-08-31"},
+    {"code": "NEW20", "name": "新人券", "discount": "满100减20", "expires": "2026-12-31", "audience": "new"},
+    {"code": "VIP90", "name": "会员9折券", "discount": "9折(最高减50)", "expires": "2026-09-30", "audience": "member"},
+    {"code": "SHOE30", "name": "鞋类专享券", "discount": "满300减30", "expires": "2026-08-31", "audience": "all"},
 ]
+
+_AUDIENCE_REASON = {
+    "new": "仅限新客(您已有历史订单)",
+    "member": "仅限会员(开通会员后可领)",
+}
+
+
+def filter_coupons(coupons: list, is_new: bool, is_member: bool):
+    """按资格切分:返回 (可领列表, 不可领列表[带 reason])。纯函数,便于测试。"""
+    ok, no = [], []
+    for c in coupons:
+        aud = c.get("audience", "all")
+        eligible = (aud == "all") or (aud == "new" and is_new) or (aud == "member" and is_member)
+        if eligible:
+            ok.append({k: v for k, v in c.items() if k != "audience"})
+        else:
+            no.append({"code": c["code"], "name": c["name"],
+                       "reason": _AUDIENCE_REASON.get(aud, "当前不可领")})
+    return ok, no
 
 
 def query_coupons() -> dict:
-    """查询当前可用优惠券（只读）。"""
-    return {"success": True, "coupons": _COUPONS,
-            "note": "以上为当前可用优惠券,下单结算时可选用。"}
+    """查询当前用户可领的优惠券(按会员等级 + 新老客身份筛选,只读)。
+
+    fail-open:识别不到当前用户或查资格异常 → 返回全部券,不漏发。
+    """
+    from app.agent.runtime_context import get_current_user
+    uid = get_current_user()
+    if not uid:
+        return {"success": True, "coupons": [{k: v for k, v in c.items() if k != "audience"}
+                                             for c in _COUPONS],
+                "unavailable": [], "note": "未识别当前用户,已展示全部券。"}
+    try:
+        from app.db import get_db
+        db = get_db()
+        user = db.get_user(uid)
+        is_member = bool(user) and (user.get("member_level") or "normal") != "normal"
+        is_new = db.count_user_orders(uid) == 0
+        ok, no = filter_coupons(_COUPONS, is_new=is_new, is_member=is_member)
+        return {"success": True, "coupons": ok, "unavailable": no,
+                "note": "以上为您当前可领的优惠券(已按会员等级与新老客身份筛选)。"}
+    except Exception:
+        return {"success": True, "coupons": [{k: v for k, v in c.items() if k != "audience"}
+                                             for c in _COUPONS],
+                "unavailable": [], "note": "未识别当前用户,已展示全部券。"}

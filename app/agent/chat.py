@@ -116,6 +116,8 @@ class EcomAgent:
     def chat(self, user_input: str) -> CustomerServiceResponse:
         """处理用户输入：ReAct 循环 → 结构化提取 → 返回结果"""
         set_current_session(self.session_id)
+        from app.agent.runtime_context import set_current_user
+        set_current_user(self.user_id)
         # 每轮刷新记忆工具的当前 manager:多 agent 并存时防 recall_user_memory 串户
         if settings.memory_enabled:
             from app.agent.tools.memory_tool import set_memory_manager
