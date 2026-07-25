@@ -76,10 +76,22 @@ def test_toolmanager_uses_shared_and_close_keeps_it(monkeypatch):
 
 
 def test_toolmanager_degrades_when_shared_none(monkeypatch):
+    """共享连接不可用时 ToolManager 降级本地。走真实失败路径:让 shared 内部
+    MCPClient.connect 抛错 → get_shared_mcp_client 返回 None → ToolManager 降级
+    (比 patch get_shared_mcp_client 更稳——延迟导入 patch 目标易错,直接打 shared
+    模块顶部的 MCPClient 引用必命中,且验证的是真实降级链路,不真连网络)。"""
     import app.mcp_client.shared as sh
     from app.agent.tools.manager import ToolManager
-    monkeypatch.setattr(sh, "get_shared_mcp_client", lambda url: None)
-    tm = ToolManager(use_mcp=True, mcp_server_url="test")
+
+    class _FailMCP:
+        def __init__(self, url): pass
+        def connect(self): raise ConnectionError("server down")
+        def close(self): pass
+
+    sh.reset_shared_mcp()
+    monkeypatch.setattr(sh, "MCPClient", _FailMCP)
+    tm = ToolManager(use_mcp=True, mcp_server_url="http://x/mcp")
     names = {d["function"]["name"] for d in tm.tool_definitions}
     assert "list_user_orders" in names        # 降级本地工具(local 独有)
     assert tm._mcp_client is None
+    sh.reset_shared_mcp()
