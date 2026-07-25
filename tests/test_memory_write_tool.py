@@ -76,3 +76,21 @@ def test_prompts_carry_usage_and_negative_guidance():
     for p in (PRESALE_PROMPT, MIDSALE_PROMPT, AFTERSALE_PROMPT):
         assert "save_user_memory" in p
         assert "不要记录" in p          # 负面约束必须在
+
+
+def test_new_fact_at_max_facts_boundary_not_misreported(tmp_path, monkeypatch):
+    """评审抓的边界:facts 满 max_facts 时写入真正的新事实——
+    长度比较会误报 already_known,必须用 add_facts 的真实新增数判定。"""
+    m = _manager(tmp_path)
+    m.ltm.max_facts = 5
+    for i in range(5):
+        save_user_memory(f"事实{i}", category="other")
+    assert len(m.ltm.facts) == 5
+
+    r = save_user_memory("满员后的全新事实", category="preference")
+    assert r["success"] is True
+    assert r["already_known"] is False           # 修复前误报 True
+    contents = [f.content for f in m.ltm.facts]
+    assert "满员后的全新事实" in contents        # 真写入了
+    assert "事实0" not in contents               # 最老一条被淘汰
+    assert len(m.ltm.facts) == 5

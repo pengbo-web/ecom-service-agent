@@ -109,16 +109,23 @@ class LongTermMemory:
                 fact_id = hashlib.md5(fact.content.encode("utf-8")).hexdigest()[:12]
                 fts.index(self.user_id, fact_id, fact.content)
 
-    def add_facts(self, new_facts: list[MemoryFact]) -> None:
-        """添加新事实，自动去重并裁剪到 max_facts。"""
+    def add_facts(self, new_facts: list[MemoryFact]) -> int:
+        """添加新事实，自动去重并裁剪到 max_facts;返回真实新增条数。
+
+        返回值不能用"前后长度比较"替代:满 max_facts 时新增会触发裁剪,
+        长度不变但确实写入了(淘汰最老一条)——长度比较会误报"已存在"。
+        """
         existing_contents = {f.content.lower() for f in self.facts}
+        added = 0
         for fact in new_facts:
             if fact.content.lower() not in existing_contents:
                 self.facts.append(fact)
                 existing_contents.add(fact.content.lower())
+                added += 1
 
         if len(self.facts) > self.max_facts:
             self.facts = self.facts[-self.max_facts:]
+        return added
 
     def add_interaction_summary(self, summary: str) -> None:
         self.interaction_summaries.append({

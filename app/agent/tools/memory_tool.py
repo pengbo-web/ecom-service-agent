@@ -79,13 +79,12 @@ def save_user_memory(content: str = "", category: str = "other") -> dict:
 
     from datetime import datetime
     from app.agent.memory.long_term import MemoryFact
-    before = len(manager.ltm.facts)
-    manager.ltm.add_facts([MemoryFact(
+    added = manager.ltm.add_facts([MemoryFact(
         content=content, category=category,
         created_at=datetime.now().isoformat(timespec="seconds"),
         source_session=source,
     )])
-    already = len(manager.ltm.facts) == before
+    already = added == 0        # 用真实新增数判重(长度比较在满 max_facts 裁剪时会撒谎)
     manager.ltm.save()          # 立即持久化 + FTS 重同步
     return {"success": True, "saved": content, "category": category,
             "already_known": already, "total_facts": len(manager.ltm.facts)}
