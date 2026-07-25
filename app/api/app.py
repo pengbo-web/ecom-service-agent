@@ -8,7 +8,7 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.conversations import open_or_reuse
+from app.api.conversations import ensure_active, open_or_reuse
 from app.api.schemas import ChatRequest, OpenConversationRequest, ResetRequest
 from app.api.session_manager import SessionManager
 from app.api.streaming import run_agent_streaming
@@ -88,8 +88,12 @@ def create_app(session_manager: Optional[SessionManager] = None,
             tolerance=settings.eval_regression_tolerance,
         )
 
-    def _reply_stream(text: str):
+    def _reply_stream(text: str, conversation: Optional[tuple] = None):
         def gen():
+            if conversation is not None:
+                cid, rotated = conversation
+                yield _sse_frame({"type": "conversation", "conversation_id": cid,
+                                  "status": "rotated" if rotated else "active"})
             yield _sse_frame({"type": "reply", "content": text})
             yield _sse_frame({"type": "done"})
         return StreamingResponse(gen(), media_type="text/event-stream")
@@ -100,13 +104,18 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.post("/api/chat")
     def chat(req: ChatRequest):
+        # 0) 会话生命周期:确保 ID 可用;closed/未知(旧格式/伪造)→ 服务端换发翻篇
+        active_id, rotated = ensure_active(get_db(), req.session_id, req.user_id)
+        req.session_id = active_id   # 下游(锁/agent/存储/观测)全部用生效 ID
+
         # 1) 限流（防刷）
         if not rate_limiter.allow(req.session_id):
             return _reply_stream("⏳ 您发送得太快啦，请稍后再试～")
 
         # 2) 人工接管中：短路，不调用 Agent
         if hitl is not None and hitl.manual_mode.is_manual(req.session_id):
-            return _reply_stream("🎧 当前会话已转由人工客服处理，请稍候…")
+            return _reply_stream("🎧 当前会话已转由人工客服处理，请稍候…",
+                                 conversation=(active_id, rotated))
 
         # 3) 规则快路径：高频简单意图秒回，跳过 Agent（省 LLM 成本）
         #    仍把这轮问答写进会话历史并落盘，保证刷新/切换后可回显（不因走快路径而丢失）。
@@ -130,7 +139,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
                                     save()
                                 except Exception:  # noqa: BLE001 保存失败不影响本轮回复
                                     pass
-                return _reply_stream(fp["reply"])
+                return _reply_stream(fp["reply"], conversation=(active_id, rotated))
 
         # 4) 成本上限（防烧爆 API Key）
         if not cost_guard.allow():
@@ -139,6 +148,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
         agent = manager.get_or_create(req.session_id, req.user_id)
 
         def event_stream():
+            yield _sse_frame({"type": "conversation", "conversation_id": active_id,
+                              "status": "rotated" if rotated else "active"})
             # 会话级并发锁:同一会话串行(单实例进程内锁/多实例 Redis 分布式锁)
             with session_lock.guard(req.session_id) as got:
                 if not got:
@@ -158,7 +169,10 @@ def create_app(session_manager: Optional[SessionManager] = None,
     @app.post("/api/session/reset", dependencies=[Depends(admin_auth)])
     def reset(req: ResetRequest):
         manager.reset(req.session_id)
-        return {"status": "reset"}
+        get_db().close_conversation(req.session_id, "reset")
+        # 老会话已关;立刻给前端一个新会话,免得下一条消息再走 rotated 换发
+        new_conv = open_or_reuse(get_db(), req.user_id)
+        return {"status": "reset", "conversation_id": new_conv["conversation_id"]}
 
     @app.post("/api/conversation/open")
     def conversation_open(req: OpenConversationRequest):
@@ -199,8 +213,9 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 {"content": f.content, "category": f.category, "created_at": f.created_at}
                 for f in mm.ltm.facts
             ]
+            get_db().close_conversation(session_id, "manual")   # 结束会话:翻篇
         return {"enabled": True, "curation": settings.memory_curation_enabled,
-                "count": len(facts), "facts": facts}
+                "count": len(facts), "facts": facts, "conversation_closed": True}
 
     @app.post("/api/config/reload", dependencies=[Depends(admin_auth)])
     def config_reload():

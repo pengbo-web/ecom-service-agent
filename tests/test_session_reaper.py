@@ -74,3 +74,19 @@ def test_only_idle_ones_reaped_mixed():
     clock.t = 1400                   # old 空闲 400s,fresh 空闲 200s
     assert mgr.sweep(idle_ttl=300) == ["old"]
     assert "old" not in mgr._agents and "fresh" in mgr._agents
+
+
+def test_reaper_closes_conversation(tmp_path, monkeypatch):
+    """空闲回收时会话置 closed(reason=idle)。"""
+    from app.db import Database, get_db
+    temp_db = Database(str(tmp_path / "t.db"))
+    temp_db.init_schema()
+    monkeypatch.setattr("app.db._DB", temp_db)
+
+    cid = temp_db.create_conversation("u1")["conversation_id"]
+    mgr, clock = _mgr()
+    mgr.get_or_create(cid)           # 活跃于 t=1000
+    clock.t = 1000 + 301             # 空闲超过 300s
+    reaped = mgr.sweep(idle_ttl=300)
+    assert reaped == [cid]
+    assert get_db().get_conversation(cid)["close_reason"] == "idle"

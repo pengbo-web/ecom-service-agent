@@ -100,6 +100,11 @@ class SessionManager:
                     except Exception:
                         pass
                 self._archiver.archive(session_id, agent)   # 冷归档(best-effort)
+                try:
+                    from app.db import get_db
+                    get_db().close_conversation(session_id, "idle")   # 生命周期:空闲即翻篇
+                except Exception:
+                    pass
             with self._guard:
                 self._agents.pop(session_id, None)
                 self._last_active.pop(session_id, None)

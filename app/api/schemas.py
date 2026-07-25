@@ -10,6 +10,7 @@ class ChatRequest(BaseModel):
 
 class ResetRequest(BaseModel):
     session_id: str
+    user_id: str = "default"   # 重置后立刻服务端新开一个会话,归属该用户
 
 
 class OpenConversationRequest(BaseModel):

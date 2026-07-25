@@ -47,8 +47,8 @@ def test_chat_streams_events():
     assert resp.headers["content-type"].startswith("text/event-stream")
     events = _parse_sse(resp.text)
     types = [e["type"] for e in events]
-    assert types == ["thought", "reply", "metadata", "done"]
-    assert events[1]["content"] == "收到：查一下订单"
+    assert types == ["conversation", "thought", "reply", "metadata", "done"]
+    assert events[2]["content"] == "收到：查一下订单"
 
 
 def test_reset_endpoint():
@@ -84,3 +84,36 @@ def test_conversation_open_and_list(tmp_path, monkeypatch):
     assert r2.json()["conversation_id"] == cid                   # 复用
     r3 = client.get("/api/conversations", params={"user_id": "u9"})
     assert any(c["conversation_id"] == cid for c in r3.json()["conversations"])
+
+
+def test_chat_emits_conversation_event_and_rotates_closed(tmp_path, monkeypatch):
+    # 隔离:app.py 内的 get_db() 与本测试直接调用的 get_db() 是同一个函数对象，
+    # 都读同一个 app.db._DB 全局单例；直接换掉这个单例即可让二者一致指向临时库。
+    from app.db import Database
+    temp_db = Database(str(tmp_path / "t.db"))
+    temp_db.init_schema()
+    monkeypatch.setattr("app.db._DB", temp_db)
+
+    client, _ = _client()
+    cid = client.post("/api/conversation/open", json={"user_id": "u9"}).json()["conversation_id"]
+    # open 会话:首帧 conversation,status=active,ID 不变
+    r = client.post("/api/chat", json={"session_id": cid, "message": "你好", "user_id": "u9"})
+    events = _parse_sse(r.text)
+    conv = next(e for e in events if e["type"] == "conversation")
+    assert conv["conversation_id"] == cid and conv["status"] == "active"
+    # 关闭后再发:换发新 ID,status=rotated
+    from app.db import get_db
+    get_db().close_conversation(cid, "manual")
+    r2 = client.post("/api/chat", json={"session_id": cid, "message": "在吗", "user_id": "u9"})
+    conv2 = next(e for e in _parse_sse(r2.text) if e["type"] == "conversation")
+    assert conv2["status"] == "rotated" and conv2["conversation_id"] != cid
+
+
+def test_reset_rotates_conversation():
+    client, _ = _client()
+    cid = client.post("/api/conversation/open", json={"user_id": "u9"}).json()["conversation_id"]
+    r = client.post("/api/session/reset", json={"session_id": cid})
+    body = r.json()
+    assert body["conversation_id"] != cid
+    from app.db import get_db
+    assert get_db().get_conversation(cid)["close_reason"] == "reset"
