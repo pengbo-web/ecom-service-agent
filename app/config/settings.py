@@ -181,6 +181,11 @@ class Settings(BaseSettings):
     # 冷启首查,单独放宽到 10s——仍有界防挂死,超时行为=该轮无注入(或降级,看上面开关)
     aperag_timeout_s: float = 10.0
 
+    # 统一查询理解节点(意图识别):一次 LLM 调用出 domain/intent/need_kb/kb_query,
+    # 吃掉独立路由与改写调用;闲聊轮免检索。关=回退老 Router 路由+每轮必检索
+    # (改写能力已并入本节点,回退路径检索用原句)
+    query_understanding_enabled: bool = True
+
     # 多轮查询改写(预召回前置):"那运费呢?"→"退货运费谁承担"。失败/首问回退原句
     recall_rewrite_enabled: bool = True
     recall_rewrite_max_turns: int = 6  # 改写时参考的最近用户消息条数

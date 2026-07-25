@@ -28,6 +28,8 @@ def _force_local_session_backends():
     settings.kb_backend = "local"      # 召回走本地索引;ApeRAG 专项测试自行覆盖(本机 .env 可能设 aperag)
     _orig_ak = settings.aperag_api_key
     settings.aperag_api_key = ""       # 不带真实 key,防止误发外部请求
+    _orig_qu = settings.query_understanding_enabled
+    settings.query_understanding_enabled = False  # 既有语料走老路由;查询理解专项测试自行开启
     yield
     settings.reply_pipeline_enabled = _orig_rp
     settings.langfuse_enabled = _orig_lf
@@ -35,6 +37,7 @@ def _force_local_session_backends():
     settings.memory_async_updates = _orig_async
     settings.kb_backend = _orig_kb
     settings.aperag_api_key = _orig_ak
+    settings.query_understanding_enabled = _orig_qu
     set_session_store(None)
     set_session_lock(None)
     set_idempotency_store(None)
