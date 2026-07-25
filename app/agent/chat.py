@@ -418,7 +418,7 @@ class EcomAgent:
             rr = build_recall_sections(self.memory_manager, recall_query)
             self._turn_recall = (last_user, rr)
             if rr.kb_hits:   # 首次计算且 KB 有命中才发事件(前端思考面板+tracer 各消费一次)
-                self._emit({"type": "recall", "source": "kb",
+                self._emit({"type": "recall", "source": "kb", "backend": rr.kb_backend,
                             "query": recall_query, "hits": rr.kb_hits})
         messages.extend(self._turn_recall[1].sections)
         if self.summary:

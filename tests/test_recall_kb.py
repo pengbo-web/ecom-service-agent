@@ -97,11 +97,24 @@ def test_aperag_empty_hits_does_not_degrade_to_local(monkeypatch):
 
 def test_backend_dispatch_falls_back_to_local(monkeypatch):
     monkeypatch.setattr(settings, "kb_backend", "aperag")
+    monkeypatch.setattr(settings, "kb_local_fallback_enabled", True)   # 兜底需显式开
     monkeypatch.setattr("app.agent.recall.external_kb.aperag_search", lambda q: None)
     monkeypatch.setattr(kb_mod, "search_knowledge",
                         lambda q, top_k: _fake_results(("退换货政策", "七天", 0.8, "本地兜底命中")))
     r = kb_recall("退货政策是什么")
     assert "本地兜底命中" in r.section and r.backend == "local"
+
+
+def test_fallback_disabled_by_default_no_injection(monkeypatch):
+    """默认关兜底:aperag 故障时本轮无注入(体验纯 ApeRAG,故障可感知),本地零流量。"""
+    monkeypatch.setattr(settings, "kb_backend", "aperag")
+    monkeypatch.setattr("app.agent.recall.external_kb.aperag_search", lambda q: None)
+    local_called = []
+    monkeypatch.setattr(kb_mod, "search_knowledge",
+                        lambda q, top_k: local_called.append(q))
+    r = kb_recall("退货政策是什么")
+    assert r.section is None and r.backend == "aperag"
+    assert local_called == []              # 关兜底连本地都不碰
 
 
 def test_backend_default_local_untouched(monkeypatch):

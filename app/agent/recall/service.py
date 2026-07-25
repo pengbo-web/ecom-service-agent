@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 class RecallResult:
     sections: list[dict] = field(default_factory=list)   # [{"role":"system","content":...}]
     kb_hits: list[dict] = field(default_factory=list)    # KB 命中明细(供 recall 事件/观测)
+    kb_backend: str = "local"                            # 本轮 KB 实际后端(aperag/local),供前端标识来源
 
 
 def _profile_section(memory_manager, query):
@@ -64,6 +65,7 @@ def build_recall_sections(memory_manager, query: str | None) -> RecallResult:
     except Exception:
         logger.warning("recall source kb failed", exc_info=True)
         kb = KbRecall()
+    result.kb_backend = kb.backend
     if kb.section:
         result.sections.append({"role": "system", "content": kb.section})
         result.kb_hits = kb.hits

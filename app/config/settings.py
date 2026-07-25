@@ -174,6 +174,9 @@ class Settings(BaseSettings):
     # 预召回选低阈值走召回率优先,下游有字符预算+评估器兜底。必须显式传:ApeRAG API 层
     # 会把缺省字段解析成 None 显式下传,覆盖 Field 默认导致整体 500(上游 bug,可提 issue)
     aperag_min_similarity: float = 0.2
+    # aperag 故障时是否降级本地索引。False(默认)=纯 ApeRAG 体验,故障=本轮无KB注入(可感知);
+    # True=三级降级 aperag→local→无注入(生产建议开,故障静默兜底)
+    kb_local_fallback_enabled: bool = False
 
     # 多轮查询改写(预召回前置):"那运费呢?"→"退货运费谁承担"。失败/首问回退原句
     recall_rewrite_enabled: bool = True

@@ -44,12 +44,17 @@ def _local_rows(query: str) -> list[dict]:
 
 
 def _fetch_rows(query: str) -> tuple[list[dict], str]:
-    """按 kb_backend 取行,三级降级:aperag→local→[](调用方无命中即不注入)。"""
+    """按 kb_backend 取行。aperag 故障时:开 kb_local_fallback_enabled 则降级本地索引
+    (三级降级 aperag→local→无注入);关(默认)则本轮直接无注入——体验纯 ApeRAG 行为,
+    降级不再被本地兜底悄悄掩盖,故障在前端表现为该轮没有「预召回」行。"""
     if settings.kb_backend == "aperag":
         from app.agent.recall.external_kb import aperag_search
         rows = aperag_search(query)
         if rows is not None:
             return rows, "aperag"
+        if not settings.kb_local_fallback_enabled:
+            logger.warning("kb backend aperag unavailable, local fallback DISABLED -> no injection this turn")
+            return [], "aperag"
         logger.warning("kb backend aperag unavailable, fallback to local index")
     return _local_rows(query), "local"
 
