@@ -33,3 +33,18 @@ ReAct 循环本身只改了两行——工具列表和调用入口换成 ToolMan
 下期做 RAG，让 Agent 能检索商品库、FAQ、退换货政策，不再只靠工具返回的数据回答问题
 
 关注我，一起做完写进简历
+
+## 补充:跨进程身份透传(2026-07-25)
+
+MCP 工具在独立 server 进程执行,靠进程内 ContextVar 传的身份(当前登录用户)
+跨不过去——直接常开会导致订单类工具(query_order/query_logistics/apply_refund)
+的归属校验(owned_order)在 server 进程拿不到用户而失效(auth 开则全拒、auth 关则越权)。
+
+**对齐生产做法:显式传身份**。用保留参数 `ctx_user_id` 跨进程携带:
+- client:`converter` 从模型可见 schema 剔除 `ctx_user_id`(模型无感、不伪造);
+  `ToolManager` 执行 MCP 工具时用 `get_current_user()` 注入。
+- server:每个 `@mcp.tool()` 接收 `ctx_user_id`,函数体第一行 `set_current_user()`
+  落到 server 进程上下文,再调真实工具——`owned_order` 据此校验。
+
+生产更常用 OAuth/Bearer header 传身份;本项目用保留参数是等价务实简化。
+(踩坑:FastMCP 禁止工具参数以 `_` 开头,故用 `ctx_user_id` 而非 `_ctx_user_id`。)
