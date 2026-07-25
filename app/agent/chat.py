@@ -133,6 +133,26 @@ class EcomAgent:
         self._turn_recall = None   # 新一轮:召回缓存作废,按本轮问题重检索
         self._checkpoint("in_flight")   # 回合开始:持久化用户消息 + 标记进行中
 
+        # FAQ 语义缓存秒答(文档2.5缓存预热):QU 判定需检索的政策类问题先查预热缓存,
+        # 命中=零 LLM 直答(毫秒级);未命中/关闭/失败走正常流程。会话落账与持久化照常。
+        if (settings.faq_cache_enabled and self._turn_qu is not None
+                and self._turn_qu.need_kb):
+            from app.agent.faq_cache import get_faq_cache
+            _hit = get_faq_cache().lookup(self._turn_qu.kb_query or user_input)
+            if _hit is not None:
+                self._emit({"type": "faq_cache", "matched": _hit["question"],
+                            "score": _hit["score"]})
+                result = CustomerServiceResponse(
+                    intent=IntentType.OTHER, confidence=1.0,
+                    reply=_hit["answer"] + "\n(依据《常见问题FAQ》)",
+                    requires_human=False, follow_up_question=None)
+                self.raw_messages.append(
+                    {"role": "assistant", "content": result.model_dump_json()})
+                self._status = "complete"
+                self.store.save(self.session_path, self._session_state())
+                self._write_snapshot()
+                return result
+
         # stage 事件:供观测层(自研 tracer/Langfuse 桥)组装阶段 span 树
         self._emit({"type": "stage", "status": "start", "name": "react"})
         try:

@@ -57,6 +57,13 @@ def test_corrupt_file_tolerated(tmp_path, monkeypatch):
     assert c.entries == []
 
 
+def test_schema_broken_entry_never_raises(tmp_path, monkeypatch):
+    c = _cache(tmp_path, monkeypatch)
+    c.entries = [{"q": "只有问题没答案", "emb": [1.0, 0.0]}]
+    monkeypatch.setattr(c, "_embed", lambda t: [1.0, 0.0])
+    assert c.lookup("只有问题没答案") is None      # 完美命中但缺答案→安全None
+
+
 def test_singleton_reset(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "faq_cache_path", str(tmp_path / "s.json"))
     fc.reset_faq_cache()

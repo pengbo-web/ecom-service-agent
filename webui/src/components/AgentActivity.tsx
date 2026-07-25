@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Brain, Wrench, ClipboardList, ShieldAlert, ChevronDown, ChevronRight, Route, GitBranch, CheckCircle2, Sparkles, BookOpen } from "lucide-react";
+import { Brain, Wrench, ClipboardList, ShieldAlert, ChevronDown, ChevronRight, Route, GitBranch, CheckCircle2, Sparkles, BookOpen, Zap } from "lucide-react";
 import type { SSEEvent } from "@/lib/sse";
 
 // 领域路由标签(H1.0:售前/售中/售后)
@@ -36,6 +36,7 @@ export function AgentActivity({ events, defaultOpen = false }: { events: SSEEven
               {e.type === "polish" && <><Sparkles className="mt-0.5 h-3.5 w-3.5 text-accent" /><span>润色完成（小夕语气，事实原样保留）</span></>}
               {e.type === "recall" && e.skipped && <><BookOpen className="mt-0.5 h-3.5 w-3.5 text-muted-foreground" /><span className="text-muted-foreground">预召回 → 跳过（{e.reason}，无需检索知识库）</span></>}
               {e.type === "recall" && !e.skipped && <><BookOpen className="mt-0.5 h-3.5 w-3.5 text-primary" /><span>预召回<b>[{e.backend === "aperag" ? "ApeRAG" : "本地索引"}]</b>{e.query ? `（查询：${e.query}）` : ""} → 平台知识：{(e.hits as { doc: string; section: string }[] ?? []).map(h => `${h.doc}/${h.section}`).join("、")}</span></>}
+              {e.type === "faq_cache" && <><Zap className="mt-0.5 h-3.5 w-3.5 text-accent" /><span>FAQ 秒答（命中：{e.matched}，相似度 {Number(e.score).toFixed(2)}，零 LLM）</span></>}
             </div>
           ))}
         </div>

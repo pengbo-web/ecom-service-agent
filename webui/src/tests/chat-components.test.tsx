@@ -56,3 +56,13 @@ describe("AgentActivity 查询理解", () => {
     expect(screen.getByText(/闲聊寒暄/)).toBeInTheDocument();
   });
 });
+
+describe("AgentActivity FAQ 秒答", () => {
+  it("渲染缓存命中事件", () => {
+    render(<AgentActivity events={[
+      { type: "faq_cache", matched: "下单后多久发货", score: 0.95 },
+    ]} defaultOpen />);
+    expect(screen.getByText(/FAQ 秒答/)).toBeInTheDocument();
+    expect(screen.getByText(/下单后多久发货/)).toBeInTheDocument();
+  });
+});

@@ -11,6 +11,7 @@
 import json
 import logging
 import math
+import threading
 from pathlib import Path
 
 from app.config.settings import settings
@@ -18,6 +19,7 @@ from app.config.settings import settings
 logger = logging.getLogger(__name__)
 
 _singleton = None
+_lock = threading.Lock()
 
 
 def _cos(a: list, b: list) -> float:
@@ -82,15 +84,18 @@ class FaqCache:
             if s > best_score:
                 best, best_score = e, s
         if best is not None and best_score >= settings.faq_cache_min_score:
-            return {"question": best["q"], "answer": best["a"],
-                    "score": round(best_score, 4)}
+            q, a = best.get("q"), best.get("a")
+            if q and a:
+                return {"question": q, "answer": a, "score": round(best_score, 4)}
         return None
 
 
 def get_faq_cache() -> FaqCache:
     global _singleton
     if _singleton is None:
-        _singleton = FaqCache(settings.faq_cache_path)
+        with _lock:
+            if _singleton is None:
+                _singleton = FaqCache(settings.faq_cache_path)
     return _singleton
 
 
