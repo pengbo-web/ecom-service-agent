@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
   consolidateMemory, getHistory, openConversation, listConversations,
+  login, createUser, setToken, clearToken, setUserId,
   type ConsolidateResult, type ConversationMeta, type HistoryTurn,
 } from "@/lib/api";
 
@@ -24,6 +25,8 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
   const [memBusy, setMemBusy] = useState(false);
   const [memErr, setMemErr] = useState<string | null>(null);
   const [uidDraft, setUidDraft] = useState(userId);
+  const [switching, setSwitching] = useState(false);
+  const [switchErr, setSwitchErr] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [convList, setConvList] = useState<ConversationMeta[] | null>(null);
   const [pastConv, setPastConv] = useState<string | null>(null);
@@ -85,9 +88,43 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
       else if (e.type === "reply") patch((t) => ({ ...t, reply: e.content }));
       else if (e.type === "metadata") patch((t) => ({ ...t, meta: { intent: e.intent, confidence: e.confidence, requires_human: e.requires_human, follow_up_question: e.follow_up_question } }));
       else if (e.type === "handoff") patch((t) => ({ ...t, handoff: e.reasons || [] }));
-      else if (e.type === "error") patch((t) => ({ ...t, reply: "⚠️ 出错了：" + e.message }));
+      else if (e.type === "error") {
+        if (e.status === 401) { clearToken(); location.reload(); return; }
+        patch((t) => ({ ...t, reply: "⚠️ 出错了：" + e.message }));
+      }
     },
   });
+
+  // 「切换」= 登出 + 登录别的用户;不存在则确认后创建并登录。成功后同步展示名缓存并触发上层重开会话。
+  async function onSwitchUser() {
+    const target = uidDraft.trim();
+    if (!target || target === userId || switching) return;
+    setSwitching(true);
+    setSwitchErr(null);
+    try {
+      const r = await login(target);
+      setToken(r.token);
+      setUserId(target);
+      onUserId(target);
+    } catch (e: any) {
+      if (e?.status === 404) {
+        if (window.confirm(`用户「${target}」不存在，是否创建并登录？`)) {
+          try {
+            const r = await createUser(target);
+            setToken(r.token);
+            setUserId(target);
+            onUserId(target);
+          } catch {
+            setSwitchErr("创建失败，请稍后重试");
+          }
+        }
+      } else {
+        setSwitchErr("切换失败，请稍后重试");
+      }
+    } finally {
+      setSwitching(false);
+    }
+  }
 
   function onSend(text: string) {
     const id = ++idRef.current;
@@ -120,13 +157,14 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
           placeholder="用户ID"
           title="用户身份:长期记忆按此隔离(一人一档)。改完点「切换」或按回车。"
           onChange={(e) => setUidDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && uidDraft.trim() && uidDraft !== userId) onUserId(uidDraft); }}
+          onKeyDown={(e) => { if (e.key === "Enter" && uidDraft.trim() && uidDraft !== userId) onSwitchUser(); }}
         />
         <Button variant="secondary" size="sm" className="h-7 text-xs"
-                disabled={!uidDraft.trim() || uidDraft === userId}
-                onClick={() => onUserId(uidDraft)}>
-          切换
+                disabled={!uidDraft.trim() || uidDraft === userId || switching}
+                onClick={onSwitchUser}>
+          {switching ? "切换中…" : "切换"}
         </Button>
+        {switchErr && <span className="text-xs text-destructive">{switchErr}</span>}
         <span className="text-xs text-muted-foreground">当前:<b>{userId}</b> · 会话 {sessionId}</span>
         <Button variant="ghost" size="sm" className="ml-auto h-7 text-xs" onClick={toggleHistory}>
           {historyOpen ? "收起历史" : "历史会话"}

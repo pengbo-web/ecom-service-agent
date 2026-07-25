@@ -1,8 +1,50 @@
 // 会话 ID 由服务端签发(conversation_id = "c-" + uuid4().hex[:16]),前端不再自造。
 // 挂载/切用户时调用 openConversation:同用户已有 open 会话则复用,否则服务端新开一个。
+
+// ---- 登录态:token 存取 + 统一携带 ----
+const TOKEN_KEY = "xiaoxi_token";
+export function getToken(): string {
+  return localStorage.getItem(TOKEN_KEY) || "";
+}
+export function setToken(t: string): void {
+  localStorage.setItem(TOKEN_KEY, t);
+}
+export function clearToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
+}
+export function authHeaders(): Record<string, string> {
+  const t = getToken();
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
+export type LoginResult = { user_id: string; name: string; token: string; expires_in: number };
+export async function login(userId: string): Promise<LoginResult> {
+  const r = await fetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId }),
+  });
+  if (!r.ok) throw Object.assign(new Error("login"), { status: r.status });
+  return r.json();
+}
+export async function createUser(userId: string, name?: string): Promise<LoginResult> {
+  const r = await fetch("/api/users", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ user_id: userId, name: name || userId }),
+  });
+  if (!r.ok) throw Object.assign(new Error("create"), { status: r.status });
+  return r.json();
+}
+export async function me(): Promise<{ user_id: string; name: string } | null> {
+  const r = await fetch("/api/auth/me", { headers: authHeaders() });
+  return r.ok ? r.json() : null;
+}
+
 export async function openConversation(userId: string): Promise<{ conversation_id: string }> {
   const r = await fetch("/api/conversation/open", {
-    method: "POST", headers: { "Content-Type": "application/json" },
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ user_id: userId }),
   });
   return r.json();
@@ -10,7 +52,7 @@ export async function openConversation(userId: string): Promise<{ conversation_i
 
 export type ConversationMeta = { conversation_id: string; status: string; created_at: string; close_reason?: string | null };
 export async function listConversations(userId: string): Promise<ConversationMeta[]> {
-  const r = await fetch(`/api/conversations?user_id=${encodeURIComponent(userId)}`);
+  const r = await fetch(`/api/conversations?user_id=${encodeURIComponent(userId)}`, { headers: authHeaders() });
   return (await r.json()).conversations;
 }
 
@@ -22,7 +64,7 @@ export function setUserId(uid: string): void {
 }
 export function adminFetch(url: string, opts: RequestInit = {}) {
   const token = localStorage.getItem("admin_token") || "";
-  opts.headers = { ...(opts.headers || {}), ...(token ? { "X-Admin-Token": token } : {}) };
+  opts.headers = { ...(opts.headers || {}), ...authHeaders(), ...(token ? { "X-Admin-Token": token } : {}) };
   return fetch(url, opts);
 }
 export async function getJSON<T>(url: string): Promise<T> {
@@ -42,7 +84,7 @@ export async function consolidateMemory(sessionId: string, userId: string): Prom
 
 export type HistoryTurn = { role: "user" | "assistant"; content: string };
 export async function getHistory(sessionId: string): Promise<HistoryTurn[]> {
-  const r = await fetch(`/api/session/${sessionId}/history`);
+  const r = await fetch(`/api/session/${sessionId}/history`, { headers: authHeaders() });
   if (!r.ok) return [];
   return (await r.json()).turns || [];
 }
