@@ -10,3 +10,7 @@ class ChatRequest(BaseModel):
 
 class ResetRequest(BaseModel):
     session_id: str
+
+
+class OpenConversationRequest(BaseModel):
+    user_id: str = "default"

@@ -8,10 +8,12 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.schemas import ChatRequest, ResetRequest
+from app.api.conversations import open_or_reuse
+from app.api.schemas import ChatRequest, OpenConversationRequest, ResetRequest
 from app.api.session_manager import SessionManager
 from app.api.streaming import run_agent_streaming
 from app.config.settings import settings
+from app.db import get_db
 from app.guardrails.pipeline import build_default_pipeline
 from app.hardening.auth import make_admin_auth
 from app.hardening.cost_guard import CostGuard
@@ -157,6 +159,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
     def reset(req: ResetRequest):
         manager.reset(req.session_id)
         return {"status": "reset"}
+
+    @app.post("/api/conversation/open")
+    def conversation_open(req: OpenConversationRequest):
+        """服务端签发/复用会话:同用户已有 open 会话则复用(多端一致),否则新开。"""
+        return open_or_reuse(get_db(), req.user_id)
+
+    @app.get("/api/conversations")
+    def conversations_list(user_id: str = "default", limit: int = 20):
+        return {"conversations": get_db().list_conversations(user_id, limit=limit)}
 
     @app.get("/api/session/{session_id}/history")
     def session_history(session_id: str):

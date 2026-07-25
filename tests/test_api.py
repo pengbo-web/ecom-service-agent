@@ -64,3 +64,23 @@ def test_root_serves_html():
     resp = client.get("/")
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
+
+
+def test_conversation_open_and_list(tmp_path, monkeypatch):
+    # 隔离:/api/conversation/open、/api/conversations 内部走 app.api.app.get_db()，
+    # 该名字是 `from app.db import get_db` 导入进 app.api.app 模块命名空间的引用；
+    # 直接把这个引用换成返回临时库的函数，不碰真正的 ecom.db，也不用管 get_db 的全局单例缓存。
+    from app.db import Database
+    temp_db = Database(str(tmp_path / "t.db"))
+    temp_db.init_schema()
+    monkeypatch.setattr("app.api.app.get_db", lambda: temp_db)
+
+    client, _ = _client()
+    r1 = client.post("/api/conversation/open", json={"user_id": "u9"})
+    assert r1.status_code == 200
+    cid = r1.json()["conversation_id"]
+    assert cid.startswith("c-")
+    r2 = client.post("/api/conversation/open", json={"user_id": "u9"})
+    assert r2.json()["conversation_id"] == cid                   # 复用
+    r3 = client.get("/api/conversations", params={"user_id": "u9"})
+    assert any(c["conversation_id"] == cid for c in r3.json()["conversations"])

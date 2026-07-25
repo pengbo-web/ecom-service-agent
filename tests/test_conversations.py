@@ -1,6 +1,7 @@
 """会话生命周期数据层:服务端签发 + open/closed 状态机。临时库,全离线。"""
 
 from app.db import Database
+from app.api.conversations import open_or_reuse, ensure_active
 
 
 def _db(tmp_path):
@@ -49,3 +50,35 @@ def test_list_conversations_desc_and_limit(tmp_path):
     assert len(rows) == 2
     assert rows[0]["conversation_id"] == ids[-1]      # 最新在前
     assert db.list_conversations("u_none") == []
+
+
+def test_open_or_reuse_returns_existing_open(tmp_path):
+    db = _db(tmp_path)
+    first = open_or_reuse(db, "u1")
+    again = open_or_reuse(db, "u1")
+    assert again["conversation_id"] == first["conversation_id"]   # 复用,不重复开
+    db.close_conversation(first["conversation_id"], "manual")
+    third = open_or_reuse(db, "u1")
+    assert third["conversation_id"] != first["conversation_id"]   # 关了才翻篇
+
+
+def test_ensure_active_open_passthrough(tmp_path):
+    db = _db(tmp_path)
+    cid = db.create_conversation("u1")["conversation_id"]
+    assert ensure_active(db, cid, "u1") == (cid, False)
+
+
+def test_ensure_active_closed_rotates(tmp_path):
+    db = _db(tmp_path)
+    cid = db.create_conversation("u1")["conversation_id"]
+    db.close_conversation(cid, "idle")
+    new_id, rotated = ensure_active(db, cid, "u1")
+    assert rotated is True and new_id != cid and new_id.startswith("c-")
+
+
+def test_ensure_active_never_adopts_client_id(tmp_path):
+    """安全铁律:客户端自造/旧格式 ID 不被采纳,服务端换发。"""
+    db = _db(tmp_path)
+    new_id, rotated = ensure_active(db, "default--acbuu9p4", "u1")
+    assert rotated is True and new_id.startswith("c-")
+    assert db.get_conversation("default--acbuu9p4") is None      # 未被写库
