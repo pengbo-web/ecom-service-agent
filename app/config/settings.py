@@ -186,10 +186,6 @@ class Settings(BaseSettings):
     # (改写能力已并入本节点,回退路径检索用原句)
     query_understanding_enabled: bool = True
 
-    # 多轮查询改写(预召回前置):"那运费呢?"→"退货运费谁承担"。失败/首问回退原句
-    recall_rewrite_enabled: bool = True
-    recall_rewrite_max_turns: int = 6  # 改写时参考的最近用户消息条数
-
     # 极简登录态(两档用户体系:先创建才可用 + 身份从签名 token 解出)
     auth_enabled: bool = True          # 关=完全回退自报 user_id(测试/教学)
     auth_secret: str = "dev-secret-change-in-prod"   # 生产必须换(env AUTH_SECRET)

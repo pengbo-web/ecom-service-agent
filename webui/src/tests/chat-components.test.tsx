@@ -38,3 +38,21 @@ describe("AgentActivity recall", () => {
     expect(screen.getByText(/ApeRAG/)).toBeInTheDocument();   // 后端来源标识可见
   });
 });
+
+describe("AgentActivity 查询理解", () => {
+  it("route 事件带意图与门控徽标", () => {
+    render(<AgentActivity events={[
+      { type: "route", agent: "售后服务专家", key: "aftersale", intent: "政策咨询", need_kb: true, source: "llm" },
+    ]} defaultOpen />);
+    expect(screen.getByText(/政策咨询/)).toBeInTheDocument();
+    expect(screen.getByText(/需检索/)).toBeInTheDocument();
+  });
+
+  it("recall skipped 事件渲染跳过原因", () => {
+    render(<AgentActivity events={[
+      { type: "recall", source: "kb", skipped: true, reason: "闲聊寒暄" },
+    ]} defaultOpen />);
+    expect(screen.getByText(/跳过/)).toBeInTheDocument();
+    expect(screen.getByText(/闲聊寒暄/)).toBeInTheDocument();
+  });
+});

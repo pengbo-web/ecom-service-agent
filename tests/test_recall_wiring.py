@@ -120,6 +120,22 @@ def test_qu_need_kb_false_skips_and_emits_skipped(monkeypatch):
     assert ev["skipped"] is True and ev["reason"] == "闲聊寒暄"
 
 
+def test_qu_need_kb_true_no_hits_emits_nothing(monkeypatch):
+    """qu 存在且要检索但无命中:既不发正常事件也不发 skipped(防 elif 被改破)。"""
+    from app.agent.understanding import QueryUnderstanding
+    monkeypatch.setattr("app.agent.recall.service.build_recall_sections",
+                        lambda mm, q, include_kb=True: RecallResult())
+    agent = _agent()
+    events = []
+    agent.event_sink = events.append
+    agent.set_turn_understanding(QueryUnderstanding(
+        intent="政策咨询", need_kb=True, kb_query="政策", source="llm"))
+    agent.raw_messages.append({"role": "user", "content": "某政策"})
+    agent._turn_recall = None
+    agent._build_messages()
+    assert [e for e in events if e["type"] == "recall"] == []
+
+
 def test_no_qu_defaults_to_old_behavior(monkeypatch):
     """引擎独立运行(无 orchestrator 注入 QU):原句检索,include_kb=True。"""
     calls = []
