@@ -60,7 +60,7 @@ def test_chat_refreshes_memory_manager_each_turn(tmp_path, monkeypatch):
 
     # 驱动 A 的一轮 chat(fake:react 直接返回文本,不触网)
     monkeypatch.setattr(agent_a, "_react_loop", lambda: '{"intent":"other","confidence":0.9,"reply":"ok","requires_human":false}')
-    monkeypatch.setattr(agent_a.memory_manager, "update_short_term", lambda *_: None)
+    monkeypatch.setattr(agent_a.memory_manager, "update_short_term", lambda *a, **k: None)
     agent_a.chat("你好")
 
     # A 的轮结束后,工具侧看到的必须是 A 的 manager

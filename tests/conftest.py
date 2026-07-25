@@ -22,10 +22,13 @@ def _force_local_session_backends():
     settings.langfuse_enabled = False         # 测试不上报 Langfuse(本机 .env 可能开着)
     _orig_auth = settings.auth_enabled
     settings.auth_enabled = False      # 既有测试不带 token;auth 专项测试自行开启
+    _orig_async = settings.memory_async_updates
+    settings.memory_async_updates = False  # 既有测试确定性(同步执行);异步专项测试自行开启
     yield
     settings.reply_pipeline_enabled = _orig_rp
     settings.langfuse_enabled = _orig_lf
     settings.auth_enabled = _orig_auth
+    settings.memory_async_updates = _orig_async
     set_session_store(None)
     set_session_lock(None)
     set_idempotency_store(None)

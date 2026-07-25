@@ -42,11 +42,66 @@ class MemoryManager:
         if self.memory_enabled:
             self.ltm.load()
 
-    def update_short_term(self, recent_messages: list[dict]) -> None:
-        """每轮对话后更新短期记忆。"""
+        import threading
+        self._turn_count = 0
+        self._extract_cursor = 0            # N2:已抽取到的消息游标
+        self._bg_lock = threading.Lock()    # 串行化后台记忆任务(STM/中途抽取/会话末巩固)
+        self._bg_thread = None
+
+    def update_short_term(self, recent_messages: list[dict],
+                          all_messages: list[dict] | None = None) -> None:
+        """每轮对话后调用:按 stm_update_every_n_turns 节流,按需异步执行。
+
+        节流依据:中间轮次的原始消息本来就在上下文里,摘要不需要每轮刷新;
+        实测每轮同步更新一次 LLM 调用 ~15s/500+ tok,是响应时间大头。
+        """
         if not self.memory_enabled:
             return
-        self.stm.update(self.client, self.model, recent_messages)
+        from app.config.settings import settings as _s
+        self._turn_count += 1
+        n = max(1, _s.stm_update_every_n_turns)
+        due_stm = self._turn_count % n == 0
+        m = _s.memory_checkpoint_every_n_turns
+        due_ckpt = m > 0 and self._turn_count % m == 0 and all_messages
+        if not due_stm and not due_ckpt:
+            return
+
+        recent = list(recent_messages)                       # 快照:主线程会继续 append
+        full = list(all_messages) if all_messages else []
+        try:
+            from app.agent.tools.bargain import get_current_session
+            session_id = get_current_session() or ""
+        except Exception:
+            session_id = ""
+
+        def work():
+            from app.observability.langfuse_bridge import background_trace
+            with self._bg_lock:
+                if due_stm:
+                    try:
+                        with background_trace("update_short_term",
+                                              session_id=session_id, user_id=self.ltm.user_id):
+                            self.stm.update(self.client, self.model, recent)
+                    except Exception:
+                        pass
+                if due_ckpt:
+                    self._checkpoint_extract(full, session_id)
+
+        self._run_bg(work)
+
+    def _run_bg(self, fn) -> None:
+        from app.config.settings import settings as _s
+        if not _s.memory_async_updates:
+            fn()
+            return
+        import threading
+        t = threading.Thread(target=fn, daemon=True, name="memory-bg")
+        self._bg_thread = t
+        t.start()
+
+    def _checkpoint_extract(self, all_messages: list[dict], session_id: str) -> None:
+        """长会话中途隐式记忆抽取(N2 实现;N1 占位无操作)。"""
+        return
 
     def build_memory_prompt_sections(self, query: str | None = None) -> list[dict]:
         """生成所有记忆相关的 system prompt 消息列表。
@@ -82,9 +137,11 @@ class MemoryManager:
         """会话结束时，将本次对话的关键事实巩固到长期记忆。"""
         if not self.memory_enabled:
             return
-        self.ltm.extract_and_save(
-            self.client, self.model, messages, summary,
-        )
+        with self._bg_lock:
+            self.ltm.extract_and_save(
+                self.client, self.model, messages[self._extract_cursor:], summary,
+            )
+            self._extract_cursor = len(messages)
 
     def reset_short_term(self) -> None:
         """重置短期记忆（会话内重置时调用）。"""

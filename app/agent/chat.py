@@ -130,7 +130,8 @@ class EcomAgent:
 
         result = self._extract_structured_response(final_text)
 
-        self.memory_manager.update_short_term(self.raw_messages[-6:])
+        self.memory_manager.update_short_term(self.raw_messages[-6:],
+                                              all_messages=self.raw_messages)
 
         self.raw_messages.append(
             {"role": "assistant", "content": result.model_dump_json()}

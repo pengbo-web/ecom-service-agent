@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     memory_curation_enabled: bool = False   # Phase 5:长期记忆 LLM 策展(合并/纠正/按重要性淘汰);关则用 add_facts
     memory_fts_enabled: bool = True         # H2 FTS 记忆全文索引召回;关闭回退全量注入
     memory_profile_enabled: bool = True     # H2/G2 结构化用户档案(base/标签/工单)注入与落库;关闭即完全禁用
+    stm_update_every_n_turns: int = 3     # 短期记忆每 N 轮更新一次(1=每轮,旧行为);省 token 且中间轮原始消息本就在上下文
+    memory_checkpoint_every_n_turns: int = 10   # 长会话中途每 N 轮触发隐式记忆抽取归档(0=关);与会话末巩固双通道,策展去重
+    memory_async_updates: bool = True     # 记忆更新走后台线程,不阻塞回复(False=同步,测试/调试)
 
     # Skill 配置（第8期）
     skills_enabled: bool = True

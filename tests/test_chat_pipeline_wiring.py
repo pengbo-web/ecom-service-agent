@@ -82,7 +82,7 @@ def make_agent(script, tm=None, max_steps=3):
     a._step_seq = 0
     a._pending = None
     a.memory_manager = _t.SimpleNamespace(
-        stm_to_dict=lambda: {}, update_short_term=lambda msgs: None,
+        stm_to_dict=lambda: {}, update_short_term=lambda msgs, all_messages=None: None,
     )
     from app.agent.reply_pipeline import ReplyPipeline
     a._reply_pipeline = ReplyPipeline()
