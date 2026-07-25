@@ -100,8 +100,23 @@ class MemoryManager:
         t.start()
 
     def _checkpoint_extract(self, all_messages: list[dict], session_id: str) -> None:
-        """长会话中途隐式记忆抽取(N2 实现;N1 占位无操作)。"""
-        return
+        """长会话中途隐式记忆抽取:只喂游标之后的新消息,完成后推进游标。
+
+        与会话末巩固双通道共享游标——互不重复抽取;重启后游标归 0 会重抽
+        旧消息,由策展/内容去重兜底(已知取舍)。调用方已持 _bg_lock。
+        """
+        segment = all_messages[self._extract_cursor:]
+        if not segment:
+            return
+        try:
+            from app.observability.langfuse_bridge import background_trace
+            with background_trace("memory_checkpoint",
+                                  session_id=session_id, user_id=self.ltm.user_id,
+                                  input={"segment_len": len(segment)}):
+                self.ltm.extract_and_save(self.client, self.model, segment, None)
+            self._extract_cursor = len(all_messages)
+        except Exception:
+            pass
 
     def build_memory_prompt_sections(self, query: str | None = None) -> list[dict]:
         """生成所有记忆相关的 system prompt 消息列表。

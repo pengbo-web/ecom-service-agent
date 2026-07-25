@@ -103,3 +103,44 @@ def test_bg_exception_swallowed(tmp_path, monkeypatch):
     m.stm.update = boom
     m.update_short_term(MSGS, all_messages=MSGS)       # 不抛
     m._bg_thread.join(timeout=5)                        # 线程正常结束
+
+
+def test_checkpoint_extracts_at_every_m_turns_with_cursor(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "stm_update_every_n_turns", 100)   # 静音 STM,只看抽取
+    monkeypatch.setattr(settings, "memory_checkpoint_every_n_turns", 2)
+    m = _mgr(tmp_path)
+    all_msgs = []
+    for i in range(4):
+        all_msgs.append({"role": "user", "content": f"第{i}句"})
+        m.update_short_term(MSGS, all_messages=all_msgs)
+    # 第 2、4 轮各触发一次抽取
+    assert len(m.client.calls) == 2
+    # 第二次抽取只喂游标之后的新消息(不含"第0句")
+    assert "第0句" not in str(m.client.calls[1])
+    assert "第2句" in str(m.client.calls[1]) or "第3句" in str(m.client.calls[1])
+    assert m._extract_cursor == len(all_msgs)
+
+
+def test_checkpoint_disabled_when_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "stm_update_every_n_turns", 100)
+    monkeypatch.setattr(settings, "memory_checkpoint_every_n_turns", 0)
+    m = _mgr(tmp_path)
+    for i in range(4):
+        m.update_short_term(MSGS, all_messages=[{"role": "user", "content": "x"}] * (i + 1))
+    assert m.client.calls == []
+
+
+def test_final_consolidate_only_tail_after_checkpoint(tmp_path, monkeypatch):
+    """会话末巩固只抽游标之后的尾段——两通道不重复烧 token。"""
+    monkeypatch.setattr(settings, "stm_update_every_n_turns", 100)
+    monkeypatch.setattr(settings, "memory_checkpoint_every_n_turns", 2)
+    m = _mgr(tmp_path)
+    all_msgs = [{"role": "user", "content": "早期消息"}, {"role": "user", "content": "第二句"}]
+    m.update_short_term(MSGS, all_messages=all_msgs)
+    m.update_short_term(MSGS, all_messages=all_msgs)   # 第 2 轮触发抽取,游标=2
+    calls_before = len(m.client.calls)
+    all_msgs.append({"role": "user", "content": "尾段新消息"})
+    m.consolidate_to_long_term(all_msgs, None)
+    tail_call = str(m.client.calls[-1])
+    assert "尾段新消息" in tail_call and "早期消息" not in tail_call
+    assert len(m.client.calls) == calls_before + 1
