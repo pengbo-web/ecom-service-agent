@@ -73,7 +73,8 @@ class Database:
                 );
                 CREATE TABLE IF NOT EXISTS users (
                     user_id TEXT PRIMARY KEY,
-                    name TEXT
+                    name TEXT,
+                    member_level TEXT DEFAULT 'normal'
                 );
                 CREATE INDEX IF NOT EXISTS idx_items_order ON order_items(order_id);
                 CREATE INDEX IF NOT EXISTS idx_events_tn ON logistics_events(tracking_number);
@@ -120,6 +121,11 @@ class Database:
             ocols = [r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()]
             if "shipping_address" not in ocols:
                 conn.execute("ALTER TABLE orders ADD COLUMN shipping_address TEXT")
+            # 兼容旧库：users 补 member_level 列(券资格:会员等级)
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+            if "member_level" not in cols:
+                conn.execute("ALTER TABLE users ADD COLUMN member_level TEXT DEFAULT 'normal'")
+                conn.commit()
             conn.commit()
         finally:
             conn.close()
@@ -393,12 +399,17 @@ class Database:
             conn.close()
 
     # ---------- 用户(存在性校验:先创建才可用) ----------
-    def get_user(self, user_id: str):
+    def get_user(self, user_id: str) -> Optional[dict]:
         conn = self.connect()
         try:
-            row = conn.execute("SELECT user_id, name FROM users WHERE user_id = ?",
-                               (user_id,)).fetchone()
-            return dict(row) if row else None
+            row = conn.execute(
+                "SELECT user_id, name, member_level FROM users WHERE user_id = ?",
+                (user_id,)).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            d["member_level"] = d.get("member_level") or "normal"
+            return d
         finally:
             conn.close()
 
@@ -410,6 +421,24 @@ class Database:
                 (user_id, name))
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def count_user_orders(self, user_id: str) -> int:
+        conn = self.connect()
+        try:
+            row = conn.execute("SELECT COUNT(*) FROM orders WHERE user = ?",
+                               (user_id,)).fetchone()
+            return int(row[0]) if row else 0
+        finally:
+            conn.close()
+
+    def set_member_level(self, user_id: str, level: str) -> None:
+        conn = self.connect()
+        try:
+            conn.execute("UPDATE users SET member_level = ? WHERE user_id = ?",
+                         (level, user_id))
+            conn.commit()
         finally:
             conn.close()
 

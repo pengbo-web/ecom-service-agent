@@ -50,6 +50,12 @@ def seed_from_mock(db: Database) -> None:
                 (name, name),
             )
 
+        # 种子会员等级(演示资格过滤:部分用户是会员)
+        _LEVELS = {"小明": "diamond", "小红": "gold"}
+        for name, lvl in _LEVELS.items():
+            if name in users:
+                conn.execute("UPDATE users SET member_level = ? WHERE user_id = ?", (lvl, name))
+
         for lg in LOGISTICS.values():
             conn.execute(
                 "INSERT OR REPLACE INTO shipments (tracking_number, carrier, status) VALUES (?, ?, ?)",

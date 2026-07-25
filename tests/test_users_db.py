@@ -10,7 +10,7 @@ def _db(tmp_path):
 def test_create_and_get_user(tmp_path):
     db = _db(tmp_path)
     assert db.create_user("小明", "小明") is True
-    assert db.get_user("小明") == {"user_id": "小明", "name": "小明"}
+    assert db.get_user("小明") == {"user_id": "小明", "name": "小明", "member_level": "normal"}
     assert db.get_user("ghost") is None
 
 
