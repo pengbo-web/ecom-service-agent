@@ -97,6 +97,7 @@ class Settings(BaseSettings):
     hitl_confidence_threshold: float = 0.6
     hitl_db_path: str = "app/sessions/hitl.db"
     manual_mode_timeout: int = 3600   # 人工接管超时（秒），超时自动回落自动模式
+    hitl_repeat_times: int = 3        # 同一问题重复 N 次未解决→自动转人工(文档9.④,difflib相似度判同)
 
     # 空闲会话自动巩固长期记忆（Web 无"会话结束"信号，用空闲超时近似真实客服）
     auto_consolidate_enabled: bool = True
