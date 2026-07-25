@@ -21,8 +21,10 @@
    并在"默认模型"里把 embedding 默认项设置好
 3. 新建知识库(collection):名称「并夕夕客服知识库」,
    索引开关:向量 ✅ 全文 ✅ 知识图谱 ❌(neo4j 未启动) 摘要 ❌ 视觉 ❌
-4. 上传 4 篇文档:D:\2026项目\ecom-service-agent\app\agent\rag\knowledge\ 下的
-   退换货政策.md / 配送说明.md / 会员权益.md / 常见问题FAQ.md,等待索引状态全部完成
+4. 上传全部 13 篇文档:D:\2026项目\ecom-service-agent\app\agent\rag\knowledge\ 下的
+   退换货政策 / 配送说明 / 会员权益 / 常见问题FAQ / 优惠券与促销规则 / 价格保护政策 /
+   发票与支付说明 / 售后维修与三包 / 物流异常与赔付标准 / 订单管理规则 /
+   投诉与纠纷处理 / 特殊品类服务规则 / 账户与安全(共 13 个 .md),等待索引状态全部完成
 5. 生成 API Key:设置 → API Keys → 创建,复制
 6. 取 collection id:知识库详情页 URL 中 col_ 开头的段
 7. 把以下四行追加到 ecom 项目 .env(值换成实际):
