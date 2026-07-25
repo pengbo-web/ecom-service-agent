@@ -384,3 +384,24 @@ class Database:
             return [dict(r) for r in rows]
         finally:
             conn.close()
+
+    # ---------- 用户(存在性校验:先创建才可用) ----------
+    def get_user(self, user_id: str):
+        conn = self.connect()
+        try:
+            row = conn.execute("SELECT user_id, name FROM users WHERE user_id = ?",
+                               (user_id,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def create_user(self, user_id: str, name: str) -> bool:
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO users (user_id, name) VALUES (?, ?)",
+                (user_id, name))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
