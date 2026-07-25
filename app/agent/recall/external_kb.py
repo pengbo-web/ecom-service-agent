@@ -25,7 +25,9 @@ def aperag_search(query: str) -> list[dict] | None:
            f"{settings.aperag_collection_id}/searches")
     payload = {
         "query": query,
-        "vector_search": {"topk": settings.recall_kb_top_k},
+        # similarity 在 OpenAPI 里标可选,但服务端 VectorSearchInput 必填——缺省会整体 500
+        "vector_search": {"topk": settings.recall_kb_top_k,
+                          "similarity": settings.aperag_min_similarity},
         "fulltext_search": {"topk": settings.recall_kb_top_k},
         "rerank": settings.aperag_rerank,
     }

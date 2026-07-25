@@ -5,6 +5,9 @@
 """
 
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # 允许以脚本方式直跑
 
 import httpx
 
@@ -21,7 +24,7 @@ def main() -> int:
     resp = httpx.post(
         url,
         json={"query": query,
-              "vector_search": {"topk": 3},
+              "vector_search": {"topk": 3, "similarity": settings.aperag_min_similarity},
               "fulltext_search": {"topk": 3},
               "rerank": False},
         headers={"Authorization": f"Bearer {settings.aperag_api_key}"},

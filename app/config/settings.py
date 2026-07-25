@@ -170,6 +170,7 @@ class Settings(BaseSettings):
     aperag_api_key: str = ""           # ApeRAG 控制台创建(Bearer);放 .env 勿提交
     aperag_collection_id: str = ""     # 知识库 collection id(col_ 开头)
     aperag_rerank: bool = False        # 预召回热路径默认关重排(省延迟);深查精度可开
+    aperag_min_similarity: float = 0.2  # 向量路相似度阈值(服务端必填;融合排序后由预算再截断)
 
     # 多轮查询改写(预召回前置):"那运费呢?"→"退货运费谁承担"。失败/首问回退原句
     recall_rewrite_enabled: bool = True
