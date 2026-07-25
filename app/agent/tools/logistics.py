@@ -1,10 +1,11 @@
 from app.db import get_db
+from app.agent.tools.ownership import owned_order
 
 
 def query_logistics(order_id: str) -> dict:
     """根据订单号查询物流轨迹信息。"""
     db = get_db()
-    order = db.get_order(order_id)
+    order = owned_order(order_id)
     if not order:
         return {"success": False, "error": f"未找到订单 {order_id}，请核实订单号"}
 

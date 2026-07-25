@@ -1,11 +1,12 @@
 from app.db import get_db
 from app.agent.consent import is_allowed, need_confirm_result
+from app.agent.tools.ownership import owned_order
 
 
 def apply_refund(order_id: str, reason: str) -> dict:
     """为指定订单申请退款，需提供退款原因。"""
     db = get_db()
-    order = db.get_order(order_id)
+    order = owned_order(order_id)
     if not order:
         return {"success": False, "error": f"未找到订单 {order_id}，请核实订单号"}
 

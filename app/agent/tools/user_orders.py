@@ -9,7 +9,13 @@ STATUS_LABELS = {
 
 
 def list_user_orders() -> dict:
-    """查询当前用户的所有订单概要列表。"""
+    """查询【当前用户】的订单概要列表(auth 开时按登录身份隔离)。"""
+    from app.config.settings import settings
+    raw = get_db().list_orders()
+    if settings.auth_enabled:
+        from app.agent.runtime_context import get_current_user
+        uid = get_current_user()
+        raw = [o for o in raw if uid and o.get("user") == uid]
     orders = [
         {
             "order_id": o["order_id"],
@@ -18,6 +24,6 @@ def list_user_orders() -> dict:
             "total": o["total"],
             "created_at": o["created_at"],
         }
-        for o in get_db().list_orders()
+        for o in raw
     ]
     return {"success": True, "count": len(orders), "orders": orders}

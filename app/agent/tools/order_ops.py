@@ -7,6 +7,7 @@ expedite_shipping / issue_invoice / query_coupons 低风险或只读 → 直接�
 
 from app.db import get_db
 from app.agent.consent import is_allowed, need_confirm_result
+from app.agent.tools.ownership import owned_order
 
 # 未发货、可改地址/可取消的状态
 _MUTABLE = {"pending"}
@@ -15,7 +16,7 @@ _MUTABLE = {"pending"}
 def change_address(order_id: str, new_address: str) -> dict:
     """修改订单收货地址（仅未发货订单）。敏感操作,需前置确认。"""
     db = get_db()
-    order = db.get_order(order_id)
+    order = owned_order(order_id)
     if not order:
         return {"success": False, "error": f"未找到订单 {order_id}，请核实订单号"}
     if order["status"] not in _MUTABLE:
@@ -34,7 +35,7 @@ def change_address(order_id: str, new_address: str) -> dict:
 def cancel_order(order_id: str) -> dict:
     """取消订单（仅未发货订单）。敏感操作,需前置确认。"""
     db = get_db()
-    order = db.get_order(order_id)
+    order = owned_order(order_id)
     if not order:
         return {"success": False, "error": f"未找到订单 {order_id}，请核实订单号"}
     status = order["status"]
@@ -56,7 +57,7 @@ def cancel_order(order_id: str) -> dict:
 def expedite_shipping(order_id: str) -> dict:
     """催发货/加急（低风险请求,直接受理）。"""
     db = get_db()
-    order = db.get_order(order_id)
+    order = owned_order(order_id)
     if not order:
         return {"success": False, "error": f"未找到订单 {order_id}，请核实订单号"}
     status = order["status"]
@@ -72,7 +73,7 @@ def expedite_shipping(order_id: str) -> dict:
 def issue_invoice(order_id: str, title: str = "个人", tax_id: str = "") -> dict:
     """开具电子发票（只读:据订单生成发票信息）。"""
     db = get_db()
-    order = db.get_order(order_id)
+    order = owned_order(order_id)
     if not order:
         return {"success": False, "error": f"未找到订单 {order_id}，请核实订单号"}
     if order["status"] in ("pending", "cancelled"):
