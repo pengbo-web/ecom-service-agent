@@ -59,13 +59,15 @@ def _fetch_rows(query: str) -> tuple[list[dict], str]:
     return _local_rows(query), "local"
 
 
-def kb_recall(query: str | None) -> KbRecall:
+def kb_recall(query: str | None, domain: str | None = None) -> KbRecall:
     """对本轮用户问题做 KB 预检索,返回格式化注入段与命中明细。"""
     if not settings.recall_kb_enabled:
         return KbRecall()
     if not query or len(query.strip()) < settings.recall_kb_min_query_chars:
         return KbRecall()
     rows, backend = _fetch_rows(query)
+    from app.agent.recall.kb_tags import rank_by_domain
+    rows = rank_by_domain(rows, domain)
 
     lines: list[str] = []
     hits: list[dict] = []

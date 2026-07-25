@@ -48,7 +48,8 @@ def _short_term_section(memory_manager, query):
 
 
 def build_recall_sections(memory_manager, query: str | None,
-                          include_kb: bool = True) -> RecallResult:
+                          include_kb: bool = True,
+                          kb_domain: str | None = None) -> RecallResult:
     """统一召回入口:按源顺序检索,合并为注入段列表;单源失败隔离。
     include_kb=False(查询理解判定本轮无需知识)时跳过 KB 源,记忆源照常。"""
     result = RecallResult()
@@ -66,7 +67,7 @@ def build_recall_sections(memory_manager, query: str | None,
         result.kb_backend = "skipped"
         return result
     try:
-        kb = kb_recall(query)
+        kb = kb_recall(query, domain=kb_domain)
     except Exception:
         logger.warning("recall source kb failed", exc_info=True)
         kb = KbRecall()

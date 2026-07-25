@@ -104,6 +104,10 @@ class Settings(BaseSettings):
     faq_cache_path: str = "app/sessions/faq_cache.json"
     faq_cache_min_score: float = 0.90   # 余弦阈值:高置信才直答,答错比答慢更伤信任
 
+    # 意图过滤检索(文档2.2三级索引):检索行按 QU domain 排序/过滤
+    # off=不动 | boost(默认)=匹配域稳定前置,不丢行 | strict=只留匹配域,空则回退全量
+    recall_domain_mode: str = "boost"
+
     # 空闲会话自动巩固长期记忆（Web 无"会话结束"信号，用空闲超时近似真实客服）
     auto_consolidate_enabled: bool = True
     session_idle_ttl: int = 1800      # 会话空闲多久（秒）后自动巩固记忆并从内存回收

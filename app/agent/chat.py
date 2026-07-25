@@ -443,7 +443,8 @@ class EcomAgent:
             include_kb = qu.need_kb if qu is not None else True
             recall_query = (qu.kb_query if qu is not None and qu.kb_query else last_user)
             rr = build_recall_sections(self.memory_manager, recall_query,
-                                       include_kb=include_kb)
+                                       include_kb=include_kb,
+                                       kb_domain=(qu.domain if qu is not None else None))
             self._turn_recall = (last_user, rr)
             if rr.kb_hits:   # 命中才发正常事件(前端思考面板+tracer 各消费一次)
                 self._emit({"type": "recall", "source": "kb", "backend": rr.kb_backend,

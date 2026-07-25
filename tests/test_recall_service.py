@@ -20,8 +20,8 @@ def _mm(memory_enabled=True, ltm_text="记忆事实", stm_text="短期摘要", l
 def test_merges_memory_and_kb_in_order(monkeypatch):
     monkeypatch.setattr(settings, "memory_profile_enabled", False)
     monkeypatch.setattr(svc, "kb_recall",
-                        lambda q: KbRecall(section="【平台知识(自动检索)】KB段",
-                                           hits=[{"doc": "d", "section": "s", "score": 0.5}]))
+                        lambda q, domain=None: KbRecall(section="【平台知识(自动检索)】KB段",
+                                                        hits=[{"doc": "d", "section": "s", "score": 0.5}]))
     r = svc.build_recall_sections(_mm(), "退货政策")
     assert [x["content"] for x in r.sections] == ["记忆事实", "短期摘要", "【平台知识(自动检索)】KB段"]
     assert all(x["role"] == "system" for x in r.sections)
@@ -30,21 +30,21 @@ def test_merges_memory_and_kb_in_order(monkeypatch):
 
 def test_memory_off_kb_still_works(monkeypatch):
     """存储分离的意义:平台知识召回不受用户记忆开关影响。"""
-    monkeypatch.setattr(svc, "kb_recall", lambda q: KbRecall(section="KB段", hits=[]))
+    monkeypatch.setattr(svc, "kb_recall", lambda q, domain=None: KbRecall(section="KB段", hits=[]))
     r = svc.build_recall_sections(_mm(memory_enabled=False), "退货政策")
     assert [x["content"] for x in r.sections] == ["KB段"]
 
 
 def test_memory_source_error_isolated(monkeypatch):
     monkeypatch.setattr(settings, "memory_profile_enabled", False)
-    monkeypatch.setattr(svc, "kb_recall", lambda q: KbRecall())
+    monkeypatch.setattr(svc, "kb_recall", lambda q, domain=None: KbRecall())
     r = svc.build_recall_sections(_mm(ltm_raises=True), "q")
     assert [x["content"] for x in r.sections] == ["短期摘要"]   # LTM 坏了只丢 LTM
 
 
 def test_kb_error_isolated(monkeypatch):
     monkeypatch.setattr(settings, "memory_profile_enabled", False)
-    def boom(q):
+    def boom(q, domain=None):
         raise RuntimeError("kb down")
     monkeypatch.setattr(svc, "kb_recall", boom)
     r = svc.build_recall_sections(_mm(), "q")
@@ -54,13 +54,13 @@ def test_kb_error_isolated(monkeypatch):
 
 def test_empty_sources_yield_empty(monkeypatch):
     monkeypatch.setattr(settings, "memory_profile_enabled", False)
-    monkeypatch.setattr(svc, "kb_recall", lambda q: KbRecall())
+    monkeypatch.setattr(svc, "kb_recall", lambda q, domain=None: KbRecall())
     r = svc.build_recall_sections(_mm(ltm_text="", stm_text=""), "q")
     assert r.sections == [] and r.kb_hits == []
 
 
 def test_none_memory_manager_kb_only(monkeypatch):
-    monkeypatch.setattr(svc, "kb_recall", lambda q: KbRecall(section="KB段", hits=[]))
+    monkeypatch.setattr(svc, "kb_recall", lambda q, domain=None: KbRecall(section="KB段", hits=[]))
     r = svc.build_recall_sections(None, "q")
     assert [x["content"] for x in r.sections] == ["KB段"]
 
@@ -69,7 +69,7 @@ def test_include_kb_false_skips_kb_entirely(monkeypatch):
     """检索门控:include_kb=False 时连 kb_recall 都不调,记忆源照常。"""
     monkeypatch.setattr(settings, "memory_profile_enabled", False)
     called = []
-    monkeypatch.setattr(svc, "kb_recall", lambda q: called.append(q))
+    monkeypatch.setattr(svc, "kb_recall", lambda q, domain=None: called.append(q))
     r = svc.build_recall_sections(_mm(), "好的", include_kb=False)
     assert [x["content"] for x in r.sections] == ["记忆事实", "短期摘要"]
     assert r.kb_hits == [] and r.kb_backend == "skipped"

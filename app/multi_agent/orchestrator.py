@@ -69,6 +69,8 @@ class MultiAgentOrchestrator:
             qu = None
             key = self.router.route(user_input, self.engine.raw_messages)
         self._last_key = key
+        if qu is not None and qu.domain is None:
+            qu.domain = key          # 粘性解析结果回填:检索过滤拿到确定域
         self.engine.set_turn_understanding(qu)
         profile = self.profiles.get(key) or next(iter(self.profiles.values()))
         if self.event_sink:
