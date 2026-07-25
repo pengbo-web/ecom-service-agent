@@ -47,8 +47,10 @@ def _short_term_section(memory_manager, query):
     return memory_manager.stm.build_prompt_section() or None
 
 
-def build_recall_sections(memory_manager, query: str | None) -> RecallResult:
-    """统一召回入口:按源顺序检索,合并为注入段列表;单源失败隔离。"""
+def build_recall_sections(memory_manager, query: str | None,
+                          include_kb: bool = True) -> RecallResult:
+    """统一召回入口:按源顺序检索,合并为注入段列表;单源失败隔离。
+    include_kb=False(查询理解判定本轮无需知识)时跳过 KB 源,记忆源照常。"""
     result = RecallResult()
     memory_on = memory_manager is not None and getattr(memory_manager, "memory_enabled", False)
     if memory_on:
@@ -60,6 +62,9 @@ def build_recall_sections(memory_manager, query: str | None) -> RecallResult:
                 continue
             if text:
                 result.sections.append({"role": "system", "content": text})
+    if not include_kb:
+        result.kb_backend = "skipped"
+        return result
     try:
         kb = kb_recall(query)
     except Exception:

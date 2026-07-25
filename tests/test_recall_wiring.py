@@ -15,7 +15,7 @@ def _agent():
 
 
 def _fake_recall(calls):
-    def fake(mm, query):
+    def fake(mm, query, include_kb=True):
         calls.append(query)
         return RecallResult(
             sections=[{"role": "system", "content": "【平台知识(自动检索)】测试片段"}],
@@ -25,8 +25,6 @@ def _fake_recall(calls):
 
 
 def test_build_messages_injects_and_caches_per_turn(monkeypatch):
-    monkeypatch.setattr("app.agent.recall.rewrite.rewrite_for_recall",
-                        lambda client, model, messages, q: q)
     calls = []
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections", _fake_recall(calls))
     agent = _agent()
@@ -48,8 +46,6 @@ def test_build_messages_injects_and_caches_per_turn(monkeypatch):
 
 
 def test_new_user_turn_recomputes(monkeypatch):
-    monkeypatch.setattr("app.agent.recall.rewrite.rewrite_for_recall",
-                        lambda client, model, messages, q: q)
     calls = []
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections", _fake_recall(calls))
     agent = _agent()
@@ -63,10 +59,8 @@ def test_new_user_turn_recomputes(monkeypatch):
 
 
 def test_no_hits_no_event(monkeypatch):
-    monkeypatch.setattr("app.agent.recall.rewrite.rewrite_for_recall",
-                        lambda client, model, messages, q: q)
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections",
-                        lambda mm, q: RecallResult())
+                        lambda mm, q, include_kb=True: RecallResult())
     agent = _agent()
     events = []
     agent.event_sink = events.append
@@ -76,28 +70,71 @@ def test_no_hits_no_event(monkeypatch):
     assert [e for e in events if e["type"] == "recall"] == []
 
 
-def test_recall_uses_rewritten_query_and_event_carries_it(monkeypatch):
+def test_recall_uses_qu_kb_query_and_event_carries_it(monkeypatch):
+    """QU 给出的自包含查询喂给召回,事件带实际检索查询。"""
+    from app.agent.understanding import QueryUnderstanding
     calls = []
 
-    def fake_recall(mm, query):
-        calls.append(query)
+    def fake_recall(mm, query, include_kb=True):
+        calls.append((query, include_kb))
         return RecallResult(
             sections=[{"role": "system", "content": "【平台知识(自动检索)】X"}],
             kb_hits=[{"doc": "d", "section": "s", "score": 0.9}],
         )
 
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections", fake_recall)
-    monkeypatch.setattr("app.agent.recall.rewrite.rewrite_for_recall",
-                        lambda client, model, messages, q: "改写后的自包含查询")
     agent = _agent()
     events = []
     agent.event_sink = events.append
+    agent.set_turn_understanding(QueryUnderstanding(
+        domain="aftersale", intent="政策咨询", need_kb=True,
+        kb_query="退货运费谁承担", source="llm"))
     agent.raw_messages.append({"role": "user", "content": "那运费呢?"})
     agent._turn_recall = None
     agent._build_messages()
-    assert calls == ["改写后的自包含查询"]            # 召回吃的是改写后查询
+    assert calls == [("退货运费谁承担", True)]
     ev = [e for e in events if e["type"] == "recall"][0]
-    assert ev["query"] == "改写后的自包含查询"        # 事件带上实际检索查询
+    assert ev["query"] == "退货运费谁承担" and not ev.get("skipped")
+
+
+def test_qu_need_kb_false_skips_and_emits_skipped(monkeypatch):
+    """门控关检索:include_kb=False 传入召回,发 skipped 事件。"""
+    from app.agent.understanding import QueryUnderstanding
+    calls = []
+
+    def fake_recall(mm, query, include_kb=True):
+        calls.append((query, include_kb))
+        return RecallResult(kb_backend="skipped")
+
+    monkeypatch.setattr("app.agent.recall.service.build_recall_sections", fake_recall)
+    agent = _agent()
+    events = []
+    agent.event_sink = events.append
+    agent.set_turn_understanding(QueryUnderstanding(
+        intent="闲聊寒暄", need_kb=False, source="rule"))
+    agent.raw_messages.append({"role": "user", "content": "好的"})
+    agent._turn_recall = None
+    agent._build_messages()
+    assert calls == [("好的", False)]          # 记忆查询仍用原句
+    ev = [e for e in events if e["type"] == "recall"][0]
+    assert ev["skipped"] is True and ev["reason"] == "闲聊寒暄"
+
+
+def test_no_qu_defaults_to_old_behavior(monkeypatch):
+    """引擎独立运行(无 orchestrator 注入 QU):原句检索,include_kb=True。"""
+    calls = []
+
+    def fake_recall(mm, query, include_kb=True):
+        calls.append((query, include_kb))
+        return RecallResult()
+
+    monkeypatch.setattr("app.agent.recall.service.build_recall_sections", fake_recall)
+    agent = _agent()
+    agent.event_sink = lambda e: None
+    agent.raw_messages.append({"role": "user", "content": "退货政策"})
+    agent._turn_recall = None
+    agent._build_messages()
+    assert calls == [("退货政策", True)]
 
 
 def test_tracer_records_recall_span(tmp_path):

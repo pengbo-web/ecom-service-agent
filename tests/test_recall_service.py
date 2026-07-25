@@ -63,3 +63,14 @@ def test_none_memory_manager_kb_only(monkeypatch):
     monkeypatch.setattr(svc, "kb_recall", lambda q: KbRecall(section="KB段", hits=[]))
     r = svc.build_recall_sections(None, "q")
     assert [x["content"] for x in r.sections] == ["KB段"]
+
+
+def test_include_kb_false_skips_kb_entirely(monkeypatch):
+    """检索门控:include_kb=False 时连 kb_recall 都不调,记忆源照常。"""
+    monkeypatch.setattr(settings, "memory_profile_enabled", False)
+    called = []
+    monkeypatch.setattr(svc, "kb_recall", lambda q: called.append(q))
+    r = svc.build_recall_sections(_mm(), "好的", include_kb=False)
+    assert [x["content"] for x in r.sections] == ["记忆事实", "短期摘要"]
+    assert r.kb_hits == [] and r.kb_backend == "skipped"
+    assert called == []

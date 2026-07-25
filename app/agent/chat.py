@@ -40,6 +40,7 @@ class EcomAgent:
         self.user_id = user_id or settings.memory_user_id   # 长期记忆按用户隔离
         self.system_prompt = SYSTEM_PROMPT   # 可切换:多 Agent 编排按路由画像覆盖
         self._turn_recall = None   # (last_user, RecallResult) 每轮预召回缓存:react 多步共享,不重复 embedding
+        self._turn_qu = None       # 查询理解结果(orchestrator 每轮注入;引擎独立运行时 None=老行为)
         self.history_threshold = settings.history_threshold
         self.history_keep_recent = settings.history_keep_recent
         self.max_react_steps = settings.max_react_steps
@@ -113,6 +114,10 @@ class EcomAgent:
     @property
     def history_size(self) -> int:
         return len(self.raw_messages)
+
+    def set_turn_understanding(self, qu) -> None:
+        """orchestrator 每轮注入查询理解结果(QueryUnderstanding);None=退回默认行为。"""
+        self._turn_qu = qu
 
     def chat(self, user_input: str) -> CustomerServiceResponse:
         """处理用户输入：ReAct 循环 → 结构化提取 → 返回结果"""
@@ -408,18 +413,22 @@ class EcomAgent:
             None,
         )
         # 统一召回层:profile/LTM/STM/KB 四源一次装配(存储分离、召回统一)。
-        # 每轮缓存:react 循环内多次组消息不重复检索(KB 预检索有 embedding 开销)。
+        # 检索门控与查询改写来自上游查询理解节点(qu);每轮缓存防重复检索。
         from app.agent.recall.service import build_recall_sections
         if self._turn_recall is None or self._turn_recall[0] != last_user:
-            # 先改写(多轮指代/省略消解),再统一召回;缓存键仍是 last_user(轮身份)
-            from app.agent.recall.rewrite import rewrite_for_recall
-            recall_query = rewrite_for_recall(self.client, self.model,
-                                              self.raw_messages, last_user)
-            rr = build_recall_sections(self.memory_manager, recall_query)
+            qu = self._turn_qu
+            include_kb = qu.need_kb if qu is not None else True
+            recall_query = (qu.kb_query if qu is not None and qu.kb_query else last_user)
+            rr = build_recall_sections(self.memory_manager, recall_query,
+                                       include_kb=include_kb)
             self._turn_recall = (last_user, rr)
-            if rr.kb_hits:   # 首次计算且 KB 有命中才发事件(前端思考面板+tracer 各消费一次)
+            if rr.kb_hits:   # 命中才发正常事件(前端思考面板+tracer 各消费一次)
                 self._emit({"type": "recall", "source": "kb", "backend": rr.kb_backend,
                             "query": recall_query, "hits": rr.kb_hits})
+            elif qu is not None and not qu.need_kb:
+                # 门控跳过:显式发 skipped 事件,门控工作与否前端一眼可见
+                self._emit({"type": "recall", "source": "kb",
+                            "skipped": True, "reason": qu.intent})
         messages.extend(self._turn_recall[1].sections)
         if self.summary:
             messages.append(
