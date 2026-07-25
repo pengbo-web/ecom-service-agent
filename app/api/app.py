@@ -104,20 +104,21 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.post("/api/chat")
     def chat(req: ChatRequest):
-        # 0) 会话生命周期:确保 ID 可用;closed/未知(旧格式/伪造)→ 服务端换发翻篇
-        active_id, rotated = ensure_active(get_db(), req.session_id, req.user_id)
-        req.session_id = active_id   # 下游(锁/agent/存储/观测)全部用生效 ID
-
-        # 1) 限流（防刷）
+        # 1) 限流（防刷）:必须用客户端原始 ID 做键——若先换发再限流,
+        #    未知 ID 每次都拿到新键,滑动窗口计数器形同虚设(评审实测坐实)。
         if not rate_limiter.allow(req.session_id):
             return _reply_stream("⏳ 您发送得太快啦，请稍后再试～")
 
-        # 2) 人工接管中：短路，不调用 Agent
+        # 2) 人工接管中：短路，不调用 Agent。同理用原始 ID:坐席是对客户端
+        #    正在用的会话 ID 做接管;先换发会让接管被静默绕过。
         if hitl is not None and hitl.manual_mode.is_manual(req.session_id):
-            return _reply_stream("🎧 当前会话已转由人工客服处理，请稍候…",
-                                 conversation=(active_id, rotated))
+            return _reply_stream("🎧 当前会话已转由人工客服处理，请稍候…")
 
-        # 3) 规则快路径：高频简单意图秒回，跳过 Agent（省 LLM 成本）
+        # 3) 会话生命周期:确保 ID 可用;closed/未知(旧格式/伪造)→ 服务端换发翻篇
+        active_id, rotated = ensure_active(get_db(), req.session_id, req.user_id)
+        req.session_id = active_id   # 下游(锁/agent/存储/观测)全部用生效 ID
+
+        # 4) 规则快路径：高频简单意图秒回，跳过 Agent（省 LLM 成本）
         #    仍把这轮问答写进会话历史并落盘，保证刷新/切换后可回显（不因走快路径而丢失）。
         if settings.fast_path_enabled:
             fp = match_fast_path(req.message)
@@ -141,7 +142,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
                                     pass
                 return _reply_stream(fp["reply"], conversation=(active_id, rotated))
 
-        # 4) 成本上限（防烧爆 API Key）
+        # 5) 成本上限（防烧爆 API Key）
         if not cost_guard.allow():
             return _reply_stream("🛑 今日服务已达使用上限，请明天再来～")
 
