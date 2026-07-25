@@ -97,6 +97,10 @@ class MultiAgentOrchestrator:
         self.engine._pending = value
 
     @property
+    def _turn_qu(self):                      # 查询理解结果透传(streaming 升级判定读)
+        return self.engine._turn_qu
+
+    @property
     def memory_manager(self):
         return self.engine.memory_manager
 

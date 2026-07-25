@@ -69,6 +69,21 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                "requires_human": False, "follow_up_question": None})
         return "blocked"
 
+    def _human_request_flow(_sink) -> str:
+        """明确要求转人工:前置短路,零 LLM(文档9.④强制转人工词+8.3'必须明确提示正在转接')。"""
+        reply = "好的,正在为您转接人工客服,请稍候~ 转接期间您可以继续补充问题,人工客服会看到完整对话记录。"
+        recent = list(getattr(agent, "raw_messages", []))[-6:]
+        hid = hitl.escalate(session_id, user_input, reply, "human_request", 1.0,
+                            ["用户明确要求转人工"], recent_context=recent)
+        from app.agent.memory.profile import record_ticket
+        record_ticket(getattr(agent, "user_id", None), hid, "escalated",
+                      "用户明确要求转人工")
+        _sink({"type": "handoff", "reasons": ["用户明确要求转人工"], "handoff_id": hid})
+        _sink({"type": "reply", "content": reply})
+        _sink({"type": "metadata", "intent": "human_request", "confidence": 1.0,
+               "requires_human": True, "follow_up_question": None})
+        return "human_request"
+
     def _normal_flow(_sink) -> str:
         # 授权闸门(authorize):风险动作前置授权在动作边界强制(consent_scope)
         with consent_scope(granted):
@@ -81,8 +96,14 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                "requires_human": result.requires_human,
                "follow_up_question": result.follow_up_question})
         if hitl is not None:
+            qu = getattr(agent, "_turn_qu", None)
+            all_user = [m.get("content", "") for m in getattr(agent, "raw_messages", [])
+                        if m.get("role") == "user"]
+            prior_user = all_user[:-1] if all_user else []   # 排除本轮
             reasons = hitl.evaluate(result.intent.value, result.confidence,
-                                    result.requires_human, user_input=user_input)
+                                    result.requires_human, user_input=user_input,
+                                    qu_intent=(qu.intent if qu is not None else ""),
+                                    prior_user_msgs=prior_user)
             if reasons:
                 recent = list(getattr(agent, "raw_messages", []))[-6:]
                 hid = hitl.escalate(session_id, user_input, reply,
@@ -143,6 +164,9 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
             gin = guard_pipeline.check_input(user_input)
             if gin.action == "block":
                 return _blocked_flow(_sink, gin)
+        from app.hitl.escalation import match_human_fast
+        if hitl is not None and match_human_fast(user_input):
+            return _human_request_flow(_sink)
         return _normal_flow(_sink)
 
     def worker():
