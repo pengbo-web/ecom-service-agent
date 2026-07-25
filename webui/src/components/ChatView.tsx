@@ -57,6 +57,16 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
     return () => { cancelled = true; };
   }, [sessionId]);
 
+  // 切换用户:清空历史面板缓存。convList/pastConv/pastBubbles 是本地 state,不随
+  // sessionId 变化重拉;若不清,上一个用户打开过的历史列表会残留到新用户界面
+  // (观感=跨用户数据泄露,实为陈旧缓存)。收起面板,下次打开按新身份重拉。
+  useEffect(() => {
+    setHistoryOpen(false);
+    setConvList(null);
+    setPastConv(null);
+    setPastBubbles(null);
+  }, [userId]);
+
   async function onConsolidate() {
     setMemBusy(true); setMemErr(null);
     try {
