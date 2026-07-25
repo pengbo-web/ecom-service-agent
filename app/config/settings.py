@@ -99,6 +99,11 @@ class Settings(BaseSettings):
     manual_mode_timeout: int = 3600   # 人工接管超时（秒），超时自动回落自动模式
     hitl_repeat_times: int = 3        # 同一问题重复 N 次未解决→自动转人工(文档9.④,difflib相似度判同)
 
+    # FAQ 语义缓存(文档2.5缓存预热):高频问答预热直答,命中零LLM;种子来自常见问题FAQ.md
+    faq_cache_enabled: bool = True
+    faq_cache_path: str = "app/sessions/faq_cache.json"
+    faq_cache_min_score: float = 0.90   # 余弦阈值:高置信才直答,答错比答慢更伤信任
+
     # 空闲会话自动巩固长期记忆（Web 无"会话结束"信号，用空闲超时近似真实客服）
     auto_consolidate_enabled: bool = True
     session_idle_ttl: int = 1800      # 会话空闲多久（秒）后自动巩固记忆并从内存回收

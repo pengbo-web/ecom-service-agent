@@ -30,6 +30,8 @@ def _force_local_session_backends():
     settings.aperag_api_key = ""       # 不带真实 key,防止误发外部请求
     _orig_qu = settings.query_understanding_enabled
     settings.query_understanding_enabled = False  # 既有语料走老路由;查询理解专项测试自行开启
+    _orig_faq = settings.faq_cache_enabled
+    settings.faq_cache_enabled = False  # 既有语料不走FAQ直答;缓存专项测试自行开启
     yield
     settings.reply_pipeline_enabled = _orig_rp
     settings.langfuse_enabled = _orig_lf
@@ -38,6 +40,7 @@ def _force_local_session_backends():
     settings.kb_backend = _orig_kb
     settings.aperag_api_key = _orig_ak
     settings.query_understanding_enabled = _orig_qu
+    settings.faq_cache_enabled = _orig_faq
     set_session_store(None)
     set_session_lock(None)
     set_idempotency_store(None)
