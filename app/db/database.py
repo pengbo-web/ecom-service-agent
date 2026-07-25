@@ -94,6 +94,13 @@ class Database:
                     updated_at TEXT,
                     PRIMARY KEY (session_id, product_id)
                 );
+                CREATE TABLE IF NOT EXISTS session_snapshots (
+                    session_id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    messages TEXT,
+                    summary TEXT,
+                    updated_at TEXT
+                );
                 CREATE TABLE IF NOT EXISTS conversations (
                     conversation_id TEXT PRIMARY KEY,
                     user_id TEXT NOT NULL,
@@ -403,5 +410,41 @@ class Database:
                 (user_id, name))
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # ---------- 会话冷快照(S1:热会话过期后历史回显兜底,与审计用 session_archive 分离) ----------
+    def upsert_session_snapshot(self, session_id: str, user_id: str,
+                                messages: list, summary) -> None:
+        """会话冷快照:每会话恒一行最新态(upsert)。热会话过期后供历史回显兜底。"""
+        conn = self.connect()
+        try:
+            conn.execute(
+                "INSERT INTO session_snapshots (session_id, user_id, messages, summary, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(session_id) DO UPDATE SET "
+                "user_id=excluded.user_id, messages=excluded.messages, "
+                "summary=excluded.summary, updated_at=excluded.updated_at",
+                (session_id, user_id, json.dumps(messages or [], ensure_ascii=False),
+                 summary, self._now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_session_snapshot(self, session_id: str):
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT session_id, user_id, messages, summary, updated_at "
+                "FROM session_snapshots WHERE session_id = ?", (session_id,)).fetchone()
+            if not row:
+                return None
+            d = dict(row)
+            try:
+                d["messages"] = json.loads(d["messages"]) if d["messages"] else []
+            except (ValueError, TypeError):
+                d["messages"] = []
+            return d
         finally:
             conn.close()
