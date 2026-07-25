@@ -16,8 +16,12 @@ def open_or_reuse(db, user_id: str) -> dict:
 
 
 def ensure_active(db, session_id: str, user_id: str) -> tuple[str, bool]:
-    """确保拿到一个可用(open)的会话 ID;返回 (生效ID, 是否翻篇/换发)。"""
+    """确保拿到一个可用(open)且**属于该用户**的会话 ID;返回 (生效ID, 是否翻篇/换发)。
+
+    归属校验:拿到别人的 open 会话 ID 也不能写入——按"未知 ID"处理直接换发
+    (而非 403,不泄露该 ID 是否存在/归属谁)。
+    """
     conv = db.get_conversation(session_id)
-    if conv is not None and conv["status"] == "open":
+    if conv is not None and conv["status"] == "open" and conv.get("user_id") == user_id:
         return session_id, False
     return db.create_conversation(user_id)["conversation_id"], True

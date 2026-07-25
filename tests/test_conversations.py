@@ -82,3 +82,13 @@ def test_ensure_active_never_adopts_client_id(tmp_path):
     new_id, rotated = ensure_active(db, "default--acbuu9p4", "u1")
     assert rotated is True and new_id.startswith("c-")
     assert db.get_conversation("default--acbuu9p4") is None      # 未被写库
+
+
+def test_ensure_active_rejects_foreign_open_conversation(tmp_path):
+    """归属校验:别人的 open 会话按未知处理换发(不 403,零信息泄露)。"""
+    db = _db(tmp_path)
+    cid = db.create_conversation("alice")["conversation_id"]
+    new_id, rotated = ensure_active(db, cid, "mallory")
+    assert rotated is True and new_id != cid
+    assert db.get_conversation(cid)["status"] == "open"      # 原会话不受影响
+    assert db.get_conversation(new_id)["user_id"] == "mallory"
