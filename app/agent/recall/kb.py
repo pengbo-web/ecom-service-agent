@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 class KbRecall:
     section: str | None = None                       # 可注入的 system prompt 段;无命中为 None
     hits: list[dict] = field(default_factory=list)   # [{"doc","section","score"}] 供事件/观测展示
+    backend: str = "local"                           # 本轮实际使用的后端(local/aperag),供观测
 
 
 _HEADER = (
@@ -29,26 +30,43 @@ _HEADER = (
 )
 
 
+def _local_rows(query: str) -> list[dict]:
+    """本地向量索引取行;失败返回 []。"""
+    try:
+        result = search_knowledge(query, top_k=settings.recall_kb_top_k)
+    except Exception:
+        logger.warning("kb pre-recall search failed", exc_info=True)
+        return []
+    if not result.get("success"):
+        logger.warning("kb pre-recall degraded: %s", result.get("error"))
+        return []
+    return result.get("results", [])
+
+
+def _fetch_rows(query: str) -> tuple[list[dict], str]:
+    """按 kb_backend 取行,三级降级:aperag→local→[](调用方无命中即不注入)。"""
+    if settings.kb_backend == "aperag":
+        from app.agent.recall.external_kb import aperag_search
+        rows = aperag_search(query)
+        if rows is not None:
+            return rows, "aperag"
+        logger.warning("kb backend aperag unavailable, fallback to local index")
+    return _local_rows(query), "local"
+
+
 def kb_recall(query: str | None) -> KbRecall:
     """对本轮用户问题做 KB 预检索,返回格式化注入段与命中明细。"""
     if not settings.recall_kb_enabled:
         return KbRecall()
     if not query or len(query.strip()) < settings.recall_kb_min_query_chars:
         return KbRecall()
-    try:
-        result = search_knowledge(query, top_k=settings.recall_kb_top_k)
-    except Exception:
-        logger.warning("kb pre-recall search failed", exc_info=True)
-        return KbRecall()
-    if not result.get("success"):
-        logger.warning("kb pre-recall degraded: %s", result.get("error"))
-        return KbRecall()
+    rows, backend = _fetch_rows(query)
 
     lines: list[str] = []
     hits: list[dict] = []
     used = len(_HEADER)
-    for r in result.get("results", []):
-        if r.get("score", 0.0) < settings.recall_kb_min_score:
+    for r in rows:
+        if backend == "local" and r.get("score", 0.0) < settings.recall_kb_min_score:
             continue
         line = f"- [{r.get('doc', '')}/{r.get('section', '')}] {r.get('text', '')}"
         if used + len(line) > settings.recall_kb_max_chars:
@@ -58,5 +76,5 @@ def kb_recall(query: str | None) -> KbRecall:
         hits.append({"doc": r.get("doc", ""), "section": r.get("section", ""),
                      "score": r.get("score", 0.0)})
     if not lines:
-        return KbRecall()
-    return KbRecall(section=_HEADER + "\n" + "\n".join(lines), hits=hits)
+        return KbRecall(backend=backend)
+    return KbRecall(section=_HEADER + "\n" + "\n".join(lines), hits=hits, backend=backend)

@@ -164,6 +164,13 @@ class Settings(BaseSettings):
     recall_kb_timeout_s: float = 6.0      # 检索 embedding 超时(热路径,每轮必经):快速失败,挂起不能拖垮回复
     recall_kb_embed_retries: int = 0      # 热路径零重试(重试累积曾致后台单次906s,同教训)
 
+    # ApeRAG 外部 RAG 接入(kb_backend=aperag 时生效;三级降级 aperag→local→无注入)
+    kb_backend: str = "local"          # local=项目内向量索引; aperag=外部 ApeRAG(向量+全文混合)
+    aperag_base_url: str = "http://127.0.0.1:8100"
+    aperag_api_key: str = ""           # ApeRAG 控制台创建(Bearer);放 .env 勿提交
+    aperag_collection_id: str = ""     # 知识库 collection id(col_ 开头)
+    aperag_rerank: bool = False        # 预召回热路径默认关重排(省延迟);深查精度可开
+
     # 极简登录态(两档用户体系:先创建才可用 + 身份从签名 token 解出)
     auth_enabled: bool = True          # 关=完全回退自报 user_id(测试/教学)
     auth_secret: str = "dev-secret-change-in-prod"   # 生产必须换(env AUTH_SECRET)
