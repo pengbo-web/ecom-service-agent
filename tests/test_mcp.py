@@ -20,8 +20,22 @@
 import sys
 from pathlib import Path
 
+import pytest, socket
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+
+def _server_up(host="127.0.0.1", port=9123):
+    s = socket.socket(); s.settimeout(0.3)
+    try:
+        s.connect((host, port)); return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+pytestmark = pytest.mark.skipif(not _server_up(), reason="MCP server(:9123)未运行,跳过集成测试")
 
 from app.mcp_client import MCPClient  # noqa: E402
 from app.agent.tools.manager import ToolManager  # noqa: E402
