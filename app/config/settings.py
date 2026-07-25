@@ -170,7 +170,10 @@ class Settings(BaseSettings):
     aperag_api_key: str = ""           # ApeRAG 控制台创建(Bearer);放 .env 勿提交
     aperag_collection_id: str = ""     # 知识库 collection id(col_ 开头)
     aperag_rerank: bool = False        # 预召回热路径默认关重排(省延迟);深查精度可开
-    aperag_min_similarity: float = 0.2  # 向量路相似度阈值(服务端必填;融合排序后由预算再截断)
+    # 向量路相似度阈值。0.2=ApeRAG 服务端 Field 默认值(其 Web 搜索页用 0.7,精确率优先);
+    # 预召回选低阈值走召回率优先,下游有字符预算+评估器兜底。必须显式传:ApeRAG API 层
+    # 会把缺省字段解析成 None 显式下传,覆盖 Field 默认导致整体 500(上游 bug,可提 issue)
+    aperag_min_similarity: float = 0.2
 
     # 多轮查询改写(预召回前置):"那运费呢?"→"退货运费谁承担"。失败/首问回退原句
     recall_rewrite_enabled: bool = True
