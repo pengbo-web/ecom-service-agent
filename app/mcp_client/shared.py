@@ -28,6 +28,8 @@ def get_shared_mcp_client(server_url: str):
         except Exception:
             return None
         _client, _tools, _url = c, tools, server_url
+        # 全进程只连一次,此日志也只打一次(共享前每会话每 ToolManager 各打一次)
+        print(f"🔗 [MCP] 已建立共享连接 {server_url}，发现 {len(tools)} 个工具(全进程复用)", flush=True)
         return _client, _tools
 
 
