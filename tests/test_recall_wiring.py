@@ -1,6 +1,7 @@
 """chat 装配接线:召回段注入/每轮只检索一次/recall 事件只发一次/tracer 落 span。"""
 
 import itertools
+import json
 
 from app.agent.chat import EcomAgent
 from app.agent.recall.service import RecallResult
@@ -107,8 +108,11 @@ def test_tracer_records_recall_span(tmp_path):
     tracer = Tracer(store, now=lambda: next(clock), id_factory=lambda: f"id{next(ids)}")
     with tracer.start_trace("sess1", "退货政策") as t:
         tracer.on_event({"type": "recall", "source": "kb",
+                         "query": "退货运费谁承担",
                          "hits": [{"doc": "退换货政策", "section": "七天无理由", "score": 0.62}]})
     saved = store.get_trace(t.trace_id)
     recall_spans = [s for s in saved["spans"] if s["kind"] == "recall"]
     assert len(recall_spans) == 1
     assert recall_spans[0]["name"] == "recall:kb"
+    meta = json.loads(recall_spans[0]["meta"])
+    assert meta["query"] == "退货运费谁承担"          # 检索查询要能在 tracer 里看到

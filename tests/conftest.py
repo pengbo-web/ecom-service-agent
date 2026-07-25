@@ -24,11 +24,17 @@ def _force_local_session_backends():
     settings.auth_enabled = False      # 既有测试不带 token;auth 专项测试自行开启
     _orig_async = settings.memory_async_updates
     settings.memory_async_updates = False  # 既有测试确定性(同步执行);异步专项测试自行开启
+    _orig_kb = settings.kb_backend
+    settings.kb_backend = "local"      # 召回走本地索引;ApeRAG 专项测试自行覆盖(本机 .env 可能设 aperag)
+    _orig_ak = settings.aperag_api_key
+    settings.aperag_api_key = ""       # 不带真实 key,防止误发外部请求
     yield
     settings.reply_pipeline_enabled = _orig_rp
     settings.langfuse_enabled = _orig_lf
     settings.auth_enabled = _orig_auth
     settings.memory_async_updates = _orig_async
+    settings.kb_backend = _orig_kb
+    settings.aperag_api_key = _orig_ak
     set_session_store(None)
     set_session_lock(None)
     set_idempotency_store(None)
