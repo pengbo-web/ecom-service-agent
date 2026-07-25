@@ -50,3 +50,42 @@ def recall_user_memory(query: str = "") -> dict:
         ]
 
     return result
+
+
+_VALID_CATEGORIES = {"identity", "preference", "behavior", "issue", "other"}
+
+
+def save_user_memory(content: str = "", category: str = "other") -> dict:
+    """把用户明确表达的偏好/身份/重要事实即时写入长期记忆(跨会话立即生效)。
+
+    三层写入的"显式即时写"层:与会话末 consolidate(隐式提取)、curation
+    (策展治理)并存互补。写入即 save——FTS 同步索引,下一轮即可召回。
+    """
+    manager = _current_manager()
+    if manager is None or not manager.memory_enabled:
+        return {"success": False, "error": "记忆系统未启用"}
+    content = (content or "").strip()
+    if not content:
+        return {"success": False, "error": "记忆内容不能为空"}
+    content = content[:200]
+    if category not in _VALID_CATEGORIES:
+        category = "other"
+
+    try:
+        from app.agent.tools.bargain import get_current_session
+        source = get_current_session() or ""
+    except Exception:
+        source = ""
+
+    from datetime import datetime
+    from app.agent.memory.long_term import MemoryFact
+    before = len(manager.ltm.facts)
+    manager.ltm.add_facts([MemoryFact(
+        content=content, category=category,
+        created_at=datetime.now().isoformat(timespec="seconds"),
+        source_session=source,
+    )])
+    already = len(manager.ltm.facts) == before
+    manager.ltm.save()          # 立即持久化 + FTS 重同步
+    return {"success": True, "saved": content, "category": category,
+            "already_known": already, "total_facts": len(manager.ltm.facts)}

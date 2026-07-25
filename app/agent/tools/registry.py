@@ -9,7 +9,7 @@ from app.agent.tools.logistics import query_logistics
 from app.agent.tools.refund import apply_refund
 from app.agent.tools.knowledge import search_knowledge
 from app.agent.tools.user_orders import list_user_orders
-from app.agent.tools.memory_tool import recall_user_memory
+from app.agent.tools.memory_tool import recall_user_memory, save_user_memory
 from app.agent.tools.skill_tool import load_skill
 from app.config.settings import settings
 from app.agent.tools.bargain import negotiate_price
@@ -26,6 +26,7 @@ _TOOL_MAP: dict[str, Callable] = {
     "search_knowledge": search_knowledge,
     "list_user_orders": list_user_orders,
     "recall_user_memory": recall_user_memory,
+    "save_user_memory": save_user_memory,
     "load_skill": load_skill,
     "read_tool_result": read_tool_result,
     "change_address": change_address,
@@ -176,6 +177,33 @@ TOOL_DEFINITIONS: list[dict] = [
                     }
                 },
                 "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_user_memory",
+            "description": (
+                "把用户明确表达的个人偏好、身份信息或重要事实即时写入长期记忆"
+                "（跨会话永久生效）。仅当用户清晰说出关于自己的事实时使用，"
+                "例如「我喜欢红色」「我对海鲜过敏」「以后都发顺丰」。"
+                "闲聊内容、你的猜测、未经用户确认的信息不要写入。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "要记住的事实，用第三人称简洁陈述，如「用户偏好红色衣服」",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["identity", "preference", "behavior", "issue", "other"],
+                        "description": "事实类别：identity=身份/会员，preference=偏好，behavior=行为习惯，issue=问题记录，other=其他",
+                    },
+                },
+                "required": ["content"],
             },
         },
     },

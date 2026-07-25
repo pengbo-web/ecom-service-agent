@@ -4,13 +4,17 @@
 不再各自维护一套 ReAct 循环(已统一到 EcomAgent,见 orchestrator.py)。
 
 三域:售前(presale) / 售中(midsale) / 售后(aftersale,含原投诉)。
-公共工具:每域都含 search_knowledge / recall_user_memory / load_skill / read_tool_result。
+公共工具:每域都含 search_knowledge / recall_user_memory / save_user_memory /
+load_skill / read_tool_result。
 """
 
 from app.prompts.agents import AFTERSALE_PROMPT, MIDSALE_PROMPT, PRESALE_PROMPT
 
 # 每个领域画像都具备的公共工具
-_COMMON_TOOLS = {"search_knowledge", "recall_user_memory", "load_skill", "read_tool_result"}
+_COMMON_TOOLS = {
+    "search_knowledge", "recall_user_memory", "save_user_memory",
+    "load_skill", "read_tool_result",
+}
 
 
 AGENT_CONFIGS = {
