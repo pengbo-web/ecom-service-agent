@@ -113,6 +113,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
             return None
         return verify_token(auth[7:], settings.auth_secret)
 
+    def _resolve_user(request: Request, claimed: str | None) -> str:
+        """身份解析:门控开=只信 token(缺/坏→401);关=回退自报。"""
+        if not settings.auth_enabled:
+            return claimed or "default"
+        uid = _token_user(request)
+        if uid is None:
+            raise HTTPException(401, "未登录或登录已过期")
+        return uid
+
     def _issue(user_id: str, name: str):
         return {"user_id": user_id, "name": name,
                 "token": sign_token(user_id, settings.auth_secret, settings.auth_token_ttl),
@@ -143,7 +152,11 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return {"user_id": uid, "name": (u or {}).get("name") or uid}
 
     @app.post("/api/chat")
-    def chat(req: ChatRequest):
+    def chat(req: ChatRequest, request: Request):
+        # 0) 身份解析:门控开时必须从 token 解出(缺/坏 token → 401 最早返回),
+        #    覆盖请求体自报的 user_id,防冒充。
+        req.user_id = _resolve_user(request, req.user_id)
+
         # 1) 限流（防刷）:必须用客户端原始 ID 做键——若先换发再限流,
         #    未知 ID 每次都拿到新键,滑动窗口计数器形同虚设(评审实测坐实)。
         if not rate_limiter.allow(req.session_id):
@@ -208,7 +221,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
     @app.post("/api/session/reset", dependencies=[Depends(admin_auth)])
-    def reset(req: ResetRequest):
+    def reset(req: ResetRequest, request: Request):
+        req.user_id = _resolve_user(request, getattr(req, "user_id", "default"))
         manager.reset(req.session_id)
         get_db().close_conversation(req.session_id, "reset")
         # 老会话已关;立刻给前端一个新会话,免得下一条消息再走 rotated 换发
@@ -216,27 +230,40 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return {"status": "reset", "conversation_id": new_conv["conversation_id"]}
 
     @app.post("/api/conversation/open")
-    def conversation_open(req: OpenConversationRequest):
+    def conversation_open(req: OpenConversationRequest, request: Request):
         """服务端签发/复用会话:同用户已有 open 会话则复用(多端一致),否则新开。"""
+        req.user_id = _resolve_user(request, req.user_id)
         return open_or_reuse(get_db(), req.user_id)
 
     @app.get("/api/conversations")
-    def conversations_list(user_id: str = "default", limit: int = 20):
+    def conversations_list(request: Request, user_id: str = "default", limit: int = 20):
+        user_id = _resolve_user(request, user_id)
         return {"conversations": get_db().list_conversations(user_id, limit=limit)}
 
     @app.get("/api/session/{session_id}/history")
-    def session_history(session_id: str):
-        """回显该会话已落盘的历史气泡(重启/刷新后聊天记录不再空白)。与 /api/chat 同等公开。"""
+    def session_history(session_id: str, request: Request):
+        """回显该会话已落盘的历史气泡(重启/刷新后聊天记录不再空白)。
+
+        auth_enabled 时增归属校验:会话须存在且归属 token 用户,否则 403(旧格式 ID 也 403)。
+        """
+        if settings.auth_enabled:
+            uid = _token_user(request)
+            if uid is None:
+                raise HTTPException(401, "未登录或登录已过期")
+            conv = get_db().get_conversation(session_id)
+            if conv is None or conv.get("user_id") != uid:
+                raise HTTPException(403, "无权查看该会话")
         from app.api.history import reconstruct_bubbles
         return {"session_id": session_id, "turns": reconstruct_bubbles(manager.peek_messages(session_id))}
 
     @app.post("/api/session/{session_id}/consolidate", dependencies=[Depends(admin_auth)])
-    def consolidate(session_id: str, user_id: str = "default"):
+    def consolidate(session_id: str, request: Request, user_id: str = "default"):
         """把本会话对话巩固进长期记忆(触发 Phase 5 策展),并回传当前长期记忆事实。
 
         生产环境由空闲超时自动巩固(见 SessionManager.sweep/start_reaper);
         此端点是运维/演示用的手动触发,便于即时观察策展效果而不必等空闲 TTL。
         """
+        user_id = _resolve_user(request, user_id)
         agent = manager.get_or_create(session_id, user_id)
         mm = getattr(agent, "memory_manager", None)
         if mm is None or not getattr(mm, "memory_enabled", False):
@@ -278,10 +305,10 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return {"changed": changed, "applied": applied, "model_changed": model_changed, "note": note}
 
     @app.get("/api/memory", dependencies=[Depends(admin_auth)])
-    def memory(user_id: str = ""):
+    def memory(request: Request, user_id: str = ""):
         """只读:从磁盘加载指定用户的长期记忆(反映真实存储,不触发巩固)。"""
         from app.agent.memory.long_term import LongTermMemory
-        uid = user_id or settings.memory_user_id
+        uid = _resolve_user(request, user_id or settings.memory_user_id)
         ltm = LongTermMemory(
             user_id=uid,
             memory_dir=settings.memory_dir,
