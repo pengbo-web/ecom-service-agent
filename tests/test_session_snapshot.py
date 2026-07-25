@@ -43,3 +43,62 @@ def test_snapshot_table_independent_of_archive(tmp_path):
     db.archive_session("c-3", "u1", [{"role": "user", "content": "x"}], None)
     assert db.get_session_snapshot("c-3") is not None
     assert db.get_archived_session("c-3") is not None      # 两张表各存各的
+
+
+def test_ecomagent_save_writes_snapshot(tmp_path, monkeypatch):
+    from app.agent.chat import EcomAgent
+    from app.config.settings import settings
+    from app.db import Database, set_db
+    import types as _t
+
+    db = Database(str(tmp_path / "t.db")); db.init_schema()
+    set_db(db)
+    monkeypatch.setattr(settings, "session_snapshot_enabled", True)
+    try:
+        a = EcomAgent.__new__(EcomAgent)
+        a.session_path = str(tmp_path / "c-abc.json")
+        a.user_id = "u1"
+        a.raw_messages = [{"role": "user", "content": "你好"},
+                          {"role": "assistant", "content": "您好"}]
+        a.summary = None
+        a._write_snapshot()
+        snap = db.get_session_snapshot("c-abc")     # stem 作 session_id
+        assert snap is not None and snap["user_id"] == "u1" and len(snap["messages"]) == 2
+    finally:
+        set_db(None)
+
+
+def test_snapshot_skipped_for_default_session_name(tmp_path, monkeypatch):
+    from app.agent.chat import EcomAgent
+    from app.config.settings import settings
+    from app.db import Database, set_db
+
+    db = Database(str(tmp_path / "t.db")); db.init_schema()
+    set_db(db)
+    monkeypatch.setattr(settings, "session_snapshot_enabled", True)
+    try:
+        a = EcomAgent.__new__(EcomAgent)
+        a.session_path = str(tmp_path / "session.json")   # 默认名 → 跳过
+        a.user_id = "u1"; a.raw_messages = [{"role": "user", "content": "x"}]; a.summary = None
+        a._write_snapshot()
+        assert db.get_session_snapshot("session") is None
+    finally:
+        set_db(None)
+
+
+def test_snapshot_disabled_writes_nothing(tmp_path, monkeypatch):
+    from app.agent.chat import EcomAgent
+    from app.config.settings import settings
+    from app.db import Database, set_db
+
+    db = Database(str(tmp_path / "t.db")); db.init_schema()
+    set_db(db)
+    monkeypatch.setattr(settings, "session_snapshot_enabled", False)
+    try:
+        a = EcomAgent.__new__(EcomAgent)
+        a.session_path = str(tmp_path / "c-xyz.json"); a.user_id = "u1"
+        a.raw_messages = [{"role": "user", "content": "x"}]; a.summary = None
+        a._write_snapshot()
+        assert db.get_session_snapshot("c-xyz") is None
+    finally:
+        set_db(None)

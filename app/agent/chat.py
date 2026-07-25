@@ -153,6 +153,7 @@ class EcomAgent:
 
         self._status = "complete"
         self.store.save(self.session_path, self._session_state())   # 回合结束:完整落盘(必落)
+        self._write_snapshot()
         return result
 
     def _session_state(self) -> dict:
@@ -181,6 +182,26 @@ class EcomAgent:
 
     def save(self) -> None:
         self.store.save(self.session_path, self._session_state())
+        self._write_snapshot()
+
+    def _write_snapshot(self) -> None:
+        """会话冷快照(best-effort):每回合落盘后同步一份到 SQLite,热会话过期后仍可回看。
+
+        不依赖 reaper / 进程内存态——任何会话都有永久副本。session_id 取自
+        session_path 的 stem(与 RedisSessionStore 的 key 同源);默认会话名跳过。
+        """
+        if not settings.session_snapshot_enabled:
+            return
+        from pathlib import Path
+        sid = Path(self.session_path).stem
+        if not sid or sid == "session":
+            return
+        try:
+            from app.db import get_db
+            get_db().upsert_session_snapshot(sid, self.user_id or "default",
+                                             self.raw_messages, self.summary)
+        except Exception:
+            pass
 
     def close(self):
         self.memory_manager.consolidate_to_long_term(self.raw_messages, self.summary)

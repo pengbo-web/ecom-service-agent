@@ -432,7 +432,7 @@ class Database:
         finally:
             conn.close()
 
-    def get_session_snapshot(self, session_id: str):
+    def get_session_snapshot(self, session_id: str) -> Optional[dict]:
         conn = self.connect()
         try:
             row = conn.execute(
