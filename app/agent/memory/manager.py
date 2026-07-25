@@ -26,8 +26,12 @@ class MemoryManager:
         memory_enabled: bool = True,
         max_ltm_facts: int = 50,
         ltm_curation: bool = False,
+        bg_client: OpenAI | None = None,
     ):
         self.client = client
+        # 高频后台记忆调用(STM/中途抽取)专用 client:短超时零重试,快速失败。
+        # 不传则回退主 client(测试/向后兼容);会话末 consolidate 仍用主 client(强容错)。
+        self._bg_client = bg_client or client
         self.model = model
         self.memory_enabled = memory_enabled
 
@@ -81,7 +85,7 @@ class MemoryManager:
                     try:
                         with background_trace("update_short_term",
                                               session_id=session_id, user_id=self.ltm.user_id):
-                            self.stm.update(self.client, self.model, recent)
+                            self.stm.update(self._bg_client, self.model, recent)
                     except Exception:
                         pass
                 if due_ckpt:
@@ -113,7 +117,7 @@ class MemoryManager:
             with background_trace("memory_checkpoint",
                                   session_id=session_id, user_id=self.ltm.user_id,
                                   input={"segment_len": len(segment)}):
-                self.ltm.extract_and_save(self.client, self.model, segment, None)
+                self.ltm.extract_and_save(self._bg_client, self.model, segment, None)
             self._extract_cursor = len(all_messages)
         except Exception:
             pass

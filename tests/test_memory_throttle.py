@@ -144,3 +144,52 @@ def test_final_consolidate_only_tail_after_checkpoint(tmp_path, monkeypatch):
     tail_call = str(m.client.calls[-1])
     assert "尾段新消息" in tail_call and "早期消息" not in tail_call
     assert len(m.client.calls) == calls_before + 1
+
+
+# ---- 观察1修复:后台高频调用用短超时 bg_client,consolidate 用主 client ----
+def test_stm_and_checkpoint_use_bg_client(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "stm_update_every_n_turns", 1)
+    monkeypatch.setattr(settings, "memory_checkpoint_every_n_turns", 2)
+    monkeypatch.setattr(settings, "memory_async_updates", False)
+    main, bg = FakeClient(), FakeClient()
+    m = MemoryManager(client=main, model="m", user_id="u1",
+                      memory_dir=str(tmp_path / "mem"), memory_enabled=True, bg_client=bg)
+    all_msgs = [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]
+    m.update_short_term(MSGS, all_messages=all_msgs)   # 轮1:STM
+    m.update_short_term(MSGS, all_messages=all_msgs)   # 轮2:STM + checkpoint
+    assert len(bg.calls) >= 2 and main.calls == []      # 高频后台全走 bg,主 client 未被碰
+
+
+def test_bg_client_defaults_to_main_when_absent(tmp_path, monkeypatch):
+    """不传 bg_client 时回退主 client——向后兼容,既有测试行为不变。"""
+    monkeypatch.setattr(settings, "stm_update_every_n_turns", 1)
+    monkeypatch.setattr(settings, "memory_checkpoint_every_n_turns", 0)
+    monkeypatch.setattr(settings, "memory_async_updates", False)
+    main = FakeClient()
+    m = MemoryManager(client=main, model="m", user_id="u1",
+                      memory_dir=str(tmp_path / "mem"), memory_enabled=True)
+    m.update_short_term(MSGS, all_messages=MSGS)
+    assert len(main.calls) == 1 and m._bg_client is main
+
+
+def test_consolidate_keeps_main_client(tmp_path, monkeypatch):
+    """会话末巩固是一次性重要操作,保留强容错主 client(不走短超时 bg)。"""
+    monkeypatch.setattr(settings, "memory_async_updates", False)
+    main, bg = FakeClient(), FakeClient()
+    m = MemoryManager(client=main, model="m", user_id="u1",
+                      memory_dir=str(tmp_path / "mem"), memory_enabled=True, bg_client=bg)
+    m.consolidate_to_long_term([{"role": "user", "content": "记住我喜欢红色"}], None)
+    assert len(main.calls) == 1 and bg.calls == []
+
+
+def test_ecomagent_builds_short_timeout_zero_retry_bg_client(tmp_path, monkeypatch):
+    """真 EcomAgent 构造出的 bg_client 是短超时、零重试(不触网,只查对象属性)。"""
+    monkeypatch.setattr(settings, "memory_dir", str(tmp_path / "mem"))
+    monkeypatch.setattr(settings, "memory_bg_timeout_s", 42.0)
+    monkeypatch.setattr(settings, "resilience_enabled", False)
+    from app.agent.chat import EcomAgent
+    a = EcomAgent(session_path=str(tmp_path / "s.json"), user_id="u1")
+    bg = a.memory_manager._bg_client
+    assert bg is not a.memory_manager.client          # 独立于主 client
+    assert bg.max_retries == 0
+    assert float(getattr(bg, "timeout", 0)) == 42.0

@@ -59,6 +59,7 @@ class Settings(BaseSettings):
     stm_update_every_n_turns: int = 3     # 短期记忆每 N 轮更新一次(1=每轮,旧行为);省 token 且中间轮原始消息本就在上下文
     memory_checkpoint_every_n_turns: int = 10   # 长会话中途每 N 轮触发隐式记忆抽取归档(0=关);与会话末巩固双通道,策展去重
     memory_async_updates: bool = True     # 记忆更新走后台线程,不阻塞回复(False=同步,测试/调试)
+    memory_bg_timeout_s: float = 60.0     # 后台高频记忆调用(STM/中途抽取)超时上限,零重试快速失败——防容错层重试累积卡死后台线程(实测曾出现单次 906s)
 
     # Skill 配置（第8期）
     skills_enabled: bool = True

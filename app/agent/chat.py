@@ -48,6 +48,14 @@ class EcomAgent:
             mcp_server_url=settings.mcp_server_url,
         )
 
+        # 后台高频记忆调用专用 client:短超时零重试,快速失败(防容错层重试累积卡死后台线程)
+        from app.observability.langfuse_client import make_openai_client
+        _bg_client = make_openai_client(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            timeout=settings.memory_bg_timeout_s,
+            max_retries=0,
+        )
         from app.agent.memory import MemoryManager
         self.memory_manager = MemoryManager(
             client=self.client,
@@ -57,6 +65,7 @@ class EcomAgent:
             memory_enabled=settings.memory_enabled,
             max_ltm_facts=settings.max_ltm_facts,
             ltm_curation=settings.memory_curation_enabled,
+            bg_client=_bg_client,
         )
 
         if settings.memory_enabled:
