@@ -35,7 +35,7 @@ export function AgentActivity({ events, defaultOpen = false }: { events: SSEEven
               {e.type === "evaluate" && <><CheckCircle2 className={`mt-0.5 h-3.5 w-3.5 ${e.ok ? "text-primary" : "text-destructive"}`} /><span>评估{e.ok ? "通过：接地/准确/合规/完整" : "不通过 → 将依据工具真实结果重写"}</span></>}
               {e.type === "polish" && <><Sparkles className="mt-0.5 h-3.5 w-3.5 text-accent" /><span>润色完成（小夕语气，事实原样保留）</span></>}
               {e.type === "recall" && e.skipped && <><BookOpen className="mt-0.5 h-3.5 w-3.5 text-muted-foreground" /><span className="text-muted-foreground">预召回 → 跳过（{e.reason}，无需检索知识库）</span></>}
-              {e.type === "recall" && !e.skipped && <><BookOpen className="mt-0.5 h-3.5 w-3.5 text-primary" /><span>预召回<b>[{e.backend === "aperag" ? "ApeRAG" : "本地索引"}]</b>{e.query ? `（查询：${e.query}）` : ""} → 平台知识：{(e.hits as { doc: string; section: string }[] ?? []).map(h => `${h.doc}/${h.section}`).join("、")}</span></>}
+              {e.type === "recall" && !e.skipped && <><BookOpen className="mt-0.5 h-3.5 w-3.5 text-primary" /><span>预召回<b>[{e.backend === "aperag" ? "ApeRAG" : "本地索引"}]</b>{e.query ? `（查询：${e.query}）` : ""} → 平台知识：{[...new Set((e.hits as { doc: string; section: string }[] ?? []).map(h => `${h.doc}/${h.section}`))].join("、")}</span></>}
               {e.type === "faq_cache" && <><Zap className="mt-0.5 h-3.5 w-3.5 text-accent" /><span>FAQ 秒答（命中：{e.matched}，相似度 {Number(e.score).toFixed(2)}，零 LLM）</span></>}
             </div>
           ))}

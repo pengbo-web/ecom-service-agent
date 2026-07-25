@@ -91,12 +91,9 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         # 观察/变换:输出护栏变换 + 事后升级判定,均不否决已发生的动作
         reply = _finalize(result.reply, _sink)
         _sink({"type": "reply", "content": reply})
-        _sink({"type": "metadata", "intent": result.intent.value,
-               "confidence": result.confidence,
-               "requires_human": result.requires_human,
-               "follow_up_question": result.follow_up_question})
+        qu = getattr(agent, "_turn_qu", None)
+        reasons = []
         if hitl is not None:
-            qu = getattr(agent, "_turn_qu", None)
             all_user = [m.get("content", "") for m in getattr(agent, "raw_messages", [])
                         if m.get("role") == "user"]
             prior_user = all_user[:-1] if all_user else []   # 排除本轮
@@ -113,6 +110,15 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                 record_ticket(getattr(agent, "user_id", None), hid, "escalated",
                               ";".join(reasons))
                 _sink({"type": "handoff", "reasons": reasons, "handoff_id": hid})
+        # metadata 最后发:requires_human 反映事后升级结果,避免与 handoff 横幅自相矛盾
+        requires_human_out = result.requires_human or bool(reasons)
+        intent_out = result.intent.value
+        if qu is not None and qu.intent == "投诉" and intent_out not in ("complaint",):
+            intent_out = "complaint"   # QU 前置判定优先:情绪/投诉轮生成侧意图常漂移
+        _sink({"type": "metadata", "intent": intent_out,
+               "confidence": result.confidence,
+               "requires_human": requires_human_out,
+               "follow_up_question": result.follow_up_question})
         return result.intent.value
 
     def _replay_flow(_sink) -> str:
