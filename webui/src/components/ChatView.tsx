@@ -31,8 +31,16 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
   const idRef = useRef(0);
   const cur = useRef<number>(-1);
 
-  // 挂载/切会话时拉取已落盘历史,重启或刷新后聊天记录不再空白
+  // 拉取已落盘历史:挂载/切用户/重置/翻篇时刷新聊天区。
+  // 唯一例外是流中的 rotated 换发——此时新会话历史为空,重拉会 setTurns([])
+  // 把正在流式接收的当前轮清掉,后续 reply 事件 patch 不到轮次,回复当场
+  // 消失(评审 Major)。用 rotatedTo 标记该来源,跳过这一次重拉。
+  const rotatedTo = useRef<string | null>(null);
   useEffect(() => {
+    if (rotatedTo.current === sessionId) {
+      rotatedTo.current = null;
+      return;                      // rotated 换发:保住当前轮,不重拉
+    }
     let cancelled = false;
     getHistory(sessionId).then((bubbles) => {
       if (cancelled) return;
@@ -67,7 +75,12 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
     userId,
     onEvent: (e) => {
       // 首帧可能缺席(人工接管/限流/成本上限三个短路分支无此事件):只在收到且 rotated 时才换发,不等待不依赖
-      if (e.type === "conversation") { if (e.status === "rotated") onConversation(e.conversation_id); }
+      if (e.type === "conversation") {
+        if (e.status === "rotated") {
+          rotatedTo.current = e.conversation_id;   // 标记来源:历史重拉跳过这一次,保住当前轮
+          onConversation(e.conversation_id);
+        }
+      }
       else if (["thought", "tool_call", "tool_result", "guard", "route", "select", "evaluate", "polish"].includes(e.type)) patch((t) => ({ ...t, activity: [...t.activity, e] }));
       else if (e.type === "reply") patch((t) => ({ ...t, reply: e.content }));
       else if (e.type === "metadata") patch((t) => ({ ...t, meta: { intent: e.intent, confidence: e.confidence, requires_human: e.requires_human, follow_up_question: e.follow_up_question } }));
