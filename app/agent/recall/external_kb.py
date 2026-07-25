@@ -34,7 +34,7 @@ def aperag_search(query: str) -> list[dict] | None:
     try:
         resp = httpx.post(url, json=payload,
                           headers={"Authorization": f"Bearer {settings.aperag_api_key}"},
-                          timeout=settings.recall_kb_timeout_s)
+                          timeout=settings.aperag_timeout_s)
         if resp.status_code != 200:
             logger.warning("aperag search http %s: %s", resp.status_code, resp.text[:200])
             return None

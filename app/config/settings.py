@@ -177,6 +177,9 @@ class Settings(BaseSettings):
     # aperag 故障时是否降级本地索引。False(默认)=纯 ApeRAG 体验,故障=本轮无KB注入(可感知);
     # True=三级降级 aperag→local→无注入(生产建议开,故障静默兜底)
     kb_local_fallback_enabled: bool = False
+    # ApeRAG 检索超时。实测暖机 0.9-1.1s,容器冷启首查 3.5s+;6s(embedding 快速失败值)会误杀
+    # 冷启首查,单独放宽到 10s——仍有界防挂死,超时行为=该轮无注入(或降级,看上面开关)
+    aperag_timeout_s: float = 10.0
 
     # 多轮查询改写(预召回前置):"那运费呢?"→"退货运费谁承担"。失败/首问回退原句
     recall_rewrite_enabled: bool = True

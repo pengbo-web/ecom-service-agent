@@ -42,7 +42,7 @@ def test_maps_items_to_standard_rows(monkeypatch):
     assert captured["json"]["rerank"] is False
     # similarity 为服务端必填(缺省整体500,实测教训),必须始终随载荷携带
     assert captured["json"]["vector_search"]["similarity"] == settings.aperag_min_similarity
-    assert captured["timeout"] == settings.recall_kb_timeout_s
+    assert captured["timeout"] == settings.aperag_timeout_s   # ApeRAG 专属超时(冷启首查>6s,与embedding快速失败值分开)
 
 
 def test_empty_items_is_no_hit_not_degrade(monkeypatch):
