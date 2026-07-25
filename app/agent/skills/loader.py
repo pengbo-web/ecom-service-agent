@@ -115,18 +115,20 @@ class SkillManager:
 
         lines = [
             "\n\n## 可用技能（Skills）",
-            "以下是你可以使用的专业技能。当用户的问题匹配某个技能的适用场景时，",
-            "调用 `load_skill` 工具加载该技能的详细指令，然后按指令流程处理。\n",
+            "以下是你可以使用的专业技能。当用户请求匹配某个技能的适用场景时，",
+            "**你必须先调用 `load_skill` 工具加载该技能的标准流程，再按流程处理**——",
+            "这些流程封装了必须遵守的合规步骤（如退货需先验证资格、检索政策后再申请，",
+            "查物流需先确认订单再查轨迹），直接调用底层工具会漏掉步骤。首轮即应加载。\n",
         ]
 
         for skill in self._skills.values():
             lines.append(f"- **{skill.name}**：{skill.description}")
 
         lines.append("\n### 技能使用方式")
-        lines.append("1. 判断用户问题是否匹配某个技能的描述")
-        lines.append('2. 如果匹配，调用 `load_skill(skill_name="技能名")` 加载完整指令')
-        lines.append("3. 按加载的指令流程处理用户问题，使用已有工具完成具体操作")
-        lines.append("4. 如果不匹配任何技能，照常回答即可，不必强行使用技能")
+        lines.append("1. 判断用户问题是否匹配某个技能的描述(看适用关键词)")
+        lines.append('2. 匹配则**先** `load_skill(skill_name="技能名")` 加载完整流程,再做具体操作')
+        lines.append("3. 按加载的指令流程处理,使用已有工具完成每一步")
+        lines.append("4. 仅当不匹配任何技能时,才照常直接回答/调工具")
 
         return "\n".join(lines)
 
