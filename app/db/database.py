@@ -94,6 +94,15 @@ class Database:
                     updated_at TEXT,
                     PRIMARY KEY (session_id, product_id)
                 );
+                CREATE TABLE IF NOT EXISTS conversations (
+                    conversation_id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'open',
+                    created_at TEXT NOT NULL,
+                    closed_at TEXT,
+                    close_reason TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id, status);
                 """
             )
             # 兼容旧库：products 补 floor_price 列
@@ -317,5 +326,61 @@ class Database:
         try:
             conn.execute("DELETE FROM bargain_sessions WHERE session_id = ?", (session_id,))
             conn.commit()
+        finally:
+            conn.close()
+
+    # ---------- 会话生命周期(服务端签发 conversation_id + open/closed 状态机) ----------
+    def create_conversation(self, user_id: str) -> dict:
+        import uuid
+        cid = "c-" + uuid.uuid4().hex[:16]
+        now = datetime.now().isoformat(timespec="seconds")
+        conn = self.connect()
+        try:
+            conn.execute(
+                "INSERT INTO conversations (conversation_id, user_id, status, created_at) "
+                "VALUES (?, ?, 'open', ?)", (cid, user_id, now))
+            conn.commit()
+        finally:
+            conn.close()
+        return {"conversation_id": cid, "user_id": user_id, "status": "open", "created_at": now}
+
+    def get_conversation(self, conversation_id: str) -> Optional[dict]:
+        conn = self.connect()
+        try:
+            row = conn.execute("SELECT * FROM conversations WHERE conversation_id = ?",
+                               (conversation_id,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def close_conversation(self, conversation_id: str, reason: str) -> bool:
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE conversations SET status='closed', closed_at=?, close_reason=? "
+                "WHERE conversation_id = ? AND status='open'",
+                (datetime.now().isoformat(timespec="seconds"), reason, conversation_id))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def latest_open_conversation(self, user_id: str) -> Optional[dict]:
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM conversations WHERE user_id=? AND status='open' "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1", (user_id,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def list_conversations(self, user_id: str, limit: int = 20) -> list[dict]:
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM conversations WHERE user_id=? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?", (user_id, limit)).fetchall()
+            return [dict(r) for r in rows]
         finally:
             conn.close()
