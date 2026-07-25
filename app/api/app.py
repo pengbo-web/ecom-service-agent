@@ -272,6 +272,10 @@ def create_app(session_manager: Optional[SessionManager] = None,
     def consolidate(session_id: str, request: Request, user_id: str = "default"):
         """把本会话对话巩固进长期记忆(触发 Phase 5 策展),并回传当前长期记忆事实。
 
+        巩固=把对话沉淀进长期记忆,是后台维护动作,**不结束会话**——用户可继续
+        在同一会话聊天,记忆已沉淀且可重复巩固(幂等,策展去重)。结束会话(翻篇)
+        由「重置对话」或空闲超时 reaper 负责,与巩固解耦。
+
         生产环境由空闲超时自动巩固(见 SessionManager.sweep/start_reaper);
         此端点是运维/演示用的手动触发,便于即时观察策展效果而不必等空闲 TTL。
         """
@@ -293,9 +297,9 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 {"content": f.content, "category": f.category, "created_at": f.created_at}
                 for f in mm.ltm.facts
             ]
-            get_db().close_conversation(session_id, "manual")   # 结束会话:翻篇
+        # 不再 close_conversation:巩固与结束会话解耦,巩固后会话继续。
         return {"enabled": True, "curation": settings.memory_curation_enabled,
-                "count": len(facts), "facts": facts, "conversation_closed": True}
+                "count": len(facts), "facts": facts, "conversation_closed": False}
 
     @app.post("/api/config/reload", dependencies=[Depends(admin_auth)])
     def config_reload():

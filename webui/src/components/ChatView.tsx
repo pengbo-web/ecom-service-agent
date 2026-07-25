@@ -9,7 +9,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  consolidateMemory, getHistory, openConversation, listConversations,
+  consolidateMemory, getHistory, listConversations,
   login, createUser, setToken, clearToken, setUserId,
   type ConsolidateResult, type ConversationMeta, type HistoryTurn,
 } from "@/lib/api";
@@ -60,11 +60,8 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
   async function onConsolidate() {
     setMemBusy(true); setMemErr(null);
     try {
+      // 巩固=把对话沉淀进长期记忆,不结束会话:不翻篇、不清屏,当前会话继续聊。
       setMem(await consolidateMemory(sessionId, userId));
-      // 巩固=结束本会话:服务端新开一个会话翻篇,聊天区清屏(长期记忆面板照常展示巩固结果)
-      const c = await openConversation(userId);
-      onConversation(c.conversation_id);
-      setTurns([]);
     }
     catch (e) { setMemErr(String(e)); }
     finally { setMemBusy(false); }
@@ -170,8 +167,9 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
           {historyOpen ? "收起历史" : "历史会话"}
         </Button>
         <Button variant="outline" size="sm" className="h-7 text-xs"
+                title="把当前对话沉淀进长期记忆,不结束会话,可继续聊。结束会话请用「重置对话」。"
                 disabled={memBusy} onClick={onConsolidate}>
-          {memBusy ? "巩固中…" : "结束会话·巩固记忆"}
+          {memBusy ? "巩固中…" : "巩固记忆"}
         </Button>
       </div>
       {historyOpen && (

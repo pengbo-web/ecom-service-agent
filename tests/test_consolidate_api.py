@@ -58,3 +58,14 @@ def test_consolidate_when_memory_disabled():
     client = TestClient(create_app(session_manager=mgr))
     body = client.post("/api/session/s2/consolidate").json()
     assert body == {"enabled": False, "count": 0, "facts": []}
+
+
+def test_consolidate_does_not_close_conversation():
+    """巩固记忆不结束会话:consolidate 后会话仍 open,可继续聊(与结束会话解耦)。"""
+    from app.db import get_db
+    mgr = SessionManager(agent_factory=lambda p, u=None: FakeAgent(p))
+    client = TestClient(create_app(session_manager=mgr))
+    cid = get_db().create_conversation("default")["conversation_id"]
+    body = client.post(f"/api/session/{cid}/consolidate").json()
+    assert body["conversation_closed"] is False
+    assert get_db().get_conversation(cid)["status"] == "open"   # 会话未被翻篇
