@@ -39,6 +39,7 @@ class EcomAgent:
         self.session_id = session_id
         self.user_id = user_id or settings.memory_user_id   # 长期记忆按用户隔离
         self.system_prompt = SYSTEM_PROMPT   # 可切换:多 Agent 编排按路由画像覆盖
+        self._turn_recall = None   # (last_user, RecallResult) 每轮预召回缓存:react 多步共享,不重复 embedding
         self.history_threshold = settings.history_threshold
         self.history_keep_recent = settings.history_keep_recent
         self.max_react_steps = settings.max_react_steps
@@ -124,6 +125,7 @@ class EcomAgent:
             set_memory_manager(self.memory_manager)
         self.raw_messages.append({"role": "user", "content": user_input})
         self._step_seq = 0
+        self._turn_recall = None   # 新一轮:召回缓存作废,按本轮问题重检索
         self._checkpoint("in_flight")   # 回合开始:持久化用户消息 + 标记进行中
 
         # stage 事件:供观测层(自研 tracer/Langfuse 桥)组装阶段 span 树
@@ -405,7 +407,15 @@ class EcomAgent:
              if m.get("role") == "user"),
             None,
         )
-        messages.extend(self.memory_manager.build_memory_prompt_sections(query=last_user))
+        # 统一召回层:profile/LTM/STM/KB 四源一次装配(存储分离、召回统一)。
+        # 每轮缓存:react 循环内多次组消息不重复检索(KB 预检索有 embedding 开销)。
+        from app.agent.recall.service import build_recall_sections
+        if self._turn_recall is None or self._turn_recall[0] != last_user:
+            rr = build_recall_sections(self.memory_manager, last_user)
+            self._turn_recall = (last_user, rr)
+            if rr.kb_hits:   # 首次计算且 KB 有命中才发事件(前端思考面板+tracer 各消费一次)
+                self._emit({"type": "recall", "source": "kb", "hits": rr.kb_hits})
+        messages.extend(self._turn_recall[1].sections)
         if self.summary:
             messages.append(
                 {

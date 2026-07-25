@@ -89,6 +89,14 @@ class Tracer:
                 meta={"stage": event.get("stage"), "action": event.get("action"),
                       "reason": event.get("reason")},
             ))
+        elif etype == "recall":
+            now = self._now()
+            trace.spans.append(Span(
+                span_id=self._id(), trace_id=trace.trace_id,
+                name=f"recall:{event.get('source')}", kind="recall",
+                started_at=now, ended_at=now, latency_ms=0.0,
+                meta={"hits": event.get("hits", [])},
+            ))
         elif etype == "handoff":
             now = self._now()
             trace.spans.append(Span(
