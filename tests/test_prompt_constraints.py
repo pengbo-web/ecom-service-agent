@@ -23,3 +23,14 @@ def test_fallback_phrase_in_all_domains():
 
 def test_evaluator_checks_citation_authenticity():
     assert "来源" in EVALUATOR_PROMPT and "编造来源" in EVALUATOR_PROMPT
+
+
+def test_presale_product_grounding_constraint():
+    """售前商品线接地:必须先查 query_product,禁编销量/好评率/原价。"""
+    assert "必须先调用 query_product" in PRESALE_PROMPT
+    assert "严禁编造这些数字" in PRESALE_PROMPT
+    assert "好评率" in PRESALE_PROMPT      # 明确点名禁编字段
+
+
+def test_evaluator_covers_product_fabrication():
+    assert "query_product" in EVALUATOR_PROMPT and "销量" in EVALUATOR_PROMPT
