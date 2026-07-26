@@ -82,6 +82,20 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         _sink({"type": "reply", "content": reply})
         _sink({"type": "metadata", "intent": "human_request", "confidence": 1.0,
                "requires_human": True, "follow_up_question": None})
+        # 短路轮同样写进会话历史并落盘(照 app.py fast-path 先例):刷新可回显,
+        # 下一轮 LLM 也知道用户刚要求过转接;失败不影响已发出的转接
+        try:
+            from app.schemas.response import CustomerServiceResponse, IntentType
+            _res = CustomerServiceResponse(intent=IntentType.OTHER, confidence=1.0,
+                                           reply=reply, requires_human=True,
+                                           follow_up_question=None)
+            agent.raw_messages.append({"role": "user", "content": user_input})
+            agent.raw_messages.append({"role": "assistant",
+                                       "content": _res.model_dump_json()})
+            if hasattr(agent, "save"):
+                agent.save()
+        except Exception:
+            pass
         return "human_request"
 
     def _normal_flow(_sink) -> str:
@@ -102,14 +116,18 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                                     qu_intent=(qu.intent if qu is not None else ""),
                                     prior_user_msgs=prior_user)
             if reasons:
-                recent = list(getattr(agent, "raw_messages", []))[-6:]
-                hid = hitl.escalate(session_id, user_input, reply,
-                                    result.intent.value, result.confidence,
-                                    reasons, recent_context=recent)
-                from app.agent.memory.profile import record_ticket
-                record_ticket(getattr(agent, "user_id", None), hid, "escalated",
-                              ";".join(reasons))
-                _sink({"type": "handoff", "reasons": reasons, "handoff_id": hid})
+                # 升级动作整体兜底:escalate/记工单任一失败,不能吞掉后面的 metadata(F2)
+                try:
+                    recent = list(getattr(agent, "raw_messages", []))[-6:]
+                    hid = hitl.escalate(session_id, user_input, reply,
+                                        result.intent.value, result.confidence,
+                                        reasons, recent_context=recent)
+                    from app.agent.memory.profile import record_ticket
+                    record_ticket(getattr(agent, "user_id", None), hid, "escalated",
+                                  ";".join(reasons))
+                    _sink({"type": "handoff", "reasons": reasons, "handoff_id": hid})
+                except Exception:
+                    _sink({"type": "handoff", "reasons": reasons, "handoff_id": None})
         # metadata 最后发:requires_human 反映事后升级结果,避免与 handoff 横幅自相矛盾
         requires_human_out = result.requires_human or bool(reasons)
         intent_out = result.intent.value
