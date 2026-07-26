@@ -157,9 +157,11 @@ def create_app(session_manager: Optional[SessionManager] = None,
         #    覆盖请求体自报的 user_id,防冒充。
         req.user_id = _resolve_user(request, req.user_id)
 
-        # 1) 限流（防刷）:必须用客户端原始 ID 做键——若先换发再限流,
-        #    未知 ID 每次都拿到新键,滑动窗口计数器形同虚设(评审实测坐实)。
-        if not rate_limiter.allow(req.session_id):
+        # 1) 限流（防刷）:按已鉴权 user_id(session_id 客户端可伪造,换 id 即绕过;
+        #    user 从 token 解出不可伪造)。auth 关闭时 _resolve_user 回退自报 id,
+        #    退化为按自报身份限流,可接受。
+        _rl_key = req.user_id or req.session_id
+        if not rate_limiter.allow(_rl_key):
             return _reply_stream("⏳ 您发送得太快啦，请稍后再试～")
 
         # 2) 人工接管中：短路，不调用 Agent。同理用原始 ID:坐席是对客户端
