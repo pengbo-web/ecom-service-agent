@@ -51,3 +51,28 @@ def is_confirmation(text: str) -> bool:
     if not t or len(t) > 30:
         return False
     return any(w in t for w in _CONFIRM_WORDS)
+
+
+def confirm_targets_pending(user_input: str, pending, explicit_confirm: bool) -> bool:
+    """本轮确认是否真的指向这个挂起动作。绑定信号(任一成立即绑定):
+    ① 前端显式 confirm 标志(点了确认按钮,正规路径);
+    ② 用户消息提到了挂起动作的目标订单号(强绑定);
+    ③ 用户消息含"确认/确定/同意"这类**强确认词**(非'可以/好的'泛化词)且未提到其它订单号。
+    仅凭"可以/好的/是的"这类泛化附和,不足以重放不可逆动作。"""
+    if pending is None:
+        return False
+    if explicit_confirm:
+        return True
+    text = (user_input or "").strip()
+    if not text or len(text) > 30:
+        return False
+    target = str((getattr(pending, "args", {}) or {}).get("order_id") or "").strip()
+    if target and target in text:
+        return True                       # 提到本挂起单号 → 强绑定
+    # 提到了"别的"订单号(ORD- 格式但不是挂起单)→ 明确指向别处,不重放
+    import re
+    others = [m for m in re.findall(r"ORD-\d{8}-\d{3}", text) if m != target]
+    if others:
+        return False
+    strong = ("确认", "确定", "同意", "就这么办", "退款吧", "成交")
+    return any(w in text for w in strong)

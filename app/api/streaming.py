@@ -32,12 +32,16 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
 
     # 本轮授权的风险动作:显式 confirm 标志,或用户这轮说了确认语(退款/成交等才放行)
     from app.agent.consent import RISK_ACTIONS, consent_scope, is_confirmation
-    confirmed = confirm or is_confirmation(user_input)
-    granted = RISK_ACTIONS if confirmed else frozenset()
+    from app.agent.consent import confirm_targets_pending
 
     # Phase 4/R3:用户确认 + 会话状态里存在挂起动作 → 服务端确定性重放(不赌模型重调工具)
     # 挂起动作随会话持久化在 agent 上(R3),重启/换实例后仍在。
-    pending = getattr(agent, "_pending", None) if confirmed else None
+    _raw_pending = getattr(agent, "_pending", None)
+    # 重放门:确认信号必须与挂起动作绑定,泛化词"可以/好的"不足以重放不可逆动作(P0-2)
+    pending = _raw_pending if confirm_targets_pending(user_input, _raw_pending, confirm) else None
+    # 本轮风险授权:显式 confirm,或指向挂起动作的确认(与重放门一致,避免"可以"泛化放行)
+    confirmed = pending is not None
+    granted = RISK_ACTIONS if confirmed else frozenset()
 
     # Langfuse 桥(可选体验层):门控关/未装时为 None,零开销
     from app.observability.langfuse_bridge import langfuse_turn
