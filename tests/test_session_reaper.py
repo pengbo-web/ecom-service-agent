@@ -112,3 +112,29 @@ def test_reaper_closes_conversation_when_gated_on(tmp_path, monkeypatch):
     clock.t = 1000 + 301
     mgr.sweep(idle_ttl=300)
     assert get_db().get_conversation(cid)["close_reason"] == "idle"
+
+
+def test_consolidation_runs_without_holding_session_lock(tmp_path, monkeypatch):
+    """巩固期间(agent.close 里的慢操作)不得持有 session 锁,否则用户回来会被阻塞。"""
+    import threading, time
+    from app.api.session_manager import SessionManager
+
+    lock_held_during_close = {"held": None}
+
+    class SlowAgent:
+        def __init__(self, p):
+            self.session_path = p
+        def save(self):
+            pass
+        def close(self):
+            # 在 close(模拟慢 LLM 巩固)期间,探测 session 锁能否被别的线程拿到
+            mgr_lock = self._mgr.get_lock("s1")
+            lock_held_during_close["held"] = mgr_lock.locked()
+
+    mgr = SessionManager(agent_factory=lambda p, u=None: SlowAgent(p),
+                         clock=lambda: 1000.0)
+    a = mgr.get_or_create("s1")
+    a._mgr = mgr
+    mgr._consolidate_and_evict("s1")
+    assert lock_held_during_close["held"] is False   # close 跑时锁已释放
+    assert "s1" not in mgr._agents                     # 仍完成回收
