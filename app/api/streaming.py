@@ -39,9 +39,9 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
     _raw_pending = getattr(agent, "_pending", None)
     # 重放门:确认信号必须与挂起动作绑定,泛化词"可以/好的"不足以重放不可逆动作(P0-2)
     pending = _raw_pending if confirm_targets_pending(user_input, _raw_pending, confirm) else None
-    # 本轮风险授权:显式 confirm,或指向挂起动作的确认(与重放门一致,避免"可以"泛化放行)
+    # 本轮是否走确定性重放(仅当确认信号绑定到挂起动作)。风险动作只经此路径执行,
+    # normal flow 恒不授权风险动作(见 _normal_flow 的空 consent_scope)。
     confirmed = pending is not None
-    granted = RISK_ACTIONS if confirmed else frozenset()
 
     # Langfuse 桥(可选体验层):门控关/未装时为 None,零开销
     from app.observability.langfuse_bridge import langfuse_turn
@@ -103,8 +103,9 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         return "human_request"
 
     def _normal_flow(_sink) -> str:
-        # 授权闸门(authorize):风险动作前置授权在动作边界强制(consent_scope)
-        with consent_scope(granted):
+        # normal flow 恒不授权任何风险动作(风险动作只走 _replay_flow 的确定性重放)。
+        # 空 scope 是 fail-closed 的显式表达:模型当轮无法直接执行退款/取消等不可逆动作。
+        with consent_scope(frozenset()):
             result = agent.chat(user_input)
         # 观察/变换:输出护栏变换 + 事后升级判定,均不否决已发生的动作
         reply = _finalize(result.reply, _sink)

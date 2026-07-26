@@ -27,9 +27,11 @@ def test_confirm_false_gate_closed():
     assert _reply(events) == "denied"
 
 
-def test_confirm_true_gate_open():
+def test_confirm_true_without_pending_still_denied():
+    # 新契约:无挂起动作时,confirm=True 也不在 normal flow 授权风险动作——
+    # 风险动作只走确定性重放(有绑定 pending 时才经 _replay_flow 执行)。
     events = list(run_agent_streaming(ConsentProbeAgent(), "退款", confirm=True))
-    assert _reply(events) == "allowed"
+    assert _reply(events) == "denied"
 
 
 def test_consent_does_not_leak_after_turn():
@@ -58,7 +60,7 @@ def test_first_request_not_confirmation_denied():
     assert _reply(e) == "请确认是否退款?"
 
 
-def test_natural_language_confirm_grants():
-    # 用户说确认语 → 本轮授权(无需 confirm 标志、无需追踪器)
+def test_natural_language_confirm_without_pending_denied():
+    # 新契约:无挂起动作时自然语言确认不授权,模型只能请用户确认(随后走重放)。
     e = list(run_agent_streaming(RefundAgent(), "确认,退款吧", session_id="s"))
-    assert _reply(e) == "已退款"
+    assert _reply(e) == "请确认是否退款?"
