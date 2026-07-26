@@ -31,7 +31,7 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
     q: "queue.Queue" = queue.Queue()
 
     # 本轮授权的风险动作:显式 confirm 标志,或用户这轮说了确认语(退款/成交等才放行)
-    from app.agent.consent import RISK_ACTIONS, consent_scope, is_confirmation
+    from app.agent.consent import RISK_ACTIONS, consent_scope
     from app.agent.consent import confirm_targets_pending
 
     # Phase 4/R3:用户确认 + 会话状态里存在挂起动作 → 服务端确定性重放(不赌模型重调工具)

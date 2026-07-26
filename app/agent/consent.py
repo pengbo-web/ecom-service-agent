@@ -5,6 +5,7 @@
 或坐席放行。授权按轮生效(ContextVar),用后自动复位,绝不泄漏到下一轮。
 """
 
+import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -66,12 +67,13 @@ def confirm_targets_pending(user_input: str, pending, explicit_confirm: bool) ->
     text = (user_input or "").strip()
     if not text or len(text) > 30:
         return False
-    target = str((getattr(pending, "args", {}) or {}).get("order_id") or "").strip()
-    if target and target in text:
+    # 大小写归一化:订单号匹配须无视大小写,否则小写他单号(如 ord-...)会绕过错目标防线
+    text_up = text.upper()
+    target_up = str((getattr(pending, "args", {}) or {}).get("order_id") or "").strip().upper()
+    if target_up and target_up in text_up:
         return True                       # 提到本挂起单号 → 强绑定
     # 提到了"别的"订单号(ORD- 格式但不是挂起单)→ 明确指向别处,不重放
-    import re
-    others = [m for m in re.findall(r"ORD-\d{8}-\d{3}", text) if m != target]
+    others = [m for m in re.findall(r"ORD-\d{8}-\d{3}", text_up) if m != target_up]
     if others:
         return False
     strong = ("确认", "确定", "同意", "就这么办", "退款吧", "成交")

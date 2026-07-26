@@ -99,3 +99,10 @@ def test_confirm_wrong_order_does_not_replay_pending(monkeypatch):
     agent = _agent_with_pending("ORD-20240110-003")
     _drain(agent, "确认取消订单 ORD-20240115-001")   # 提到的是别的单
     assert agent.tool_manager.calls == []
+
+
+def test_confirm_lowercase_wrong_order_does_not_replay(monkeypatch):
+    monkeypatch.setattr(settings, "auth_enabled", True)
+    agent = _agent_with_pending("ORD-20240110-003")
+    _drain(agent, "确认取消 ord-20240115-001")   # 小写他单号
+    assert agent.tool_manager.calls == []
