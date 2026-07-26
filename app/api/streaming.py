@@ -142,14 +142,22 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
     def _replay_flow(_sink) -> str:
         """确认轮:用记住的真实参数,由服务端授权重放挂起动作(确定性,不经模型)。"""
         from app.agent.consent import consent_scope as _scope
-        from app.agent.tools.registry import execute_tool as _exec
         from app.agent.tools.bargain import set_current_session
+        from app.agent.runtime_context import set_current_user
         from app.schemas.response import CustomerServiceResponse, IntentType
 
         _sink({"type": "tool_call", "name": pending.tool_name, "args": pending.args})
         set_current_session(session_id)   # negotiate_price 需要会话上下文
+        set_current_user(getattr(agent, "user_id", None))   # P0-1:重放在新线程,须设身份否则 owned_order 判空
+        # P1-③:走 agent 的 ToolManager(与 ReAct 同路径:MCP 身份透传/结果落盘一致),
+        # 无 tool_manager(裸引擎/测试桩缺失)时回退 registry
+        _tm = getattr(agent, "tool_manager", None)
         with _scope(RISK_ACTIONS):
-            result_str = _exec(pending.tool_name, pending.args)
+            if _tm is not None and hasattr(_tm, "execute_tool"):
+                result_str = _tm.execute_tool(pending.tool_name, pending.args)
+            else:
+                from app.agent.tools.registry import execute_tool as _exec
+                result_str = _exec(pending.tool_name, pending.args)
         _sink({"type": "tool_result", "content": result_str})
         try:
             result = json.loads(result_str)
