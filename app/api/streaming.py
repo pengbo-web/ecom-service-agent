@@ -141,7 +141,7 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                "confidence": result.confidence,
                "requires_human": requires_human_out,
                "follow_up_question": result.follow_up_question})
-        return result.intent.value
+        return intent_out   # P1:trace.intent(消费本返回值)与 metadata 用同一覆盖后意图,消除三面漂移
 
     def _replay_flow(_sink) -> str:
         """确认轮:用记住的真实参数,由服务端授权重放挂起动作(确定性,不经模型)。"""
