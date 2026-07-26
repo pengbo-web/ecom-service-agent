@@ -27,19 +27,23 @@ def _drain(resp):  # 消费 SSE 流
 
 
 def test_fast_path_turn_persisted_and_in_history(tmp_path):
+    from app.db import get_db
     client, mgr = _client(tmp_path)
+    # 先建一个属于 u1 的真实 open 会话,否则 ensure_active 会把未知 session_id 换发成新会话,
+    # 落盘随之落到换发后的 id 上(此测试关注的是落盘本身,不是换发)。
+    cid = get_db().create_conversation("u1")["conversation_id"]
     # 发一句命中快路径的"你好"
-    r = client.post("/api/chat", json={"session_id": "s1", "user_id": "u1", "message": "你好"})
+    r = client.post("/api/chat", json={"session_id": cid, "user_id": "u1", "message": "你好"})
     assert r.status_code == 200
     _drain(r)
 
     # 已写入 agent 历史(用户 + 助手两条)
-    agent = mgr.get_or_create("s1")
+    agent = mgr.get_or_create(cid)
     assert len(agent.raw_messages) == 2
     assert agent.raw_messages[0] == {"role": "user", "content": "你好"}
 
     # 历史接口能回显(模拟切走再回来 / 刷新)
-    turns = client.get("/api/session/s1/history").json()["turns"]
+    turns = client.get(f"/api/session/{cid}/history").json()["turns"]
     assert turns[0] == {"role": "user", "content": "你好"}
     assert turns[1]["role"] == "assistant" and "小夕" in turns[1]["content"]
 

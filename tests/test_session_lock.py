@@ -60,11 +60,15 @@ class FakeAgent:
 
 
 def test_chat_returns_busy_when_session_locked():
+    from app.db import get_db
     r = fakeredis.FakeStrictRedis()
-    r.set("lock:s1", "held-by-another-instance")   # 该会话已被别人占用
     set_session_lock(RedisSessionLock(r, wait_timeout=0.15, retry_interval=0.05))
     mgr = SessionManager(agent_factory=lambda p, u=None: FakeAgent(p))
     client = TestClient(create_app(session_manager=mgr))
-    resp = client.post("/api/chat", json={"session_id": "s1", "message": "查一下订单 O1"})
+    # 先开一个"属于该用户且 open"的真实会话,否则 ensure_active 会把未知 ID 换发成新会话,
+    # 锁键随之改变,测不到忙路径(auth 关闭时 chat 的 user 回退为 "default")。
+    cid = get_db().create_conversation("default")["conversation_id"]
+    r.set(f"lock:{cid}", "held-by-another-instance")   # 该会话已被别人占用
+    resp = client.post("/api/chat", json={"session_id": cid, "message": "查一下订单 O1"})
     assert resp.status_code == 200
     assert "处理中" in resp.text          # 抢不到锁 → 提示稍候,不并发处理

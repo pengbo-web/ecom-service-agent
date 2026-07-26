@@ -1,5 +1,6 @@
 """按天请求预算，成本兜底（防刷爆 API Key）。"""
 
+import threading
 import time
 
 
@@ -9,6 +10,8 @@ class CostGuard:
         self._now = now
         self._day = None
         self._count = 0
+        # 线程池并发下 _roll + 自增无锁会多扣/漏扣,预算上限不可靠
+        self._lock = threading.Lock()
 
     def _today(self) -> int:
         return int(self._now() // 86400)
@@ -20,12 +23,14 @@ class CostGuard:
             self._count = 0
 
     def allow(self) -> bool:
-        self._roll()
-        if self._count >= self.max:
-            return False
-        self._count += 1
-        return True
+        with self._lock:
+            self._roll()
+            if self._count >= self.max:
+                return False
+            self._count += 1
+            return True
 
     def spent(self) -> int:
-        self._roll()
-        return self._count
+        with self._lock:
+            self._roll()
+            return self._count

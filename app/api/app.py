@@ -47,6 +47,10 @@ def create_app(session_manager: Optional[SessionManager] = None,
                hitl: Optional[HitlManager] = None,
                admin_token: Optional[str] = None,
                eval_runner: Optional[EvalRunner] = None) -> FastAPI:
+    # 生产环境安全前置校验:ENVIRONMENT=production 且用默认/空密钥 → 拒绝启动(dev 不校验)
+    from app.config.settings import verify_production_secrets
+    verify_production_secrets(settings)
+
     app = FastAPI(title="Ecom Service Agent API")
     if session_manager is not None:
         manager = session_manager
@@ -157,10 +161,10 @@ def create_app(session_manager: Optional[SessionManager] = None,
         #    覆盖请求体自报的 user_id,防冒充。
         req.user_id = _resolve_user(request, req.user_id)
 
-        # 1) 限流（防刷）:按已鉴权 user_id(session_id 客户端可伪造,换 id 即绕过;
-        #    user 从 token 解出不可伪造)。auth 关闭时 _resolve_user 回退自报 id,
-        #    退化为按自报身份限流,可接受。
-        _rl_key = req.user_id or req.session_id
+        # 1) 限流（防刷）:auth 开=按已鉴权 user_id(不可伪造);auth 关=按 session_id
+        #    (自报 user_id 默认恒为 "default",若按它限流则所有匿名用户共用一个桶、互相拖累;
+        #    session_id 至少按会话粒度隔离,更贴近"每客户端限流"的本意)。
+        _rl_key = req.user_id if settings.auth_enabled else (req.session_id or req.user_id)
         if not rate_limiter.allow(_rl_key):
             return _reply_stream("⏳ 您发送得太快啦，请稍后再试～")
 
@@ -180,21 +184,25 @@ def create_app(session_manager: Optional[SessionManager] = None,
             if fp:
                 agent = manager.get_or_create(req.session_id, req.user_id)
                 with session_lock.guard(req.session_id) as got:
-                    if got:
-                        msgs = getattr(agent, "raw_messages", None)
-                        if isinstance(msgs, list):
-                            msgs.append({"role": "user", "content": req.message})
-                            msgs.append({"role": "assistant", "content": json.dumps({
-                                "intent": fp.get("intent", "fast_path"), "confidence": 1.0,
-                                "reply": fp["reply"], "requires_human": False,
-                                "follow_up_question": None,
-                            }, ensure_ascii=False)})
-                            save = getattr(agent, "save", None)
-                            if callable(save):
-                                try:
-                                    save()
-                                except Exception:  # noqa: BLE001 保存失败不影响本轮回复
-                                    pass
+                    if not got:
+                        # 抢不到锁=上一条还在处理:此时若照发快路径回复,该轮问答不会入历史
+                        # (刷新/多端回显缺失),且与在途轮次并发改 raw_messages。故返回忙提示。
+                        return _reply_stream("⏳ 您的上一条消息还在处理中，请稍候再发～",
+                                             conversation=(active_id, rotated))
+                    msgs = getattr(agent, "raw_messages", None)
+                    if isinstance(msgs, list):
+                        msgs.append({"role": "user", "content": req.message})
+                        msgs.append({"role": "assistant", "content": json.dumps({
+                            "intent": fp.get("intent", "fast_path"), "confidence": 1.0,
+                            "reply": fp["reply"], "requires_human": False,
+                            "follow_up_question": None,
+                        }, ensure_ascii=False)})
+                        save = getattr(agent, "save", None)
+                        if callable(save):
+                            try:
+                                save()
+                            except Exception:  # noqa: BLE001 保存失败不影响本轮回复
+                                pass
                 return _reply_stream(fp["reply"], conversation=(active_id, rotated))
 
         # 5) 成本上限（防烧爆 API Key）
@@ -287,18 +295,20 @@ def create_app(session_manager: Optional[SessionManager] = None,
         if mm is None or not getattr(mm, "memory_enabled", False):
             return {"enabled": False, "count": 0, "facts": []}
         from app.observability.langfuse_bridge import background_trace
-        with manager.get_lock(session_id):
-            # 手动巩固的 LLM 调用也归到命名 trace 下(与 reaper 自动巩固同名)
-            with background_trace("consolidate_memory", session_id=session_id,
-                                  user_id=user_id,
-                                  input={"session_id": session_id, "trigger": "manual"}):
-                mm.consolidate_to_long_term(
-                    getattr(agent, "raw_messages", []), getattr(agent, "summary", None),
-                )
-            facts = [
-                {"content": f.content, "category": f.category, "created_at": f.created_at}
-                for f in mm.ltm.facts
-            ]
+        # 与在途 /api/chat 用同一把会话锁互斥:先在锁内快照 raw_messages(防边写边读),
+        # 再在锁外对不可变快照做慢巩固——不长期持锁阻塞用户(同 reaper 的"慢操作不持会话锁")。
+        with session_lock.guard(session_id):
+            msgs = list(getattr(agent, "raw_messages", []))
+            summ = getattr(agent, "summary", None)
+        # 手动巩固的 LLM 调用也归到命名 trace 下(与 reaper 自动巩固同名)
+        with background_trace("consolidate_memory", session_id=session_id,
+                              user_id=user_id,
+                              input={"session_id": session_id, "trigger": "manual"}):
+            mm.consolidate_to_long_term(msgs, summ)
+        facts = [
+            {"content": f.content, "category": f.category, "created_at": f.created_at}
+            for f in mm.ltm.facts
+        ]
         # 不再 close_conversation:巩固与结束会话解耦,巩固后会话继续。
         return {"enabled": True, "curation": settings.memory_curation_enabled,
                 "count": len(facts), "facts": facts, "conversation_closed": False}

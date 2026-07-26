@@ -196,12 +196,42 @@ class Settings(BaseSettings):
     # (改写能力已并入本节点,回退路径检索用原句)
     query_understanding_enabled: bool = True
 
+    # 运行环境:dev(默认,教学/本机)/ production。production 下强制安全密钥(见 verify_production_secrets)
+    environment: str = "dev"
+
     # 极简登录态(两档用户体系:先创建才可用 + 身份从签名 token 解出)
     auth_enabled: bool = True          # 关=完全回退自报 user_id(测试/教学)
     auth_secret: str = "dev-secret-change-in-prod"   # 生产必须换(env AUTH_SECRET)
     auth_token_ttl: int = 86400        # token 有效期(秒)
 
+    @property
+    def is_production(self) -> bool:
+        return (self.environment or "").strip().lower() in ("production", "prod")
+
     model_config = {"env_file": ".env"}
+
+
+# 默认密钥常量:production 下若沿用即拒绝启动(见 verify_production_secrets)
+DEFAULT_AUTH_SECRET = "dev-secret-change-in-prod"
+
+
+def verify_production_secrets(s: "Settings") -> None:
+    """production 环境的启动前置校验:鉴权开着却用默认/空密钥 → fail-closed 拒绝启动。
+
+    dev(默认)不校验,保持教学/本机零配置可跑。生产靠 ENVIRONMENT=production 触发。
+    """
+    if not s.is_production:
+        return
+    problems = []
+    if s.auth_enabled and (not s.auth_secret or s.auth_secret == DEFAULT_AUTH_SECRET):
+        problems.append("AUTH_SECRET 未设置或仍为默认值(token 可被离线伪造)")
+    if not s.admin_token:
+        problems.append("ADMIN_TOKEN 为空(管理端点将对匿名开放)")
+    if problems:
+        raise RuntimeError(
+            "生产环境安全校验未通过,拒绝启动:\n  - " + "\n  - ".join(problems)
+            + "\n请在环境变量中配置随机长密钥后重启(ENVIRONMENT=production 时强制)。"
+        )
 
 
 settings = Settings()
