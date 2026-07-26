@@ -365,8 +365,12 @@ TOOL_DEFINITIONS.append({
 })
 
 
-# 有副作用的写工具:执行前查幂等键,成功后写幂等键(防重复副作用)
-_WRITE_TOOLS = frozenset({"apply_refund", "cancel_order", "change_address", "negotiate_price"})
+# 有副作用的写工具:执行前查幂等键,成功后写幂等键(防重复副作用)。
+# 注意:negotiate_price 不在此列——它的报价依赖 DB 里逐轮递减的议价轮次 rounds,而幂等键
+# 只含 {product_id, buyer_offer} 不含 rounds;若纳入,买家反复"便宜点"(args 相同)会命中
+# 首次缓存的 counter 价、bump_bargain_state 不再执行,阶梯让价被永久冻结(redis 幂等下)。
+# 议价的多轮推进本就是期望行为,不属于"需去重的副作用",故排除。
+_WRITE_TOOLS = frozenset({"apply_refund", "cancel_order", "change_address"})
 
 
 def execute_tool(name: str, arguments: dict) -> str:

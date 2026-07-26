@@ -15,6 +15,7 @@ _ORDER_ID_RE = re.compile(r"^ORD-\d{8}-\d{3}$")
 _ORDER_ID_TOOLS = {
     "query_order", "query_logistics", "apply_refund",
     "cancel_order", "change_address",
+    "issue_invoice", "expedite_shipping",   # 同为 order_id 参数,纳入统一格式纠错护栏
 }
 
 _ORDER_ID_HINT = (

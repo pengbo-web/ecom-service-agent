@@ -38,3 +38,19 @@ def test_is_confirmation():
     assert is_confirmation("我要退款订单 ORD-1") is False        # 首次请求不是确认
     assert is_confirmation("我先问一下这个商品有货吗") is False   # 太长/非确认
     assert is_confirmation("") is False
+
+
+def test_confirm_binding_allows_long_message_with_target_order():
+    """回归:含挂起单号的确认即便超 30 字也应绑定(原长度门会误杀,致退款静默不执行)。"""
+    from app.agent.consent import confirm_targets_pending
+    from app.agent.pending import PendingAction
+    order = "ORD-20240115-001"
+    pa = PendingAction(action="refund", tool_name="apply_refund",
+                       args={"order_id": order, "reason": "x"}, message="c")
+    long_with_target = f"确认 {order} 退款吧，原因是不想要了这个商品谢谢"
+    assert len(long_with_target) > 30
+    assert confirm_targets_pending(long_with_target, pa, False) is True
+    # 提到"别的"单号仍不绑定(错目标防线不回退)
+    assert confirm_targets_pending(f"确认退 ORD-20240115-002 谢谢", pa, False) is False
+    # 无单号、仅确认词、超长 → 仍按弱路径的长度门过滤
+    assert confirm_targets_pending("确认" + "啦" * 40, pa, False) is False

@@ -65,16 +65,23 @@ def confirm_targets_pending(user_input: str, pending, explicit_confirm: bool) ->
     if explicit_confirm:
         return True
     text = (user_input or "").strip()
-    if not text or len(text) > 30:
+    if not text:
         return False
     # 大小写归一化:订单号匹配须无视大小写,否则小写他单号(如 ord-...)会绕过错目标防线
     text_up = text.upper()
     target_up = str((getattr(pending, "args", {}) or {}).get("order_id") or "").strip().upper()
-    if target_up and target_up in text_up:
-        return True                       # 提到本挂起单号 → 强绑定
-    # 提到了"别的"订单号(ORD- 格式但不是挂起单)→ 明确指向别处,不重放
+    # 提到了"别的"订单号(ORD- 格式但不是挂起单)→ 明确指向别处/意图含糊,一律不重放
+    # (错目标防线;放在最前,即使同时提到本单也按"含糊"从严处理,不误重放)
     others = [m for m in re.findall(r"ORD-\d{8}-\d{3}", text_up) if m != target_up]
     if others:
+        return False
+    # 精确挂起单号匹配:最强、最难伪造的绑定信号(16 位单号几乎不可能误含)。
+    # 即便消息偏长也放行——单号本身占 16 字,叠加确认语极易超 30 字,长度门会误杀
+    # 含单号的正常确认(如"确认 ORD-...-001 退款吧,原因是不想要了"),致退款静默不执行。
+    if target_up and target_up in text_up:
+        return True                       # 提到本挂起单号 → 强绑定
+    # 无单号、仅凭确认词的弱路径:过长消息一般不是单纯确认,用长度门过滤附带闲聊
+    if len(text) > 30:
         return False
     strong = ("确认", "确定", "同意", "就这么办", "退款吧", "成交")
     return any(w in text for w in strong)

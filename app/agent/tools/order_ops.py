@@ -19,6 +19,9 @@ def change_address(order_id: str, new_address: str) -> dict:
     order = owned_order(order_id)
     if not order:
         return {"success": False, "error": f"未找到订单 {order_id}，请核实订单号"}
+    # 新地址非空校验:模型解析失败/误传空串时,别把收货地址覆盖成空导致无法发货。
+    if not (new_address or "").strip():
+        return {"success": False, "error": "新收货地址不能为空，请提供完整的收货地址。"}
     if order["status"] not in _MUTABLE:
         return {"success": False, "error":
                 f"订单当前状态为「{order['status']}」，已进入发货流程，无法修改收货地址；"
@@ -76,9 +79,10 @@ def issue_invoice(order_id: str, title: str = "个人", tax_id: str = "") -> dic
     order = owned_order(order_id)
     if not order:
         return {"success": False, "error": f"未找到订单 {order_id}，请核实订单号"}
-    if order["status"] in ("pending", "cancelled"):
+    if order["status"] in ("pending", "cancelled", "refund_processing"):
         return {"success": False, "error":
-                f"订单当前状态为「{order['status']}」，暂不可开票（需完成支付且未取消）。"}
+                f"订单当前状态为「{order['status']}」，暂不可开票"
+                f"（需完成支付、未取消且不在退款流程中）。"}
     items = order.get("items", [])
     return {
         "success": True,

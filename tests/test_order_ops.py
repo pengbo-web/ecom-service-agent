@@ -88,3 +88,34 @@ def test_query_coupons(db):
     r = query_coupons()
     assert r["success"] is True and len(r["coupons"]) >= 1
     assert all("code" in c and "discount" in c for c in r["coupons"])
+
+
+# ---- 回归:取消后不得二次退款(双重退款防线)----
+def test_refund_blocked_after_cancel(db):
+    from app.agent.tools.refund import apply_refund
+    with consent_scope({"cancel_order"}):
+        assert cancel_order("ORD-P")["success"] is True
+    assert db.get_order("ORD-P")["status"] == "cancelled"
+    # 已取消订单再退款:即便已授权也应被拦(cancel 已承诺原路退回),防二次退款
+    with consent_scope({"refund"}):
+        r = apply_refund("ORD-P", "不想要了")
+    assert r["success"] is False
+    assert db.get_order("ORD-P")["status"] == "cancelled"   # 未被改成 refund_processing
+
+
+# ---- 回归:空新地址不得覆盖收货地址 ----
+def test_change_address_rejects_empty(db):
+    with consent_scope({"change_address"}):
+        r = change_address("ORD-P", "   ")
+    assert r["success"] is False
+    assert db.get_order("ORD-P")["shipping_address"] is None
+
+
+# ---- 回归:退款中订单不得开具全额发票 ----
+def test_issue_invoice_blocked_for_refunding(db):
+    from app.agent.tools.refund import apply_refund
+    with consent_scope({"refund"}):
+        assert apply_refund("ORD-S", "尺码不合")["success"] is True
+    assert db.get_order("ORD-S")["status"] == "refund_processing"
+    r = issue_invoice("ORD-S", title="某公司")
+    assert r["success"] is False   # 退款流程中禁开票,防金额/凭证不一致

@@ -31,7 +31,8 @@ def test_empty_order_id_rejected():
 
 def test_all_order_tools_validated():
     for tool in ("query_order", "query_logistics", "apply_refund",
-                 "cancel_order", "change_address"):
+                 "cancel_order", "change_address",
+                 "issue_invoice", "expedite_shipping"):
         args = {"order_id": "bad"}
         if tool == "apply_refund":
             args["reason"] = "x"

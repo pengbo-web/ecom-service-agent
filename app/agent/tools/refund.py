@@ -13,6 +13,11 @@ def apply_refund(order_id: str, reason: str) -> dict:
     if order["status"] == "refund_processing":
         return {"success": False, "error": "该订单已有退款申请正在处理中，请耐心等待"}
 
+    # 已取消的订单在 cancel_order 时已承诺"款项原路退回",此处再退即二次退款,拦下。
+    if order["status"] == "cancelled":
+        return {"success": False, "error":
+                "该订单已取消，款项将原路退回（1-3 个工作日到账），无需重复申请退款"}
+
     # 前置授权门:退款是涉钱不可逆动作,未获本轮确认则不执行
     if not is_allowed("refund"):
         return need_confirm_result(

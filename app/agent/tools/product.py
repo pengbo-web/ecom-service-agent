@@ -2,11 +2,13 @@ from app.db import get_db
 
 
 def _searchable_text(product: dict) -> str:
+    # name/category 在 DB schema 中可为 NULL(category 尤甚);直接索引会 TypeError,
+    # 用 (... or "") 兜底,防单个脏数据行让整个模糊搜索崩溃。
     return " ".join([
-        product["name"],
-        product["category"],
-        product.get("description", ""),
-        " ".join(str(v) for v in product.get("specs", {}).values()),
+        product.get("name") or "",
+        product.get("category") or "",
+        product.get("description") or "",
+        " ".join(str(v) for v in (product.get("specs") or {}).values()),
     ]).lower()
 
 

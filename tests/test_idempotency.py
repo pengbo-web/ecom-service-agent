@@ -76,3 +76,25 @@ def test_need_confirm_not_cached(db):
     with consent_scope({"cancel_order"}):
         r_ok = json.loads(execute_tool("cancel_order", {"order_id": "ORD-20240101-001"}))
     assert r_ok["success"] is True      # need_confirm 没被缓存,授权后正常执行
+
+
+def test_negotiate_price_not_frozen_by_idempotency(db, monkeypatch):
+    """回归:开幂等时,连续同参 negotiate_price 不被首次结果冻结——议价须逐轮推进。"""
+    from app.config.settings import settings
+    monkeypatch.setattr(settings, "bargain_enabled", True)
+    # 播一个可议价商品
+    conn = db.connect()
+    conn.execute(
+        "INSERT INTO products (product_id, name, category, price, stock, description, specs, floor_price) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("PB", "议价商品", "cat", 1000.0, 5, "", "{}", 800.0),
+    )
+    conn.commit(); conn.close()
+
+    set_idempotency_store(RedisIdempotencyStore(fakeredis.FakeStrictRedis()))
+    set_current_session("sess-bargain")
+    r1 = json.loads(execute_tool("negotiate_price", {"product_id": "PB"}))
+    r2 = json.loads(execute_tool("negotiate_price", {"product_id": "PB"}))
+    assert r1["success"] and r2["success"]
+    assert r2["round"] == r1["round"] + 1        # 轮次推进,未被幂等缓存冻结
+    assert r2["suggested_price"] <= r1["suggested_price"]   # 阶梯让价继续生效
