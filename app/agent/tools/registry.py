@@ -375,6 +375,12 @@ def execute_tool(name: str, arguments: dict) -> str:
     if not func:
         return json.dumps({"error": f"未知工具: {name}"}, ensure_ascii=False)
 
+    # 运行时硬校验:非法参数(如编造的订单号)在进业务逻辑前挡回并回传纠错
+    from app.agent.tools.validation import validate_tool_args
+    _verr = validate_tool_args(name, arguments)
+    if _verr is not None:
+        return json.dumps({"success": False, "error": _verr}, ensure_ascii=False)
+
     idem = None
     if name in _WRITE_TOOLS:
         from app.session.idempotency import get_idempotency_store, idempotency_key

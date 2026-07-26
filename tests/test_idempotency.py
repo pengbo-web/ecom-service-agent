@@ -39,7 +39,7 @@ def db(tmp_path):
     d.init_schema()
     conn = d.connect()
     conn.execute("INSERT INTO orders (order_id, user, status, total, created_at) VALUES (?,?,?,?,?)",
-                 ("ORD-P", "u", "pending", 100.0, "2024-01-01"))
+                 ("ORD-20240101-001", "u", "pending", 100.0, "2024-01-01"))
     conn.commit(); conn.close()
     set_db(d)
     return d
@@ -49,8 +49,8 @@ def test_cancel_twice_dedup_returns_cached_success(db):
     set_idempotency_store(RedisIdempotencyStore(fakeredis.FakeStrictRedis()))
     set_current_session("sess-A")
     with consent_scope({"cancel_order"}):
-        r1 = json.loads(execute_tool("cancel_order", {"order_id": "ORD-P"}))
-        r2 = json.loads(execute_tool("cancel_order", {"order_id": "ORD-P"}))
+        r1 = json.loads(execute_tool("cancel_order", {"order_id": "ORD-20240101-001"}))
+        r2 = json.loads(execute_tool("cancel_order", {"order_id": "ORD-20240101-001"}))
     assert r1["success"] is True
     assert r2 == r1                     # 第二次命中幂等缓存 → 同一成功结果
     assert "已取消" not in r2.get("error", "")   # 不是"已取消"报错(没重复执行到 guard)
@@ -60,8 +60,8 @@ def test_without_idempotency_second_cancel_errors(db):
     set_idempotency_store(NullIdempotencyStore())   # 不去重
     set_current_session("sess-B")
     with consent_scope({"cancel_order"}):
-        r1 = json.loads(execute_tool("cancel_order", {"order_id": "ORD-P"}))
-        r2 = json.loads(execute_tool("cancel_order", {"order_id": "ORD-P"}))
+        r1 = json.loads(execute_tool("cancel_order", {"order_id": "ORD-20240101-001"}))
+        r2 = json.loads(execute_tool("cancel_order", {"order_id": "ORD-20240101-001"}))
     assert r1["success"] is True
     assert r2.get("success") is False   # 无幂等:第二次真跑到 guard,返回"已取消"错误
 
@@ -71,8 +71,8 @@ def test_need_confirm_not_cached(db):
     store = RedisIdempotencyStore(fakeredis.FakeStrictRedis())
     set_idempotency_store(store)
     set_current_session("sess-C")
-    r_nc = json.loads(execute_tool("cancel_order", {"order_id": "ORD-P"}))   # 无 consent
+    r_nc = json.loads(execute_tool("cancel_order", {"order_id": "ORD-20240101-001"}))   # 无 consent
     assert r_nc.get("need_confirm") is True
     with consent_scope({"cancel_order"}):
-        r_ok = json.loads(execute_tool("cancel_order", {"order_id": "ORD-P"}))
+        r_ok = json.loads(execute_tool("cancel_order", {"order_id": "ORD-20240101-001"}))
     assert r_ok["success"] is True      # need_confirm 没被缓存,授权后正常执行
