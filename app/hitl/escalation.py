@@ -55,7 +55,7 @@ def should_escalate(intent: str, confidence: float, requires_human: bool,
     if confidence < threshold:
         reasons.append(f"置信度过低({confidence:.2f} < {threshold})")
     if intent in sensitive_intents:
-        reasons.append(f"敏感意图({intent})")
+        reasons.append(f"敏感意图({ {'complaint': '投诉'}.get(intent, intent) })")
     hit = [k for k in ESCALATION_KEYWORDS if k in (user_input or "")]
     if hit:
         reasons.append(f"用户明确要求投诉/维权（关键词: {'、'.join(hit)}）")

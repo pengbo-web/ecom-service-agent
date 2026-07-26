@@ -43,7 +43,8 @@ def aperag_search(query: str) -> list[dict] | None:
         for it in items:
             src = str(it.get("source") or "")
             rows.append({
-                "doc": src.replace("\\", "/").rsplit("/", 1)[-1] or "知识库",
+                # 去 .md 后缀:与本地后端(stem)统一,客户可见的来源标注不带文件后缀
+                "doc": (src.replace("\\", "/").rsplit("/", 1)[-1] or "知识库").removesuffix(".md"),
                 "section": str(it.get("recall_type") or ""),
                 "score": float(it.get("score") or 0.0),
                 "text": str(it.get("content") or ""),

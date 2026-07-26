@@ -35,7 +35,7 @@ def test_maps_items_to_standard_rows(monkeypatch):
 
     monkeypatch.setattr(ext.httpx, "post", fake_post)
     rows = aperag_search("退货政策")
-    assert rows == [{"doc": "退换货政策.md", "section": "vector_search",
+    assert rows == [{"doc": "退换货政策", "section": "vector_search",   # .md 已去后缀(来源标注观感)
                      "score": 0.87, "text": "签收7天内可退"}]
     assert "col_test/searches" in captured["url"]
     assert captured["headers"]["Authorization"] == "Bearer sk-test"
