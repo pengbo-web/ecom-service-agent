@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -47,6 +49,11 @@ class LongTermMemory:
         self.facts: list[MemoryFact] = []
         self.interaction_summaries: list[dict] = []
         self._fts: MemoryFtsStore | None = None
+        # 后台记忆线程(extract_and_save)、主线程工具(save_user_memory)、主线程读(build_prompt_section)
+        # 会并发触碰 self.facts;用可重入锁串行化所有 facts 变更/落盘/遍历,防
+        # "list changed size during iteration" 崩溃与事实丢失。RLock 容忍
+        # extract_and_save→_merge_facts→add_facts 的嵌套获取。
+        self._lock = threading.RLock()
 
     @property
     def memory_path(self) -> Path:
@@ -61,7 +68,9 @@ class LongTermMemory:
             return None
         if self._fts is None:
             self.memory_dir.mkdir(parents=True, exist_ok=True)
-            self._fts = MemoryFtsStore(str(self.memory_dir / "memory_fts.db"))
+            # 共享单例:同一 db 文件全进程共用一个连接+锁,消除多实例并发写的 "database is locked"
+            from app.agent.memory.fts_store import get_fts_store
+            self._fts = get_fts_store(str(self.memory_dir / "memory_fts.db"))
         return self._fts
 
     def load(self) -> None:
@@ -74,38 +83,50 @@ class LongTermMemory:
         except (json.JSONDecodeError, OSError):
             return
 
-        for item in data.get("facts", []):
-            self.facts.append(MemoryFact(
-                content=item["content"],
-                category=item.get("category", "other"),
-                created_at=item.get("created_at", ""),
-                source_session=item.get("source_session", ""),
-            ))
-        self.interaction_summaries = data.get("interaction_summaries", [])
+        with self._lock:
+            for item in data.get("facts", []):
+                self.facts.append(MemoryFact(
+                    content=item["content"],
+                    category=item.get("category", "other"),
+                    created_at=item.get("created_at", ""),
+                    source_session=item.get("source_session", ""),
+                ))
+            self.interaction_summaries = data.get("interaction_summaries", [])
 
     def save(self) -> None:
         """持久化到 JSON 文件（原子写入）。"""
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
-        payload = {
-            "version": 1,
-            "user_id": self.user_id,
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-            "facts": [asdict(f) for f in self.facts],
-            "interaction_summaries": self.interaction_summaries,
-        }
+        with self._lock:
+            payload = {
+                "version": 1,
+                "user_id": self.user_id,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                "facts": [asdict(f) for f in self.facts],
+                "interaction_summaries": self.interaction_summaries,
+            }
+            facts_snapshot = list(self.facts)
 
-        tmp_path = self.memory_path.with_suffix(".json.tmp")
-        with tmp_path.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, self.memory_path)
+        # tmp 名带唯一后缀:同一用户多个实例/线程并发 save 时各写各的 tmp,
+        # 避免同名 tmp 内容交错被 os.replace 提升成损坏文件(→ 下次 load 解析失败=记忆清零)。
+        tmp_path = self.memory_path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            with tmp_path.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, self.memory_path)   # 原子替换,last-writer-wins(不损坏)
+        finally:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
 
         # 全量重同步 FTS 索引:facts 列表可能被 curate 整体替换,增量同步易漂移,
         # n<=max_facts(<=50)时全量重建成本可忽略。
         fts = self._ensure_fts()
         if fts is not None:
             fts.clear(self.user_id)
-            for fact in self.facts:
+            for fact in facts_snapshot:
                 fact_id = hashlib.md5(fact.content.encode("utf-8")).hexdigest()[:12]
                 fts.index(self.user_id, fact_id, fact.content)
 
@@ -115,23 +136,25 @@ class LongTermMemory:
         返回值不能用"前后长度比较"替代:满 max_facts 时新增会触发裁剪,
         长度不变但确实写入了(淘汰最老一条)——长度比较会误报"已存在"。
         """
-        existing_contents = {f.content.lower() for f in self.facts}
-        added = 0
-        for fact in new_facts:
-            if fact.content.lower() not in existing_contents:
-                self.facts.append(fact)
-                existing_contents.add(fact.content.lower())
-                added += 1
+        with self._lock:
+            existing_contents = {f.content.lower() for f in self.facts}
+            added = 0
+            for fact in new_facts:
+                if fact.content.lower() not in existing_contents:
+                    self.facts.append(fact)
+                    existing_contents.add(fact.content.lower())
+                    added += 1
 
-        if len(self.facts) > self.max_facts:
-            self.facts = self.facts[-self.max_facts:]
-        return added
+            if len(self.facts) > self.max_facts:
+                self.facts = self.facts[-self.max_facts:]
+            return added
 
     def add_interaction_summary(self, summary: str) -> None:
-        self.interaction_summaries.append({
-            "summary": summary,
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-        })
+        with self._lock:
+            self.interaction_summaries.append({
+                "summary": summary,
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            })
 
     def extract_and_save(
         self,
@@ -161,7 +184,8 @@ class LongTermMemory:
             from app.agent.memory.curation import curate_facts
             curated = curate_facts(client, model, self.facts, new_facts, self.max_facts)
             if curated is not None:
-                self.facts = curated
+                with self._lock:
+                    self.facts = curated
                 return
         self.add_facts(new_facts)
 
@@ -185,17 +209,22 @@ class LongTermMemory:
         （命中事实，按召回顺序）与"其他历史记忆"（其余事实，原顺序，
         不与命中段重复）两段。
         """
-        if not self.facts and not self.interaction_summaries:
+        # 快照 facts/summaries,避免遍历期间被后台线程 append/重绑(list changed size during iteration)
+        with self._lock:
+            facts = list(self.facts)
+            summaries = list(self.interaction_summaries)
+
+        if not facts and not summaries:
             return None
 
         parts = []
-        if self.facts:
+        if facts:
             hit_contents = self.recall(query, top_k=5) if query else []
 
             hit_facts: list[MemoryFact] = []
             if hit_contents:
                 by_content: dict[str, MemoryFact] = {}
-                for f in self.facts:
+                for f in facts:
                     by_content.setdefault(f.content, f)
                 seen: set[str] = set()
                 for content in hit_contents:
@@ -206,7 +235,7 @@ class LongTermMemory:
 
             if hit_facts:
                 hit_set = {f.content for f in hit_facts}
-                other_facts = [f for f in self.facts if f.content not in hit_set]
+                other_facts = [f for f in facts if f.content not in hit_set]
 
                 relevant_text = "\n".join(
                     f"- [{f.category}] {f.content}" for f in hit_facts
@@ -220,12 +249,12 @@ class LongTermMemory:
                     parts.append(f"其他历史记忆：\n{other_text}")
             else:
                 facts_text = "\n".join(
-                    f"- [{f.category}] {f.content}" for f in self.facts
+                    f"- [{f.category}] {f.content}" for f in facts
                 )
                 parts.append(f"该用户的历史记忆（来自过往会话）：\n{facts_text}")
 
-        if self.interaction_summaries:
-            recent = self.interaction_summaries[-3:]
+        if summaries:
+            recent = summaries[-3:]
             summaries_text = "\n".join(f"- {s['summary']}" for s in recent)
             parts.append(f"最近的交互记录：\n{summaries_text}")
 
@@ -233,8 +262,9 @@ class LongTermMemory:
 
     def reset(self) -> None:
         """清空该用户的长期记忆（文件也删除，FTS 索引也清空）。"""
-        self.facts = []
-        self.interaction_summaries = []
+        with self._lock:
+            self.facts = []
+            self.interaction_summaries = []
         if self.memory_path.exists():
             self.memory_path.unlink()
         fts = self._ensure_fts()

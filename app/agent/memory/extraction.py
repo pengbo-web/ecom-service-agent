@@ -64,7 +64,7 @@ def extract_short_term_facts(
             {"role": "user", "content": transcript},
         ],
     )
-    raw = response.choices[0].message.content.strip()
+    raw = (response.choices[0].message.content or "").strip()   # 部分兼容模型可能返回 None
 
     if "无新信息" in raw:
         return existing_facts
@@ -118,7 +118,7 @@ def extract_long_term_facts(
             {"role": "user", "content": "\n\n".join(parts)},
         ],
     )
-    raw = response.choices[0].message.content.strip()
+    raw = (response.choices[0].message.content or "").strip()   # 兼容模型返回 None content
 
     try:
         data = json.loads(raw)

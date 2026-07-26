@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import uuid
 from pathlib import Path
 
 from app.agent.rag.backends.base import RetrievedChunk, VectorBackend
@@ -50,9 +52,18 @@ class NumpyBackend(VectorBackend):
             "chunks": [c.to_dict() for c in chunks],
             "vectors": vectors,
         }
-        self._index_path.write_text(
-            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-        )
+        # 原子写:先写唯一临时文件再 os.replace,防构建中途被 kill/并发写留下截断的 JSON
+        # (损坏后每次 search/load 都 JSONDecodeError 崩溃且无自愈)。对齐 long_term.save。
+        tmp_path = self._index_path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            os.replace(tmp_path, self._index_path)
+        finally:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
 
     def search(self, query_vector: list[float], top_k: int) -> list[RetrievedChunk]:
         if not self._chunks:

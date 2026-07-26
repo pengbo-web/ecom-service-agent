@@ -37,6 +37,9 @@ class MemoryFtsStore:
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._lock = threading.Lock()
         self._conn.execute("PRAGMA journal_mode=WAL")
+        # busy_timeout:即便有别的连接在写,阻塞等待而非立刻抛 "database is locked"
+        # (跨实例共享单例已消除多连接,此为二次兜底)
+        self._conn.execute("PRAGMA busy_timeout=5000")
 
         self.fts5_available = self._probe_fts5()
         if self.fts5_available:
@@ -147,3 +150,22 @@ class MemoryFtsStore:
 
     def close(self) -> None:
         self._conn.close()
+
+
+# ── 进程级共享单例:同一 db 文件全进程共用一个连接+一把锁 ──
+# 原先每个 LongTermMemory 各建一个 MemoryFtsStore(独立连接/独立锁),多用户 agent
+# 并发 save() 时多写者写同一 db 文件,WAL 只允许单写者 → "database is locked"。
+# 共享单例后所有写都串行到同一把锁上,彻底消除跨实例写冲突(对齐 profile.py 的单例)。
+_stores: dict[str, "MemoryFtsStore"] = {}
+_stores_guard = threading.Lock()
+
+
+def get_fts_store(db_path: str) -> "MemoryFtsStore":
+    """按 db_path 取共享的 MemoryFtsStore(全进程单例);首次调用时建。"""
+    key = str(Path(db_path).resolve())
+    with _stores_guard:
+        store = _stores.get(key)
+        if store is None:
+            store = MemoryFtsStore(db_path)
+            _stores[key] = store
+        return store
