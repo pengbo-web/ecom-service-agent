@@ -103,7 +103,10 @@ class SessionManager:
                         agent.close()   # → memory_manager.consolidate_to_long_term(...)
                 except Exception:
                     pass
-            self._archiver.archive(session_id, agent)   # 冷归档(best-effort)
+            try:
+                self._archiver.archive(session_id, agent)   # 冷归档(best-effort)
+            except Exception:
+                pass    # 归档失败不得跳过下方 eviction(名副其实的 best-effort)
             # 默认不自动结束会话:仅巩固记忆+回收内存,会话保持 open,
             # 下次打开由 open_or_reuse 复用原会话。开 conversation_idle_close_enabled
             # 才置 closed(工单式,空闲翻篇)。
