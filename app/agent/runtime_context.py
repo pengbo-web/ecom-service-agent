@@ -12,6 +12,11 @@ from typing import Optional
 _current_user: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "current_user", default=None)
 
+# 当前用户的 hmdp 登录 token(接 hmdp 真实数据源时,MCP 侧调 hmdp 登录保护接口需要它)。
+# 与 current_user 同模式:每轮刷新;跨进程经 MCP 的 ctx_token 保留参数透传。
+_current_token: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_token", default=None)
+
 
 def set_current_user(user_id: Optional[str]) -> None:
     _current_user.set(user_id)
@@ -19,3 +24,11 @@ def set_current_user(user_id: Optional[str]) -> None:
 
 def get_current_user() -> Optional[str]:
     return _current_user.get()
+
+
+def set_current_token(token: Optional[str]) -> None:
+    _current_token.set(token)
+
+
+def get_current_token() -> Optional[str]:
+    return _current_token.get()

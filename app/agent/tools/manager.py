@@ -87,8 +87,9 @@ class ToolManager:
         if source == "mcp" and self._mcp_client:
             # 跨进程身份透传:MCP 工具在独立 server 进程执行,ContextVar 传不过去,
             # 用保留参数把当前用户带过去(server 端 set_current_user 后 owned_order 才能校验)。
-            from app.agent.runtime_context import get_current_user
-            args = {**arguments, "ctx_user_id": get_current_user() or ""}
+            from app.agent.runtime_context import get_current_user, get_current_token
+            args = {**arguments, "ctx_user_id": get_current_user() or "",
+                    "ctx_token": get_current_token() or ""}
             result = self._mcp_client.call_tool(name, args)
         elif source == "local":
             result = local_execute_tool(name, arguments)
