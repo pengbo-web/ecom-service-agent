@@ -157,9 +157,16 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.post("/api/chat")
     def chat(req: ChatRequest, request: Request):
-        # 0) 身份解析:门控开时必须从 token 解出(缺/坏 token → 401 最早返回),
-        #    覆盖请求体自报的 user_id,防冒充。
-        req.user_id = _resolve_user(request, req.user_id)
+        # 0) 身份解析:优先 hmdp 身份(接 hmdp 数据源时前端传 hmdp_token)——解出即以 hmdp userId
+        #    为准(与 tb_order.user_id 同命名空间,MCP 侧凭它做归属);否则回退 agent 自有 token 鉴权。
+        _hmdp_uid = None
+        if getattr(req, "hmdp_token", ""):
+            from app.api.hmdp_identity import resolve_hmdp_user
+            _hmdp_uid = resolve_hmdp_user(req.hmdp_token)
+        if _hmdp_uid:
+            req.user_id = _hmdp_uid
+        else:
+            req.user_id = _resolve_user(request, req.user_id)
 
         # 1) 限流（防刷）:auth 开=按已鉴权 user_id(不可伪造);auth 关=按 session_id
         #    (自报 user_id 默认恒为 "default",若按它限流则所有匿名用户共用一个桶、互相拖累;
@@ -224,7 +231,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 for event in run_agent_streaming(
                     agent, req.message, tracer=tracer,
                     session_id=req.session_id, guard_pipeline=guard_pipeline,
-                    hitl=hitl, confirm=req.confirm,
+                    hitl=hitl, confirm=req.confirm, hmdp_token=req.hmdp_token,
                 ):
                     yield _sse_frame(event)
 

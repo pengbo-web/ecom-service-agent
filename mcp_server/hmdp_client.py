@@ -13,17 +13,30 @@ class HmdpClient:
     def _headers(self, token):
         return {"authorization": token} if token else {}
 
+    @staticmethod
+    def _safe(resp) -> dict:
+        """把 httpx 响应安全解析成 dict:401(空 body)/5xx(HTML)/非 JSON 一律降级成
+        hmdp 风格的 {success:false,errorMsg}(而非抛异常),让上层工具优雅返回错误。"""
+        if resp.status_code == 401:
+            return {"success": False, "errorMsg": "未登录或登录已过期"}
+        try:
+            data = resp.json()
+        except (ValueError, TypeError):
+            return {"success": False, "errorMsg": f"hmdp 返回异常({resp.status_code})"}
+        return data if isinstance(data, dict) else {"success": False, "errorMsg": "hmdp 返回格式异常"}
+
+    def _call(self, method: str, path: str, **kw) -> dict:
+        try:
+            resp = httpx.request(method, self.base_url + path, timeout=self.timeout, **kw)
+        except httpx.HTTPError as e:
+            return {"success": False, "errorMsg": f"无法连接 hmdp:{e.__class__.__name__}"}
+        return self._safe(resp)
+
     def get_json(self, path: str, params: dict | None = None, token: str | None = None) -> dict:
-        r = httpx.get(self.base_url + path, params=params,
-                      headers=self._headers(token), timeout=self.timeout)
-        return r.json()
+        return self._call("GET", path, params=params, headers=self._headers(token))
 
     def post_json(self, path: str, body: dict | None = None, token: str | None = None) -> dict:
-        r = httpx.post(self.base_url + path, json=body or {},
-                       headers=self._headers(token), timeout=self.timeout)
-        return r.json()
+        return self._call("POST", path, json=body or {}, headers=self._headers(token))
 
     def put_json(self, path: str, body: dict | None = None, token: str | None = None) -> dict:
-        r = httpx.put(self.base_url + path, json=body or {},
-                      headers=self._headers(token), timeout=self.timeout)
-        return r.json()
+        return self._call("PUT", path, json=body or {}, headers=self._headers(token))

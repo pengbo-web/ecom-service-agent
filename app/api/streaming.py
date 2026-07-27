@@ -27,7 +27,8 @@ def _build_confirm_reply(action: str, result: dict) -> str:
 
 def run_agent_streaming(agent, user_input: str, tracer=None,
                         session_id: str = "", guard_pipeline=None,
-                        hitl=None, confirm: bool = False) -> Iterator[dict]:
+                        hitl=None, confirm: bool = False,
+                        hmdp_token: str = "") -> Iterator[dict]:
     q: "queue.Queue" = queue.Queue()
 
     # 本轮授权的风险动作:显式 confirm 标志,或用户这轮说了确认语(退款/成交等才放行)
@@ -208,6 +209,10 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
 
     def worker():
         from contextlib import nullcontext
+        # hmdp 凭据透传:在 worker 线程(ContextVar 按线程)设当前用户的 hmdp token,
+        # 供 MCP 侧调 hmdp 登录保护接口(/order/**)携带;无则不影响公开接口。
+        from app.agent.runtime_context import set_current_token
+        set_current_token(hmdp_token or None)
         real_client = getattr(agent, "client", None)
         agent.event_sink = sink
         try:

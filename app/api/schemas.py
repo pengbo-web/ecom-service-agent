@@ -6,6 +6,7 @@ class ChatRequest(BaseModel):
     message: str
     confirm: bool = False   # 本轮是否授权执行风险动作(退款/成交),前端确认按钮置 true
     user_id: str = "default"   # 用户身份:长期记忆按 user_id 隔离(一人一档)
+    hmdp_token: str = ""    # 接 hmdp 数据源时,前端传来的 hmdp 登录 token(解出 hmdp userId + 透传给 MCP 调 hmdp)
 
 
 class ResetRequest(BaseModel):
