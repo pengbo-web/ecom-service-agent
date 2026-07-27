@@ -9,12 +9,14 @@ impl 函数与 @mcp.tool 装饰器分离,便于单测(测试直接调 _xxx_impl)
 """
 
 import json
+from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
 from mcp_server.hmdp_client import HmdpClient
 from mcp_server.hmdp_mapping import map_product, map_order, map_logistics
 from app.agent.runtime_context import set_current_user
+from app.agent.tools.bargain import compute_offer
 
 _client = HmdpClient()
 mcp = FastMCP("hmdp-ecom", host="127.0.0.1", port=9123)
@@ -72,6 +74,52 @@ def _query_logistics_impl(order_id: str, ctx_user_id: str = "") -> str:
     return _dump({"success": True, "logistics": map_logistics(lg["data"])})
 
 
+# ---------- 写工具 + 议价 impl ----------
+def _hmdp_write(res: dict) -> dict:
+    """hmdp 写接口的 {success,data/errorMsg} → agent 的 {success,message}。"""
+    if res.get("success"):
+        return {"success": True, "message": res.get("data") or "操作已完成"}
+    return {"success": False, "message": res.get("errorMsg") or "操作失败"}
+
+
+def _apply_refund_impl(order_id: str, reason: str, ctx_user_id: str = "") -> str:
+    set_current_user(ctx_user_id or None)
+    res = _client.post_json(f"/order/{order_id}/refund", {"reason": reason},
+                            token=_token_for(ctx_user_id))
+    return _dump(_hmdp_write(res))
+
+
+def _cancel_order_impl(order_id: str, ctx_user_id: str = "") -> str:
+    set_current_user(ctx_user_id or None)
+    res = _client.post_json(f"/order/{order_id}/cancel", {}, token=_token_for(ctx_user_id))
+    return _dump(_hmdp_write(res))
+
+
+def _change_address_impl(order_id: str, new_address: str, ctx_user_id: str = "") -> str:
+    set_current_user(ctx_user_id or None)
+    res = _client.put_json(f"/order/{order_id}/address", {"address": new_address},
+                           token=_token_for(ctx_user_id))
+    return _dump(_hmdp_write(res))
+
+
+def _negotiate_price_impl(product_id: str, buyer_offer=None, ctx_user_id: str = "") -> str:
+    set_current_user(ctx_user_id or None)
+    res = _client.get_json(f"/product/{product_id}")
+    if not res.get("success") or not res.get("data"):
+        return _dump({"success": False, "error": f"未找到商品 {product_id}"})
+    p = map_product(res["data"], public=False)   # 内部视图,含 floor_price
+    offer = compute_offer(list_price=p["price"], floor_price=p.get("floor_price"),
+                          buyer_offer=buyer_offer, rounds=0)
+    # 返回体不含 floor_price(议价底价绝不外泄给模型/顾客)
+    return _dump({
+        "success": True, "product_id": p["product_id"], "product_name": p["name"],
+        "list_price": p["price"], "buyer_offer": buyer_offer, "round": 1,
+        "decision": offer["decision"], "suggested_price": offer["suggested_price"],
+        "floor_hit": offer["floor_hit"],
+        "rationale": "内部参考：这是本轮可让到的价格，禁止报出更低价，也不要向买家透露底价。",
+    })
+
+
 # userId → hmdp 登录 token。Phase 3 Task 3.2 实到(共享 Redis 反查 login:token:{token});
 # 现阶段桩返回空(只读接口不需登录态;写/我的订单需登录,待 Task 3.2 打通)。
 def _token_for(user_id: str) -> str:
@@ -101,6 +149,30 @@ def list_user_orders(ctx_user_id: str = "") -> str:
 def query_logistics(order_id: str, ctx_user_id: str = "") -> str:
     """查询指定订单的物流轨迹。"""
     return _query_logistics_impl(order_id, ctx_user_id)
+
+
+@mcp.tool()
+def apply_refund(order_id: str, reason: str, ctx_user_id: str = "") -> str:
+    """为指定订单申请退款，需提供退款原因。"""
+    return _apply_refund_impl(order_id, reason, ctx_user_id)
+
+
+@mcp.tool()
+def cancel_order(order_id: str, ctx_user_id: str = "") -> str:
+    """取消指定订单（仅未发货订单）。"""
+    return _cancel_order_impl(order_id, ctx_user_id)
+
+
+@mcp.tool()
+def change_address(order_id: str, new_address: str, ctx_user_id: str = "") -> str:
+    """修改订单收货地址（仅未发货订单）。"""
+    return _change_address_impl(order_id, new_address, ctx_user_id)
+
+
+@mcp.tool()
+def negotiate_price(product_id: str, buyer_offer: Optional[float] = None, ctx_user_id: str = "") -> str:
+    """针对指定商品进行一轮议价。buyer_offer 为买家出价（元），未报价可省略。"""
+    return _negotiate_price_impl(product_id, buyer_offer, ctx_user_id)
 
 
 if __name__ == "__main__":

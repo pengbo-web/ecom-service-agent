@@ -44,3 +44,38 @@ def test_query_order_not_found():
     with patch.object(srv._client, "get_json", return_value={"success": False, "data": None}):
         out = json.loads(srv._query_order_impl("ORD-x", ctx_user_id="1"))
     assert out["success"] is False
+
+
+# ---- Task 2.3: 写工具 + 议价 ----
+def test_apply_refund_maps_hmdp_result():
+    with patch.object(srv._client, "post_json",
+                      return_value={"success": True, "data": "退款申请已提交，预计1-3个工作日审核"}):
+        out = json.loads(srv._apply_refund_impl("ORD-1", "不想要了", ctx_user_id="1"))
+    assert out["success"] is True and "退款" in out["message"]
+
+
+def test_apply_refund_hmdp_reject():
+    with patch.object(srv._client, "post_json",
+                      return_value={"success": False, "errorMsg": "订单已取消，款项原路退回，无需重复退款"}):
+        out = json.loads(srv._apply_refund_impl("ORD-1", "x", ctx_user_id="1"))
+    assert out["success"] is False and "已取消" in out["message"]
+
+
+def test_cancel_and_change_address():
+    with patch.object(srv._client, "post_json", return_value={"success": True, "data": "订单已取消"}):
+        c = json.loads(srv._cancel_order_impl("ORD-1", ctx_user_id="1"))
+    assert c["success"] and "取消" in c["message"]
+    with patch.object(srv._client, "put_json", return_value={"success": True, "data": "收货地址已更新"}):
+        a = json.loads(srv._change_address_impl("ORD-1", "新地址", ctx_user_id="1"))
+    assert a["success"] and "地址" in a["message"]
+
+
+def test_negotiate_price_hides_floor_and_not_below_floor():
+    prod = {"success": True, "data": {"id": 1, "title": "鞋", "category": "运动鞋",
+            "price": 89900, "floorPrice": 75000, "stock": 10, "sku": "S", "description": "d", "specs": "{}"}}
+    with patch.object(srv._client, "get_json", return_value=prod):
+        out = json.loads(srv._negotiate_price_impl("1", buyer_offer=600.0, ctx_user_id="1"))
+    assert out["success"]
+    assert "floor_price" not in out                 # 底价不外泄
+    assert out["suggested_price"] >= 750.0          # 永不破底(底价¥750)
+    assert out["product_name"] == "鞋"
