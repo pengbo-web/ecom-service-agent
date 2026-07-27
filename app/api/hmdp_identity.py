@@ -18,8 +18,11 @@ def _default_redis():
     if _redis is None:
         import redis
         from app.config.settings import settings
-        url = getattr(settings, "redis_url", None) or "redis://127.0.0.1:6379"
-        _redis = redis.from_url(url)
+        # hmdp 的 Redis 在 127.0.0.1:6379。注意:Windows 下 localhost 会先解析成 IPv6 ::1,
+        # 而 Redis 只监听 IPv4 → 连接超时,故把 localhost 归一成 127.0.0.1;并加短超时快速失败。
+        url = (getattr(settings, "redis_url", None) or "redis://127.0.0.1:6379")
+        url = url.replace("localhost", "127.0.0.1")
+        _redis = redis.from_url(url, socket_connect_timeout=2, socket_timeout=2)
     return _redis
 
 
