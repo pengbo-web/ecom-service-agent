@@ -35,6 +35,16 @@ def map_product(hp: dict, public: bool = True) -> dict:
     return out
 
 
+_STATUS_TEXT = {
+    "unpaid": "待支付", "pending": "待发货", "shipped": "已发货",
+    "delivered": "已完成", "refund_processing": "退款中", "cancelled": "已取消",
+}
+
+
+def status_text(status) -> str:
+    return _STATUS_TEXT.get(status, status or "")
+
+
 def map_order(ho: dict) -> dict:
     """hmdp 订单 → agent 订单契约(order_id/user/status/items 等)。"""
     items = [
@@ -46,6 +56,7 @@ def map_order(ho: dict) -> dict:
         "order_id": ho.get("order_no"),
         "user": str(ho.get("user_id")),
         "status": ho.get("status"),
+        "status_text": status_text(ho.get("status")),
         "total": _yuan(ho.get("total")),
         "shipping_address": ho.get("shipping_address"),
         "tracking_number": ho.get("tracking_number"),

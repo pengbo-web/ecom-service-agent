@@ -61,7 +61,8 @@ def _list_user_orders_impl(ctx_user_id: str = "", ctx_token: str = "") -> str:
         return _dump({"success": False, "error": "未识别当前用户"})
     res = _client.get_json("/order/of/me", token=_tok(ctx_token))
     orders = [map_order(o) for o in (res.get("data") or [])] if res.get("success") else []
-    brief = [{"order_id": o["order_id"], "status": o["status"], "total": o["total"]} for o in orders]
+    brief = [{"order_id": o["order_id"], "status": o["status"],
+              "status_text": o["status_text"], "total": o["total"]} for o in orders]
     return _dump({"success": True, "count": len(brief), "orders": brief})
 
 
