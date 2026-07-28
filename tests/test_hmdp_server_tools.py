@@ -79,3 +79,16 @@ def test_negotiate_price_hides_floor_and_not_below_floor():
     assert "floor_price" not in out                 # 底价不外泄
     assert out["suggested_price"] >= 750.0          # 永不破底(底价¥750)
     assert out["product_name"] == "鞋"
+
+
+def test_place_order_requires_login():
+    out = json.loads(srv._place_order_impl("1", 1, "上海", ctx_user_id="1", ctx_token=""))
+    assert out["success"] is False and "登录" in out["message"]
+
+
+def test_place_order_creates_pending_and_no_pay():
+    with patch.object(srv._client, "post_json", return_value={"success": True, "data": "ORD-20260728-777"}):
+        out = json.loads(srv._place_order_impl("1", 2, "上海南京路1号", ctx_user_id="1", ctx_token="tk"))
+    assert out["success"] is True
+    assert out["order_no"] == "ORD-20260728-777"
+    assert "待支付" in out["message"] and "代付" in out["message"]   # 明确不代付款

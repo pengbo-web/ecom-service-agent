@@ -107,6 +107,27 @@ def _change_address_impl(order_id: str, new_address: str, ctx_user_id: str = "",
     return _dump(_hmdp_write(res))
 
 
+def _place_order_impl(product_id: str, quantity=1, address: str = "",
+                      ctx_user_id: str = "", ctx_token: str = "") -> str:
+    """创建一张【待支付】订单(不代付款)。hmdp POST /order 建 status=pending 订单,无资金流动。"""
+    set_current_user(ctx_user_id or None)
+    if not ctx_token:
+        return _dump({"success": False, "message": "请先登录后再下单哦～"})
+    try:
+        qty = int(quantity)
+    except (TypeError, ValueError):
+        qty = 1
+    pid = int(product_id) if str(product_id).isdigit() else product_id
+    res = _client.post_json("/order", {"productId": pid, "quantity": qty, "address": address},
+                            token=_tok(ctx_token))
+    if res.get("success"):
+        no = res.get("data")
+        return _dump({"success": True, "order_no": no,
+                      "message": (f"已为您创建订单 {no}(状态:待支付)。"
+                                  "请到「我的订单」完成支付——支付这一步需您本人操作,小夕不会代付。")})
+    return _dump({"success": False, "message": res.get("errorMsg") or "下单失败,请稍后再试"})
+
+
 def _negotiate_price_impl(product_id: str, buyer_offer=None, ctx_user_id: str = "", ctx_token: str = "") -> str:
     set_current_user(ctx_user_id or None)
     res = _client.get_json(f"/product/{product_id}")   # 公开
@@ -165,6 +186,14 @@ def cancel_order(order_id: str, ctx_user_id: str = "", ctx_token: str = "") -> s
 def change_address(order_id: str, new_address: str, ctx_user_id: str = "", ctx_token: str = "") -> str:
     """修改订单收货地址（仅未发货订单）。"""
     return _change_address_impl(order_id, new_address, ctx_user_id, ctx_token)
+
+
+@mcp.tool()
+def place_order(product_id: str, quantity: int = 1, address: str = "",
+                ctx_user_id: str = "", ctx_token: str = "") -> str:
+    """为用户创建一张【待支付】订单(不代付款)。需商品ID、购买数量、收货地址;
+    下单前应先与用户确认商品/数量/收货地址。创建后订单为待支付状态,支付由用户本人完成。"""
+    return _place_order_impl(product_id, quantity, address, ctx_user_id, ctx_token)
 
 
 @mcp.tool()

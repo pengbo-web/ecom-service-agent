@@ -23,6 +23,7 @@ AGENT_CONFIGS = {
         "prompt": PRESALE_PROMPT,
         "tools": _COMMON_TOOLS | {
             "query_product", "query_coupons", "negotiate_price", "list_user_orders",
+            "place_order",   # 促成下单:创建待支付订单(不代付款)
         },
     },
     "midsale": {
@@ -31,6 +32,7 @@ AGENT_CONFIGS = {
         "tools": _COMMON_TOOLS | {
             "query_order", "query_logistics", "expedite_shipping",
             "change_address", "cancel_order", "list_user_orders",
+            "place_order",   # 创建待支付订单(不代付款)
         },
     },
     "aftersale": {
