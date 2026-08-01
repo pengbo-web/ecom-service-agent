@@ -399,13 +399,25 @@ def create_app(session_manager: Optional[SessionManager] = None,
         t = store.get_trace(trace_id)
         return t or {"error": "not found"}
 
+    def _admin_load_messages(session_id: str) -> list:
+        """坐席读会话消息:先热存储(peek),空则回退冷快照。与 /api/session/{id}/history 同源。"""
+        messages = manager.peek_messages(session_id)
+        if not messages and settings.session_snapshot_enabled:
+            try:
+                snap = get_db().get_session_snapshot(session_id)
+                if snap:
+                    messages = snap.get("messages") or []
+            except Exception:  # noqa: BLE001
+                pass
+        return messages or []
+
     @app.get("/api/admin/conversations", dependencies=[Depends(admin_auth)])
     def admin_conversations(limit: int = 50):
         """坐席工作台:列出所有客户的会话(跨用户)+ 人工态 + 预览。"""
         out = []
         for c in get_db().list_all_conversations(limit=limit):
             sid = c["conversation_id"]
-            msgs = manager.peek_messages(sid) or []
+            msgs = _admin_load_messages(sid)   # 热存储空时回退快照,保证列表有预览
             user_msgs = [m for m in msgs if m.get("role") == "user"]
             preview = user_msgs[-1]["content"] if user_msgs else ""
             out.append({
@@ -423,15 +435,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
     def admin_session_messages(session_id: str):
         """坐席读任意会话的气泡(管理网关已控权限,不做客户归属校验)。"""
         from app.api.history import reconstruct_bubbles
-        messages = manager.peek_messages(session_id)
-        if not messages and settings.session_snapshot_enabled:
-            try:
-                snap = get_db().get_session_snapshot(session_id)
-                if snap:
-                    messages = snap.get("messages") or []
-            except Exception:  # noqa: BLE001
-                messages = messages
-        return {"session_id": session_id, "turns": reconstruct_bubbles(messages)}
+        return {"session_id": session_id,
+                "turns": reconstruct_bubbles(_admin_load_messages(session_id))}
 
     @app.post("/api/admin/session/{session_id}/reply", dependencies=[Depends(admin_auth)])
     def admin_session_reply(session_id: str, req: AgentReplyRequest):
