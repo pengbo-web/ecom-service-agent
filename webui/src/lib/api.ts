@@ -107,3 +107,33 @@ export type MemorySnapshot = {
 export function getMemory(userId: string): Promise<MemorySnapshot> {
   return getJSON<MemorySnapshot>(`/api/memory?user_id=${encodeURIComponent(userId)}`);
 }
+
+// ---- 客服工作台(坐席侧)----
+export type WbConversation = {
+  conversation_id: string; user_id: string; status: string;
+  created_at: string; manual: boolean; preview: string; turns: number;
+};
+export type WbTurn = { role: "user" | "assistant"; content: string };
+
+export async function adminListConversations(limit = 50): Promise<WbConversation[]> {
+  const r = await adminFetch(`/api/admin/conversations?limit=${limit}`);
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return (await r.json()).conversations as WbConversation[];
+}
+export async function adminGetMessages(sessionId: string): Promise<WbTurn[]> {
+  const r = await adminFetch(`/api/admin/session/${sessionId}/messages`);
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return (await r.json()).turns as WbTurn[];
+}
+export async function adminReply(sessionId: string, text: string): Promise<WbTurn[]> {
+  const r = await adminFetch(`/api/admin/session/${sessionId}/reply`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return (await r.json()).turns as WbTurn[];
+}
+export async function adminTakeover(sessionId: string): Promise<{ mode: string }> {
+  const r = await adminFetch(`/api/session/${sessionId}/takeover`, { method: "POST" });
+  return r.json();
+}
