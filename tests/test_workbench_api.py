@@ -56,3 +56,19 @@ def test_admin_human_reply_appends_bubble_and_sets_manual():
     stream = c.post("/api/chat", json={"session_id": sid, "message": "在吗", "user_id": "dave"}, headers=h)
     assert stream.status_code == 200
     assert "人工客服" in stream.text
+
+
+def test_demo_injection_only_targets_demo_user(monkeypatch):
+    from app.config.settings import settings as S
+    monkeypatch.setattr(S, "demo_mode", True)
+    monkeypatch.setattr(S, "demo_hmdp_user_id", "1")
+    c = _client()
+    # 非 demo 客户 alice 聊天:不应被注入 hmdp_token 塌缩成 "1"
+    c.post("/api/users", json={"user_id": "alice2", "name": "A"})
+    tok = c.post("/api/auth/login", json={"user_id": "alice2"}).json()["token"]
+    h = {"Authorization": "Bearer " + tok}
+    sid = c.post("/api/conversation/open", json={"user_id": "alice2"}, headers=h).json()["conversation_id"]
+    c.post("/api/chat", json={"session_id": sid, "message": "你好", "user_id": "alice2"}, headers=h)
+    conv = c.get(f"/api/admin/conversations").json()["conversations"]
+    # alice2 的会话仍归属 alice2(未被改写成 "1")
+    assert any(row["user_id"] == "alice2" for row in conv)
