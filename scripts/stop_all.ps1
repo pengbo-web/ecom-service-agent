@@ -4,6 +4,7 @@
 #>
 param([switch]$All)
 chcp 65001 > $null
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $ROOT    = Split-Path -Parent $PSScriptRoot
 $RUN_DIR = Join-Path $ROOT ".run"
 $APERAG_DIR = "D:\2026项目\ApeRAG"

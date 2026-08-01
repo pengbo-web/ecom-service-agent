@@ -8,6 +8,8 @@
   再次运行安全:已在跑的服务自动跳过(幂等)。停止:scripts\stop_all.ps1
 #>
 chcp 65001 > $null
+# 控制台中文不乱码:Write-Host 走 [Console]::OutputEncoding,必须显式设为 UTF-8
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
 # ---------- 路径配置(如目录不同,改这里) ----------
