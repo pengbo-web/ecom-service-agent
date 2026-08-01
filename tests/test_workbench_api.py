@@ -72,3 +72,9 @@ def test_demo_injection_only_targets_demo_user(monkeypatch):
     conv = c.get(f"/api/admin/conversations").json()["conversations"]
     # alice2 的会话仍归属 alice2(未被改写成 "1")
     assert any(row["user_id"] == "alice2" for row in conv)
+
+
+def test_admin_reply_unknown_session_returns_404():
+    c = _client()
+    r = c.post("/api/admin/session/c-does-not-exist/reply", json={"text": "在的"})
+    assert r.status_code == 404

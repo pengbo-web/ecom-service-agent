@@ -440,7 +440,9 @@ def create_app(session_manager: Optional[SessionManager] = None,
         if not text:
             raise HTTPException(422, "回复内容不能为空")
         conv = get_db().get_conversation(session_id)
-        uid = (conv or {}).get("user_id") or "default"
+        if conv is None:
+            raise HTTPException(404, "会话不存在")   # 不对未知会话静默建库,防误写
+        uid = conv.get("user_id") or "default"
         if hitl is not None and not hitl.manual_mode.is_manual(session_id):
             hitl.manual_mode.toggle(session_id)   # 回复即接管:转人工,AI 暂停
         agent = manager.get_or_create(session_id, uid)
