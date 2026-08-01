@@ -1,3 +1,5 @@
+import json as _json
+
 from fastapi.testclient import TestClient
 from app.api.app import create_app
 from app.api.session_manager import SessionManager
@@ -36,3 +38,21 @@ def test_admin_read_any_session_messages():
     assert r.status_code == 200
     assert r.json()["session_id"] == sid
     assert isinstance(r.json()["turns"], list)
+
+
+def test_admin_human_reply_appends_bubble_and_sets_manual():
+    c = _client()
+    c.post("/api/users", json={"user_id": "dave", "name": "Dave"})
+    tok = c.post("/api/auth/login", json={"user_id": "dave"}).json()["token"]
+    h = {"Authorization": "Bearer " + tok}
+    sid = c.post("/api/conversation/open", json={"user_id": "dave"}, headers=h).json()["conversation_id"]
+
+    r = c.post(f"/api/admin/session/{sid}/reply", json={"text": "您好,人工客服为您处理"})
+    assert r.status_code == 200
+    turns = r.json()["turns"]
+    assert turns and turns[-1] == {"role": "assistant", "content": "您好,人工客服为您处理"}
+
+    # 该会话已转人工:客户再发消息被短路(不调 AI)
+    stream = c.post("/api/chat", json={"session_id": sid, "message": "在吗", "user_id": "dave"}, headers=h)
+    assert stream.status_code == 200
+    assert "人工客服" in stream.text

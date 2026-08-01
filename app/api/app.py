@@ -10,7 +10,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.conversations import ensure_active, open_or_reuse
-from app.api.schemas import ChatRequest, CreateUserRequest, LoginRequest, OpenConversationRequest, ResetRequest
+from app.api.schemas import (AgentReplyRequest, ChatRequest, CreateUserRequest, LoginRequest,
+                              OpenConversationRequest, ResetRequest)
 from app.api.session_manager import SessionManager
 from app.api.streaming import run_agent_streaming
 from app.auth.token import sign_token, verify_token
@@ -427,6 +428,36 @@ def create_app(session_manager: Optional[SessionManager] = None,
             except Exception:  # noqa: BLE001
                 messages = messages
         return {"session_id": session_id, "turns": reconstruct_bubbles(messages)}
+
+    @app.post("/api/admin/session/{session_id}/reply", dependencies=[Depends(admin_auth)])
+    def admin_session_reply(session_id: str, req: AgentReplyRequest):
+        """坐席以人工身份回复该会话:置人工模式 + 追加 assistant 气泡并落盘。"""
+        text = (req.text or "").strip()
+        if not text:
+            raise HTTPException(422, "回复内容不能为空")
+        conv = get_db().get_conversation(session_id)
+        uid = (conv or {}).get("user_id") or "default"
+        if hitl is not None and not hitl.manual_mode.is_manual(session_id):
+            hitl.manual_mode.toggle(session_id)   # 回复即接管:转人工,AI 暂停
+        agent = manager.get_or_create(session_id, uid)
+        from app.api.history import reconstruct_bubbles
+        with session_lock.guard(session_id) as got:
+            if not got:
+                raise HTTPException(409, "该会话正在处理中,请稍后再试")
+            msgs = getattr(agent, "raw_messages", None)
+            if isinstance(msgs, list):
+                msgs.append({"role": "assistant", "content": json.dumps({
+                    "intent": "human_agent", "confidence": 1.0, "reply": text,
+                    "requires_human": False, "follow_up_question": None,
+                }, ensure_ascii=False)})
+                save = getattr(agent, "save", None)
+                if callable(save):
+                    try:
+                        save()
+                    except Exception:  # noqa: BLE001
+                        pass
+            bubbles = reconstruct_bubbles(getattr(agent, "raw_messages", []))
+        return {"status": "ok", "turns": bubbles}
 
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():

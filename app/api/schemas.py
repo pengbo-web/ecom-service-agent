@@ -25,3 +25,7 @@ class CreateUserRequest(BaseModel):
 
 class LoginRequest(BaseModel):
     user_id: str
+
+
+class AgentReplyRequest(BaseModel):
+    text: str = ""
