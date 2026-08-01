@@ -394,6 +394,26 @@ def create_app(session_manager: Optional[SessionManager] = None,
         t = store.get_trace(trace_id)
         return t or {"error": "not found"}
 
+    @app.get("/api/admin/conversations", dependencies=[Depends(admin_auth)])
+    def admin_conversations(limit: int = 50):
+        """坐席工作台:列出所有客户的会话(跨用户)+ 人工态 + 预览。"""
+        out = []
+        for c in get_db().list_all_conversations(limit=limit):
+            sid = c["conversation_id"]
+            msgs = manager.peek_messages(sid) or []
+            user_msgs = [m for m in msgs if m.get("role") == "user"]
+            preview = user_msgs[-1]["content"] if user_msgs else ""
+            out.append({
+                "conversation_id": sid,
+                "user_id": c.get("user_id"),
+                "status": c.get("status"),
+                "created_at": c.get("created_at"),
+                "manual": bool(hitl and hitl.manual_mode.is_manual(sid)),
+                "preview": preview[:60],
+                "turns": len(user_msgs),
+            })
+        return {"conversations": out}
+
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():
         return hitl.queue.list_pending() if hitl else []

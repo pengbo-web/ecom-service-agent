@@ -398,6 +398,18 @@ class Database:
         finally:
             conn.close()
 
+    def list_all_conversations(self, limit: int = 50) -> list[dict]:
+        """跨用户列会话:进行中(open)优先,再按创建时间倒序。供坐席工作台聚合。"""
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM conversations "
+                "ORDER BY (status='open') DESC, created_at DESC, rowid DESC LIMIT ?",
+                (limit,)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
     # ---------- 用户(存在性校验:先创建才可用) ----------
     def get_user(self, user_id: str) -> Optional[dict]:
         conn = self.connect()
