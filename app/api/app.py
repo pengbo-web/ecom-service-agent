@@ -414,6 +414,20 @@ def create_app(session_manager: Optional[SessionManager] = None,
             })
         return {"conversations": out}
 
+    @app.get("/api/admin/session/{session_id}/messages", dependencies=[Depends(admin_auth)])
+    def admin_session_messages(session_id: str):
+        """坐席读任意会话的气泡(管理网关已控权限,不做客户归属校验)。"""
+        from app.api.history import reconstruct_bubbles
+        messages = manager.peek_messages(session_id)
+        if not messages and settings.session_snapshot_enabled:
+            try:
+                snap = get_db().get_session_snapshot(session_id)
+                if snap:
+                    messages = snap.get("messages") or []
+            except Exception:  # noqa: BLE001
+                messages = messages
+        return {"session_id": session_id, "turns": reconstruct_bubbles(messages)}
+
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():
         return hitl.queue.list_pending() if hitl else []

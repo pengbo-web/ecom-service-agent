@@ -23,3 +23,16 @@ def test_admin_conversations_lists_across_users():
     assert resp.status_code == 200
     users = {row["user_id"] for row in resp.json()["conversations"]}
     assert {"alice", "bob"} <= users
+
+
+def test_admin_read_any_session_messages():
+    c = _client()
+    c.post("/api/users", json={"user_id": "carol", "name": "Carol"})
+    tok = c.post("/api/auth/login", json={"user_id": "carol"}).json()["token"]
+    h = {"Authorization": "Bearer " + tok}
+    sid = c.post("/api/conversation/open", json={"user_id": "carol"}, headers=h).json()["conversation_id"]
+    # 坐席可读该会话消息(即便自身非该客户),返回结构正确
+    r = c.get(f"/api/admin/session/{sid}/messages")
+    assert r.status_code == 200
+    assert r.json()["session_id"] == sid
+    assert isinstance(r.json()["turns"], list)
