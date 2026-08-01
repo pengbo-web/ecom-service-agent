@@ -102,6 +102,29 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
     },
   });
 
+  // 客户侧接收人工回复:非流式时轮询 history,发现新增气泡则重建(人工坐席消息会即时出现)
+  useEffect(() => {
+    let alive = true;
+    const timer = setInterval(async () => {
+      if (streaming) return;
+      const bubbles = await getHistory(sessionId);
+      if (!alive) return;
+      setTurns((prev) => {
+        const prevReplies = prev.filter((t) => t.reply).length;
+        const asstCount = bubbles.filter((b) => b.role === "assistant").length;
+        if (asstCount <= prevReplies) return prev;   // 无新增,保持(避免打断输入)
+        const rebuilt: Turn[] = [];
+        for (const b of bubbles) {
+          if (b.role === "user") rebuilt.push({ id: ++idRef.current, userText: b.content, activity: [] });
+          else if (rebuilt.length && !rebuilt[rebuilt.length - 1].reply) rebuilt[rebuilt.length - 1].reply = b.content;
+          else rebuilt.push({ id: ++idRef.current, userText: "", activity: [], reply: b.content });
+        }
+        return rebuilt;
+      });
+    }, 4000);
+    return () => { alive = false; clearInterval(timer); };
+  }, [sessionId, streaming]);
+
   // 「切换」= 登出 + 登录别的用户;不存在则确认后创建并登录。成功后同步展示名缓存并触发上层重开会话。
   async function onSwitchUser() {
     const target = uidDraft.trim();

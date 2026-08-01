@@ -176,11 +176,11 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.post("/api/chat")
     def chat(req: ChatRequest, request: Request):
-        # demo 模式:仅当当前登录用户就是 demo 客户时,才注入其 hmdp 身份 →
+        # demo 模式:仅当当前登录用户是 demo 客户(或其别名 1011)时,才注入其 hmdp 身份 →
         # 聊真实订单。其它客户(?user=xxx)按自身身份聊,不塌缩成同一 hmdp 身份。
-        if (settings.demo_mode and not getattr(req, "hmdp_token", "")
-                and str(req.user_id) == str(settings.demo_hmdp_user_id)):
-            req.hmdp_token = settings.demo_hmdp_token
+        _demo_tokens = {str(settings.demo_hmdp_user_id): settings.demo_hmdp_token, "1011": "demo-hmdp-token-1011"}
+        if settings.demo_mode and not getattr(req, "hmdp_token", "") and str(req.user_id) in _demo_tokens:
+            req.hmdp_token = _demo_tokens[str(req.user_id)]
         # 0) 身份解析:优先 hmdp 身份(接 hmdp 数据源时前端传 hmdp_token)——解出即以 hmdp userId
         #    为准(与 tb_order.user_id 同命名空间,MCP 侧凭它做归属);否则回退 agent 自有 token 鉴权。
         _hmdp_uid = None

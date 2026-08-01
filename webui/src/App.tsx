@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { AppShell, type View } from "@/components/AppShell";
 import { ChatView } from "@/components/ChatView";
 import { DashboardView } from "@/components/DashboardView";
-import { SeatView } from "@/components/SeatView";
+import { WorkbenchView } from "@/components/WorkbenchView";
 import { EvalView } from "@/components/EvalView";
 import { MemoryView } from "@/components/MemoryView";
 import { LoginCard } from "@/components/LoginCard";
@@ -26,12 +26,14 @@ export default function App() {
       // 零操作跳过登录卡片,直接进聊天。失败则回落到正常登录门。
       if (!getToken()) {
         const cfg = await getConfig();
-        if (cfg.demo_mode && cfg.demo_user_id) {
+        const qsUser = new URLSearchParams(location.search).get("user");
+        const demoId = qsUser || cfg.demo_user_id;   // ?user=xxx 以指定客户进入(多窗口演示并发)
+        if (cfg.demo_mode && demoId) {
           try {
-            const r = await createUser(cfg.demo_user_id, "演示用户");
+            const r = await createUser(demoId, "客户 " + demoId);
             setToken(r.token);
           } catch {
-            try { const r = await login(cfg.demo_user_id); setToken(r.token); } catch { /* 回落登录门 */ }
+            try { const r = await login(demoId); setToken(r.token); } catch { /* 回落登录门 */ }
           }
         }
       }
@@ -84,7 +86,7 @@ export default function App() {
     <AppShell view={view} onView={setView} onReset={onReset}>
       {view === "chat" && <ChatView sessionId={sessionId} userId={userId} onUserId={onUserId} onConversation={setSessionId} />}
       {view === "dash" && <DashboardView sessionId={sessionId} />}
-      {view === "seat" && <SeatView sessionId={sessionId} />}
+      {view === "seat" && <WorkbenchView />}
       {view === "eval" && <EvalView />}
       {view === "mem" && <MemoryView sessionId={sessionId} userId={userId} />}
     </AppShell>
