@@ -38,3 +38,22 @@ def resolve_hmdp_user(token: Optional[str], redis_client=None) -> Optional[str]:
     if val is None:
         return None
     return val.decode() if isinstance(val, (bytes, bytearray)) else str(val)
+
+
+def seed_demo_hmdp_identity(token, user_id, nickname="演示用户", icon="",
+                            redis_client=None) -> bool:
+    """把 demo hmdp 身份写入 Redis(login:token:{token} = {id,nickName,icon})。
+
+    效果:①该 token 成为 hmdp 后端认可的有效登录会话(hmdp LoginInterceptor 读同一 key);
+    ②supply resolve_hmdp_user 反查 → demo userId。用于 DEMO_MODE 下开箱聊真实订单,
+    零登录零验证码。幂等,失败静默(不阻断启动)。
+    """
+    if not token or not user_id:
+        return False
+    try:
+        r = redis_client or _default_redis()
+        r.hset(_LOGIN_TOKEN_PREFIX + token,
+               mapping={"id": str(user_id), "nickName": nickname, "icon": icon})
+        return True
+    except Exception:
+        return False

@@ -104,9 +104,25 @@ def create_app(session_manager: Optional[SessionManager] = None,
             yield _sse_frame({"type": "done"})
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    # Demo 一键体验:启动即把预置 hmdp 身份写入 Redis(login:token:{demo_token}),
+    # 使前端零登录即可以该身份聊真实 hmdp 订单数据。失败静默(Redis 未起时不阻断启动)。
+    if settings.demo_mode:
+        try:
+            from app.api.hmdp_identity import seed_demo_hmdp_identity
+            seed_demo_hmdp_identity(settings.demo_hmdp_token, settings.demo_hmdp_user_id,
+                                    settings.demo_hmdp_nickname)
+        except Exception:  # noqa: BLE001
+            pass
+
     @app.get("/api/health")
     def health():
         return {"status": "ok"}
+
+    @app.get("/api/config")
+    def public_config():
+        """前端启动读取:demo_mode 开时前端自动登录 demo_user_id、跳过登录卡片。"""
+        return {"demo_mode": settings.demo_mode,
+                "demo_user_id": settings.demo_hmdp_user_id if settings.demo_mode else ""}
 
     _UID_RE = re.compile(r"^[\w一-龥-]{1,32}$")
 
@@ -157,6 +173,9 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.post("/api/chat")
     def chat(req: ChatRequest, request: Request):
+        # demo 模式:未带 hmdp_token 时自动注入预置 demo 身份 → 开箱即聊真实 hmdp 数据(零登录)
+        if settings.demo_mode and not getattr(req, "hmdp_token", ""):
+            req.hmdp_token = settings.demo_hmdp_token
         # 0) 身份解析:优先 hmdp 身份(接 hmdp 数据源时前端传 hmdp_token)——解出即以 hmdp userId
         #    为准(与 tb_order.user_id 同命名空间,MCP 侧凭它做归属);否则回退 agent 自有 token 鉴权。
         _hmdp_uid = None

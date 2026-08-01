@@ -6,7 +6,8 @@ import { SeatView } from "@/components/SeatView";
 import { EvalView } from "@/components/EvalView";
 import { MemoryView } from "@/components/MemoryView";
 import { LoginCard } from "@/components/LoginCard";
-import { adminFetch, openConversation, getUserId, setUserId, me, clearToken } from "@/lib/api";
+import { adminFetch, openConversation, getUserId, setUserId, me, clearToken,
+  getConfig, getToken, setToken, createUser, login } from "@/lib/api";
 
 export default function App() {
   const [view, setView] = useState<View>(
@@ -20,10 +21,24 @@ export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
 
   useEffect(() => {
-    me().then((u) => {
+    (async () => {
+      // demo 一键体验:无 token 且后端开 DEMO_MODE 时,自动登录 demo 用户(id 与 hmdp demo 身份一致),
+      // 零操作跳过登录卡片,直接进聊天。失败则回落到正常登录门。
+      if (!getToken()) {
+        const cfg = await getConfig();
+        if (cfg.demo_mode && cfg.demo_user_id) {
+          try {
+            const r = await createUser(cfg.demo_user_id, "演示用户");
+            setToken(r.token);
+          } catch {
+            try { const r = await login(cfg.demo_user_id); setToken(r.token); } catch { /* 回落登录门 */ }
+          }
+        }
+      }
+      const u = await me();
       if (u) { setAuthedUser(u.user_id); setUid(u.user_id); setUserId(u.user_id); }
       else { clearToken(); }
-    }).finally(() => setAuthChecked(true));
+    })().finally(() => setAuthChecked(true));
   }, []);
 
   useEffect(() => {

@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     mcp_enabled: bool = False
     mcp_server_url: str = "http://127.0.0.1:9123/mcp"
 
+    # Demo 一键体验模式:自动以预置 hmdp 身份进入,聊真实订单数据,零登录零验证码。
+    # demo_hmdp_user_id 同时用作 agent 自有登录的 user_id(二者一致,避免会话归属错乱)。
+    demo_mode: bool = False
+    demo_hmdp_user_id: str = "1"                    # 预置 hmdp 用户(小鱼同学,已有订单)
+    demo_hmdp_token: str = "demo-hmdp-token-0001"   # 写入 Redis login:token:{} 作有效会话
+    demo_hmdp_nickname: str = "小鱼同学"
+
     # RAG 配置（第5期）
     embedding_model: str = "text-embedding-3-small"
     kb_dir: str = "app/agent/rag/knowledge"

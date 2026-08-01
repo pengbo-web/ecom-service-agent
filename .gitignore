@@ -34,6 +34,9 @@ env/
 # 会话持久化文件
 app/sessions/
 
+# 一键启动运行时日志/PID(非项目产物)
+.run/
+
 # 执行过程草稿（SDD 进度 ledger，非项目产物）
 .superpowers/
 

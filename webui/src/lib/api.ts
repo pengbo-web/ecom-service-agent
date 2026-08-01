@@ -41,6 +41,16 @@ export async function me(): Promise<{ user_id: string; name: string } | null> {
   return r.ok ? r.json() : null;
 }
 
+// demo 一键体验:后端开 DEMO_MODE 时,前端自动登录 demo_user_id、跳过登录卡片。
+export async function getConfig(): Promise<{ demo_mode: boolean; demo_user_id: string }> {
+  try {
+    const r = await fetch("/api/config");
+    return r.ok ? r.json() : { demo_mode: false, demo_user_id: "" };
+  } catch {
+    return { demo_mode: false, demo_user_id: "" };
+  }
+}
+
 export async function openConversation(userId: string): Promise<{ conversation_id: string }> {
   const r = await fetch("/api/conversation/open", {
     method: "POST",
