@@ -448,13 +448,14 @@ def create_app(session_manager: Optional[SessionManager] = None,
         if conv is None:
             raise HTTPException(404, "会话不存在")   # 不对未知会话静默建库,防误写
         uid = conv.get("user_id") or "default"
-        if hitl is not None and not hitl.manual_mode.is_manual(session_id):
-            hitl.manual_mode.toggle(session_id)   # 回复即接管:转人工,AI 暂停
         agent = manager.get_or_create(session_id, uid)
         from app.api.history import reconstruct_bubbles
         with session_lock.guard(session_id) as got:
             if not got:
                 raise HTTPException(409, "该会话正在处理中,请稍后再试")
+            # 拿到锁后再转人工,避免抢锁失败(409)却已把会话切成人工态
+            if hitl is not None and not hitl.manual_mode.is_manual(session_id):
+                hitl.manual_mode.toggle(session_id)
             msgs = getattr(agent, "raw_messages", None)
             if isinstance(msgs, list):
                 msgs.append({"role": "assistant", "content": json.dumps({

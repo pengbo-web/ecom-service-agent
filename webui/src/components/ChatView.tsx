@@ -50,7 +50,8 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
       const restored: Turn[] = [];
       for (const b of bubbles) {
         if (b.role === "user") restored.push({ id: ++idRef.current, userText: b.content, activity: [] });
-        else if (restored.length) restored[restored.length - 1].reply = b.content;
+        else if (restored.length && !restored[restored.length - 1].reply) restored[restored.length - 1].reply = b.content;
+        else restored.push({ id: ++idRef.current, userText: "", activity: [], reply: b.content });  // 连续 assistant(如人工坐席消息)独立成气泡,不覆盖上一条
       }
       setTurns(restored);
     });
@@ -276,8 +277,8 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
           {turns.length === 0 && <div className="mt-20 text-center text-muted-foreground">你好，我是小夕 😊 有什么可以帮你？</div>}
           {turns.map((t) => (
             <div key={t.id} className="flex flex-col gap-1">
-              <MessageBubble role="user">{t.userText}</MessageBubble>
-              <AgentActivity events={t.activity} defaultOpen={!t.reply} />
+              {t.userText && <MessageBubble role="user">{t.userText}</MessageBubble>}
+              {t.activity.length > 0 && <AgentActivity events={t.activity} defaultOpen={!t.reply} />}
               {t.handoff && <div className="rounded-md bg-accent/15 px-3 py-2 text-sm text-accent">🎧 已转人工，原因：{t.handoff.join("、")}</div>}
               {t.reply && <MessageBubble role="assistant">{t.reply}</MessageBubble>}
               {t.meta && <MetadataChips meta={t.meta} />}
