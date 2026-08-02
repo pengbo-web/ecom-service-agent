@@ -264,12 +264,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.post("/api/session/reset", dependencies=[Depends(admin_auth)])
     def reset(req: ResetRequest, request: Request):
+        # 单一连续会话:重置=**清空同一条会话**(不关闭、不新建),继续用原 ID。
         req.user_id = _resolve_user(request, getattr(req, "user_id", "default"))
-        manager.reset(req.session_id)
-        get_db().close_conversation(req.session_id, "reset")
-        # 老会话已关;立刻给前端一个新会话,免得下一条消息再走 rotated 换发
-        new_conv = open_or_reuse(get_db(), req.user_id)
-        return {"status": "reset", "conversation_id": new_conv["conversation_id"]}
+        # 只清本人自己的会话;拿不到规范会话则回落 open_or_reuse
+        conv = get_db().get_conversation(req.session_id)
+        sid = req.session_id if (conv and conv.get("user_id") == req.user_id) \
+            else open_or_reuse(get_db(), req.user_id)["conversation_id"]
+        manager.reset(sid)                      # 清空 agent 消息 + 热存储
+        get_db().delete_session_snapshot(sid)   # 同清冷快照,避免历史回显残留旧消息
+        return {"status": "reset", "conversation_id": sid}
 
     @app.post("/api/conversation/open")
     def conversation_open(req: OpenConversationRequest, request: Request):

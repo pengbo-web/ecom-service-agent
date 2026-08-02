@@ -52,14 +52,15 @@ def test_list_conversations_desc_and_limit(tmp_path):
     assert db.list_conversations("u_none") == []
 
 
-def test_open_or_reuse_returns_existing_open(tmp_path):
+def test_open_or_reuse_single_perpetual_conversation(tmp_path):
     db = _db(tmp_path)
     first = open_or_reuse(db, "u1")
     again = open_or_reuse(db, "u1")
     assert again["conversation_id"] == first["conversation_id"]   # 复用,不重复开
     db.close_conversation(first["conversation_id"], "manual")
     third = open_or_reuse(db, "u1")
-    assert third["conversation_id"] != first["conversation_id"]   # 关了才翻篇
+    assert third["conversation_id"] == first["conversation_id"]   # 单一连续会话:关了也重开同一条
+    assert db.get_conversation(first["conversation_id"])["status"] == "open"
 
 
 def test_ensure_active_open_passthrough(tmp_path):
@@ -68,12 +69,14 @@ def test_ensure_active_open_passthrough(tmp_path):
     assert ensure_active(db, cid, "u1") == (cid, False)
 
 
-def test_ensure_active_closed_rotates(tmp_path):
+def test_ensure_active_reopens_own_closed(tmp_path):
+    """单一连续会话:本人已关的会话被**重开续用**(同一条),而非换发新会话。"""
     db = _db(tmp_path)
     cid = db.create_conversation("u1")["conversation_id"]
     db.close_conversation(cid, "idle")
     new_id, rotated = ensure_active(db, cid, "u1")
-    assert rotated is True and new_id != cid and new_id.startswith("c-")
+    assert new_id == cid and rotated is False
+    assert db.get_conversation(cid)["status"] == "open"
 
 
 def test_ensure_active_never_adopts_client_id(tmp_path):

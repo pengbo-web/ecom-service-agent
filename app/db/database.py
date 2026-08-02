@@ -397,6 +397,30 @@ class Database:
         finally:
             conn.close()
 
+    def latest_conversation(self, user_id: str) -> Optional[dict]:
+        """取该用户最近活跃的会话(**任意状态**),作为其唯一"规范会话"——
+        单一连续会话模型下,登录/发消息都复用它(关了就重开),永不碎片化。"""
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM conversations WHERE user_id=? "
+                "ORDER BY COALESCE(updated_at, created_at) DESC, rowid DESC LIMIT 1",
+                (user_id,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def reopen_conversation(self, conversation_id: str) -> None:
+        """重开一条已关闭的会话(单一连续会话:不新建,续用同一条)。"""
+        conn = self.connect()
+        try:
+            conn.execute(
+                "UPDATE conversations SET status='open', closed_at=NULL, close_reason=NULL "
+                "WHERE conversation_id=?", (conversation_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
     def list_conversations(self, user_id: str, limit: int = 20) -> list[dict]:
         conn = self.connect()
         try:
@@ -507,5 +531,14 @@ class Database:
             except (ValueError, TypeError):
                 d["messages"] = []
             return d
+        finally:
+            conn.close()
+
+    def delete_session_snapshot(self, session_id: str) -> None:
+        """删除某会话冷快照(重置对话时清历史,避免过期回显残留旧消息)。"""
+        conn = self.connect()
+        try:
+            conn.execute("DELETE FROM session_snapshots WHERE session_id = ?", (session_id,))
+            conn.commit()
         finally:
             conn.close()

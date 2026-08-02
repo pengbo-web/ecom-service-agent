@@ -19,6 +19,7 @@ export default function App() {
   // 登录门:启动时用已存 token 尝试恢复登录态,恢复失败(无 token/401)回登录卡片。
   const [authedUser, setAuthedUser] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
+  const [resetNonce, setResetNonce] = useState(0);   // 重置对话时自增,强制 ChatView 重挂载(会话ID不变也清屏)
 
   useEffect(() => {
     (async () => {
@@ -64,7 +65,8 @@ export default function App() {
       body: JSON.stringify({ session_id: sessionId, user_id: userId }),
     });
     const data = await r.json();
-    if (data?.conversation_id) setSessionId(data.conversation_id);   // 用响应里的新 ID 直接翻篇,不再手动重开
+    if (data?.conversation_id) setSessionId(data.conversation_id);
+    setResetNonce((n) => n + 1);   // 单一连续会话:会话ID重置后不变,用 nonce 强制 ChatView 重挂载清屏
     setView("chat");
   }
 
@@ -84,7 +86,7 @@ export default function App() {
 
   return (
     <AppShell view={view} onView={setView} onReset={onReset}>
-      {view === "chat" && <ChatView sessionId={sessionId} userId={userId} onUserId={onUserId} onConversation={setSessionId} />}
+      {view === "chat" && <ChatView key={`${sessionId}:${resetNonce}`} sessionId={sessionId} userId={userId} onUserId={onUserId} onConversation={setSessionId} />}
       {view === "dash" && <DashboardView sessionId={sessionId} />}
       {view === "seat" && <WorkbenchView />}
       {view === "eval" && <EvalView />}

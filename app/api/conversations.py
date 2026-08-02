@@ -8,20 +8,27 @@ from __future__ import annotations
 
 
 def open_or_reuse(db, user_id: str) -> dict:
-    """取该用户最近的 open 会话(多端/刷新一致);没有则服务端新开一个。"""
-    existing = db.latest_open_conversation(user_id)
+    """单一连续会话:一个用户永远复用同一条"规范会话"(最近活跃的那条,关了就重开),
+    只有该用户从无会话时才新建。→ 登录必显示其全部历史,绝不碎片化。"""
+    existing = db.latest_conversation(user_id)
     if existing is not None:
+        if existing.get("status") != "open":
+            db.reopen_conversation(existing["conversation_id"])
+            existing["status"] = "open"
         return existing
     return db.create_conversation(user_id)
 
 
 def ensure_active(db, session_id: str, user_id: str) -> tuple[str, bool]:
-    """确保拿到一个可用(open)且**属于该用户**的会话 ID;返回 (生效ID, 是否翻篇/换发)。
+    """确保拿到一个可用(open)且**属于该用户**的会话 ID;返回 (生效ID, 是否切换)。
 
-    归属校验:拿到别人的 open 会话 ID 也不能写入——按"未知 ID"处理直接换发
-    (而非 403,不泄露该 ID 是否存在/归属谁)。
+    单一连续会话:客户端传来的 ID 若非"本人的 open 会话"(未知/旧格式/伪造/别人的/已关),
+    一律回落到该用户的规范会话(复用/重开),而**不再新建碎片**。
+    归属校验保留:别人的会话 ID 不被采纳(零信息泄露)。
     """
     conv = db.get_conversation(session_id)
     if conv is not None and conv["status"] == "open" and conv.get("user_id") == user_id:
         return session_id, False
-    return db.create_conversation(user_id)["conversation_id"], True
+    canonical = open_or_reuse(db, user_id)
+    cid = canonical["conversation_id"]
+    return cid, cid != session_id
