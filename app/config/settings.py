@@ -89,6 +89,7 @@ class Settings(BaseSettings):
 
     # 真实数据层（W1.5）
     db_path: str = "app/sessions/ecom.db"
+    hmdp_base_url: str = "http://127.0.0.1:8085"   # hmdp 后端(商品上下文按 id 取详情用)
 
     # 可观测性（W2）
     obs_enabled: bool = True

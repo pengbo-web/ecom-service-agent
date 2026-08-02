@@ -1,0 +1,52 @@
+"""当前咨询商品上下文:按 hmdp 商品 id 拉详情,拼成注入 LLM 的"当前商品"块。
+
+对标企业级客服:顾客从商品页/商品卡进客服,系统把该商品作为会话上下文,
+AI 据此对"这/它/这款"做指代消解并接地介绍。数据来自 hmdp(公开 GET /product/{id}),
+金额分→元。任何失败降级为 None(不注入,不影响对话)。
+"""
+from __future__ import annotations
+
+import json
+import logging
+from typing import Optional
+
+logger = logging.getLogger(__name__)
+
+
+def _yuan(fen) -> float:
+    return round((fen or 0) / 100, 2)
+
+
+def fetch_product_context(item_id: str, client=None) -> Optional[str]:
+    if not item_id:
+        return None
+    try:
+        from app.config.settings import settings
+        base = settings.hmdp_base_url.rstrip("/")
+        if client is None:
+            import httpx
+            client = httpx.Client(timeout=3.0)
+        resp = client.get(f"{base}/product/{item_id}", timeout=3.0)
+        data = resp.json() if resp.status_code == 200 else {}
+        p = data.get("data") if data.get("success") else None
+        if not p:
+            return None
+        specs = p.get("specs")
+        try:
+            specs = json.loads(specs) if isinstance(specs, str) else (specs or {})
+        except (ValueError, TypeError):
+            specs = {}
+        spec_str = "、".join(f"{k}:{v}" for k, v in specs.items()) if specs else "—"
+        return (
+            "【当前咨询商品】(顾客正在看这件；顾客说\"这/它/这款/这个\"时默认指它)\n"
+            f"- 名称：{p.get('title')}\n"
+            f"- 价格：¥{_yuan(p.get('price'))}\n"
+            f"- 库存：{p.get('stock')}\n"
+            f"- 规格：{spec_str}\n"
+            f"- 描述：{p.get('description') or '—'}\n"
+            "回答\"这是什么/多少钱/有货吗\"等指代问题时,直接依据本商品作答;"
+            "需要更多细节或下单/议价时可调用相应工具。"
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("fetch_product_context 失败,降级不注入", exc_info=True)
+        return None
