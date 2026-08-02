@@ -385,11 +385,14 @@ class Database:
             conn.close()
 
     def latest_open_conversation(self, user_id: str) -> Optional[dict]:
+        """取该用户最近**活跃**的 open 会话(按最后消息时间),登录即续上上次聊到的那条,
+        而非最新创建的空会话——保证历史连续可见。"""
         conn = self.connect()
         try:
             row = conn.execute(
                 "SELECT * FROM conversations WHERE user_id=? AND status='open' "
-                "ORDER BY created_at DESC, rowid DESC LIMIT 1", (user_id,)).fetchone()
+                "ORDER BY COALESCE(updated_at, created_at) DESC, rowid DESC LIMIT 1",
+                (user_id,)).fetchone()
             return dict(row) if row else None
         finally:
             conn.close()

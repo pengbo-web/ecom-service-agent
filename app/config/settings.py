@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     # 会话存储介质(R1):file=本地文件(默认,单机);redis=热会话共享+TTL(生产/多实例)
     session_store_backend: str = "file"
     redis_url: str = "redis://localhost:6379/0"
-    session_ttl: int = 3600   # redis 热会话过期(秒),每次访问续期
+    session_ttl: int = 2592000   # redis 热会话过期(秒,默认30天),每次访问续期;另有 SQLite 持久快照永久兜底
     checkpoint_enabled: bool = True   # R2 步级 checkpoint:每工具步落盘,回合中途崩溃可恢复
     session_lock_ms: int = 30000      # R4 分布式会话锁超时(毫秒),防持有者崩溃后死锁
     archive_enabled: bool = True      # R5 会话结束/回收时冷归档到 SQLite(审计/离线分析)
