@@ -207,6 +207,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
         # 3) 会话生命周期:确保 ID 可用;closed/未知(旧格式/伪造)→ 服务端换发翻篇
         active_id, rotated = ensure_active(get_db(), req.session_id, req.user_id)
         req.session_id = active_id   # 下游(锁/agent/存储/观测)全部用生效 ID
+        get_db().touch_conversation(active_id)   # 标记最后活跃时间(工作台按此排序/显示)
 
         # 4) 规则快路径：高频简单意图秒回，跳过 Agent（省 LLM 成本）
         #    仍把这轮问答写进会话历史并落盘，保证刷新/切换后可回显（不因走快路径而丢失）。
@@ -419,12 +420,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
             sid = c["conversation_id"]
             msgs = _admin_load_messages(sid)   # 热存储空时回退快照,保证列表有预览
             user_msgs = [m for m in msgs if m.get("role") == "user"]
-            preview = user_msgs[-1]["content"] if user_msgs else ""
+            if not user_msgs:
+                continue   # 只列有对话的会话(过滤掉从未发过消息的空会话)
+            preview = user_msgs[-1]["content"]
             out.append({
                 "conversation_id": sid,
                 "user_id": c.get("user_id"),
                 "status": c.get("status"),
                 "created_at": c.get("created_at"),
+                "last_active": c.get("updated_at") or c.get("created_at"),   # 最后活跃时间
                 "manual": bool(hitl and hitl.manual_mode.is_manual(sid)),
                 "preview": preview[:60],
                 "turns": len(user_msgs),
@@ -469,6 +473,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
                     except Exception:  # noqa: BLE001
                         pass
             bubbles = reconstruct_bubbles(getattr(agent, "raw_messages", []))
+        get_db().touch_conversation(session_id)   # 人工回复也刷新活跃时间
         return {"status": "ok", "turns": bubbles}
 
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])

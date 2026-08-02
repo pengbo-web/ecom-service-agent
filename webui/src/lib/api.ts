@@ -111,7 +111,7 @@ export function getMemory(userId: string): Promise<MemorySnapshot> {
 // ---- 客服工作台(坐席侧)----
 export type WbConversation = {
   conversation_id: string; user_id: string; status: string;
-  created_at: string; manual: boolean; preview: string; turns: number;
+  created_at: string; last_active: string; manual: boolean; preview: string; turns: number;
 };
 export type WbTurn = { role: "user" | "assistant"; content: string };
 

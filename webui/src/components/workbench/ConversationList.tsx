@@ -74,7 +74,7 @@ export function ConversationList({ items, selected, onSelect, filter, onFilter, 
                     <span className="min-w-0 flex-1">
                       <span className="flex items-center gap-2">
                         <span className={`truncate text-[13px] ${unread ? "font-semibold" : "font-medium"}`}>{label}</span>
-                        <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">{relativeTime(c.created_at)}</span>
+                        <span className="ml-auto shrink-0 text-[11px] text-muted-foreground">{relativeTime(c.last_active)}</span>
                       </span>
                       <span className="mt-0.5 flex items-center gap-1.5">
                         <span className={`truncate text-xs ${unread ? "text-foreground" : "text-muted-foreground"}`}>

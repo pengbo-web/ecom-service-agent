@@ -15,16 +15,21 @@ def test_admin_conversations_lists_across_users():
     # 两个不同客户各开一个会话
     c.post("/api/users", json={"user_id": "alice", "name": "Alice"})
     c.post("/api/users", json={"user_id": "bob", "name": "Bob"})
-    r1 = c.post("/api/conversation/open", json={"user_id": "alice"},
-                headers={"Authorization": "Bearer " + c.post("/api/auth/login", json={"user_id": "alice"}).json()["token"]})
-    r2 = c.post("/api/conversation/open", json={"user_id": "bob"},
-                headers={"Authorization": "Bearer " + c.post("/api/auth/login", json={"user_id": "bob"}).json()["token"]})
-    assert r1.status_code == 200 and r2.status_code == 200
+    ha = {"Authorization": "Bearer " + c.post("/api/auth/login", json={"user_id": "alice"}).json()["token"]}
+    hb = {"Authorization": "Bearer " + c.post("/api/auth/login", json={"user_id": "bob"}).json()["token"]}
+    s1 = c.post("/api/conversation/open", json={"user_id": "alice"}, headers=ha).json()["conversation_id"]
+    s2 = c.post("/api/conversation/open", json={"user_id": "bob"}, headers=hb).json()["conversation_id"]
+    # 各发一句(命中快路径,无需 LLM),会话才算"有对话"(空会话不列入工作台)
+    c.post("/api/chat", json={"session_id": s1, "message": "你好", "user_id": "alice"}, headers=ha)
+    c.post("/api/chat", json={"session_id": s2, "message": "你好", "user_id": "bob"}, headers=hb)
 
     resp = c.get("/api/admin/conversations")
     assert resp.status_code == 200
     users = {row["user_id"] for row in resp.json()["conversations"]}
     assert {"alice", "bob"} <= users
+    # 只列有对话的:每条都应带预览与最后活跃时间
+    for row in resp.json()["conversations"]:
+        assert row["preview"] and row["last_active"]
 
 
 def test_admin_read_any_session_messages():

@@ -23,6 +23,7 @@ export function ContextPanel({ conv }: { conv: WbConversation | null }) {
         <Row k="会话 ID" v={conv.conversation_id} mono />
         <Row k="状态" v={conv.status === "open" ? "进行中" : "已结束"} />
         <Row k="对话轮次" v={String(conv.turns)} />
+        <Row k="最后活跃" v={relativeTime(conv.last_active)} />
         <Row k="创建于" v={relativeTime(conv.created_at)} />
         <Row k="接待模式" v={conv.manual ? "人工" : "AI"} />
       </Card>

@@ -126,6 +126,12 @@ class Database:
             if "member_level" not in cols:
                 conn.execute("ALTER TABLE users ADD COLUMN member_level TEXT DEFAULT 'normal'")
                 conn.commit()
+            # 兼容旧库：conversations 补 updated_at 列(最后活跃时间,供工作台排序/显示)
+            ccols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+            if "updated_at" not in ccols:
+                conn.execute("ALTER TABLE conversations ADD COLUMN updated_at TEXT")
+                conn.execute("UPDATE conversations SET updated_at = created_at WHERE updated_at IS NULL")
+                conn.commit()
             conn.commit()
         finally:
             conn.close()
@@ -399,14 +405,25 @@ class Database:
             conn.close()
 
     def list_all_conversations(self, limit: int = 50) -> list[dict]:
-        """跨用户列会话:进行中(open)优先,再按创建时间倒序。供坐席工作台聚合。"""
+        """跨用户列会话:进行中(open)优先,再按最后活跃时间倒序。供坐席工作台聚合。"""
         conn = self.connect()
         try:
             rows = conn.execute(
                 "SELECT * FROM conversations "
-                "ORDER BY (status='open') DESC, created_at DESC, rowid DESC LIMIT ?",
+                "ORDER BY (status='open') DESC, COALESCE(updated_at, created_at) DESC, rowid DESC LIMIT ?",
                 (limit,)).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def touch_conversation(self, conversation_id: str) -> None:
+        """更新会话最后活跃时间(每轮对话/人工回复时调用),供工作台排序与显示。"""
+        conn = self.connect()
+        try:
+            conn.execute(
+                "UPDATE conversations SET updated_at=? WHERE conversation_id=?",
+                (datetime.now().isoformat(timespec="seconds"), conversation_id))
+            conn.commit()
         finally:
             conn.close()
 
