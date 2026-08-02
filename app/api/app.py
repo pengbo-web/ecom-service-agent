@@ -173,39 +173,70 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return {"product": _fetch_hmdp_product(item_id)}
 
     _ORDER_STATUS_LABELS = {
-        "pending": "待发货", "shipped": "已发货",
+        "unpaid": "待支付", "pending": "待发货", "shipped": "已发货",
         "delivered": "已签收", "refund_processing": "退款中",
     }
 
-    def _my_orders(user: str) -> list[dict]:
-        """当前用户的订单概要(新→旧),供"我的订单"页渲染。"""
-        raw = [o for o in get_db().list_orders() if o.get("user") == user]
-        raw.sort(key=lambda o: o.get("created_at") or "", reverse=True)
-        return [{
-            "order_id": o["order_id"],
-            "status": o["status"],
-            "status_label": _ORDER_STATUS_LABELS.get(o["status"], o["status"]),
+    def _hmdp_token_for_user(user: str) -> str:
+        """demo 模式下把登录用户映射到其 hmdp token(与 /api/chat 同一套映射),
+        用于让"我的订单"页/自助下单与 AI 读同一份 hmdp 真实订单。非 demo 返回空。"""
+        demo_tokens = {str(settings.demo_hmdp_user_id): settings.demo_hmdp_token,
+                       "1011": "demo-hmdp-token-1011"}
+        return demo_tokens.get(str(user), "") if settings.demo_mode else ""
+
+    def _fmt_order(o: dict) -> dict:
+        """统一成"我的订单"页需要的结构(order_id/status/status_label/items/total/…)。"""
+        return {
+            "order_id": o.get("order_id"),
+            "status": o.get("status"),
+            "status_label": _ORDER_STATUS_LABELS.get(o.get("status"), o.get("status_text") or o.get("status")),
             "items": o.get("items", []),
-            "total": o["total"],
-            "created_at": o["created_at"],
+            "total": o.get("total"),
+            "created_at": (o.get("created_at") or "").replace("T", " "),
             "shipping_address": o.get("shipping_address") or "",
-        } for o in raw]
+        }
+
+    def _hmdp_my_orders(token: str) -> list[dict]:
+        """读 hmdp /order/of/me(与 AI 的 list_user_orders 同源)→ 页面结构。新→旧。"""
+        from mcp_server.hmdp_mapping import map_order
+        import httpx
+        base = settings.hmdp_base_url.rstrip("/")
+        with httpx.Client(timeout=4.0) as c:
+            r = c.get(f"{base}/order/of/me", headers={"authorization": token}, timeout=4.0)
+            d = r.json() if r.status_code == 200 else {}
+        raw = (d.get("data") or []) if d.get("success", False) else []
+        orders = [_fmt_order(map_order(o)) for o in raw]
+        orders.sort(key=lambda o: o.get("created_at") or "", reverse=True)
+        return orders
 
     @app.post("/api/order")
     def create_order(req: CreateOrderRequest, request: Request):
-        """自助下单:用户在商城/商品卡点『立即购买』→ 按登录身份建单(写入订单库)。"""
+        """自助下单:用户在商城/商品卡点『立即购买』→ 按登录身份建单。
+        demo 用户 → 建到 hmdp(与 AI/我的订单页同源,状态待支付);其它 → agent 订单库。"""
         user = _resolve_user(request, None)
         p = _fetch_hmdp_product(req.item_id)
         if not p:
             raise HTTPException(404, "商品不存在或已下架")
         qty = max(1, min(int(req.quantity or 1), 99))
         total = round((p.get("price") or 0) * qty, 2)
+        token = _hmdp_token_for_user(user)
+        if token:
+            import httpx
+            base = settings.hmdp_base_url.rstrip("/")
+            pid = int(req.item_id) if req.item_id.isdigit() else req.item_id
+            with httpx.Client(timeout=4.0) as c:
+                r = c.post(f"{base}/order",
+                           json={"productId": pid, "quantity": qty,
+                                 "address": req.shipping_address or "上海市浦东新区示例路 1 号"},
+                           headers={"authorization": token}, timeout=4.0)
+                d = r.json() if r.status_code == 200 else {}
+            if not d.get("success"):
+                raise HTTPException(502, d.get("errorMsg") or "下单失败,请稍后再试")
+            return {"success": True, "order_id": d.get("data"), "status_label": "待支付", "total": total}
         order = get_db().create_order(
             user=user,
             items=[{"name": p["title"], "sku": f"HMDP-{req.item_id}", "quantity": qty, "price": p["price"]}],
-            total=total,
-            status="pending",
-            shipping_address=req.shipping_address,
+            total=total, status="pending", shipping_address=req.shipping_address,
         )
         return {"success": True, "order_id": order["order_id"],
                 "status_label": _ORDER_STATUS_LABELS.get(order["status"], order["status"]),
@@ -213,9 +244,18 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.get("/api/orders")
     def my_orders(request: Request):
-        """当前登录用户的订单列表(供"我的订单"页)。"""
+        """当前登录用户的订单列表(供"我的订单"页)。demo 用户读 hmdp 真实订单
+        (与 AI list_user_orders 同源,消除"页面/AI 对不齐");其它读 agent 订单库。"""
         user = _resolve_user(request, None)
-        return {"orders": _my_orders(user)}
+        token = _hmdp_token_for_user(user)
+        if token:
+            try:
+                return {"orders": _hmdp_my_orders(token)}
+            except Exception:  # noqa: BLE001 hmdp 不可用时降级 agent 库
+                pass
+        raw = [o for o in get_db().list_orders() if o.get("user") == user]
+        raw.sort(key=lambda o: o.get("created_at") or "", reverse=True)
+        return {"orders": [_fmt_order(o) for o in raw]}
 
     _UID_RE = re.compile(r"^[\w一-龥-]{1,32}$")
 
