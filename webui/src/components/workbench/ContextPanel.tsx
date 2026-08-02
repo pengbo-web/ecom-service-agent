@@ -1,5 +1,5 @@
 import { Card } from "@/components/ui/card";
-import { avatarColor, initials, relativeTime, statusMeta, TONE_CLASS } from "./parts";
+import { avatarGradient, initials, relativeTime, statusMeta, TONE_CLASS } from "./parts";
 import type { WbConversation } from "@/lib/api";
 
 export function ContextPanel({ conv }: { conv: WbConversation | null }) {
@@ -12,14 +12,15 @@ export function ContextPanel({ conv }: { conv: WbConversation | null }) {
   return (
     <div className="hidden h-full flex-col gap-4 border-l bg-card/40 p-4 lg:flex">
       <div className="flex flex-col items-center gap-2 pt-2">
-        <span className="flex h-14 w-14 items-center justify-center rounded-full text-lg font-medium text-white"
-          style={{ background: avatarColor(conv.user_id) }}>
-          {initials(conv.user_id)}
+        <span className="flex h-14 w-14 items-center justify-center rounded-full text-lg font-semibold text-white shadow-sm ring-2 ring-background"
+          style={{ backgroundImage: avatarGradient(conv.user_id) }}>
+          {initials(conv.name || conv.user_id)}
         </span>
-        <span className="text-sm font-semibold">客户 {conv.user_id}</span>
+        <span className="text-sm font-semibold">{conv.name || ("客户 " + conv.user_id)}</span>
         <span className={`rounded px-2 py-0.5 text-[11px] ${TONE_CLASS[sm.tone]}`}>{sm.label}</span>
       </div>
       <Card className="flex flex-col gap-2 p-3 text-xs">
+        <Row k="买家 ID" v={conv.user_id} />
         <Row k="会话 ID" v={conv.conversation_id} mono />
         <Row k="状态" v={conv.status === "open" ? "进行中" : "已结束"} />
         <Row k="对话轮次" v={String(conv.turns)} />

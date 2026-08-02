@@ -413,8 +413,14 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.get("/api/admin/conversations", dependencies=[Depends(admin_auth)])
     def admin_conversations(limit: int = 50):
-        """坐席工作台:列出所有客户的会话(跨用户)+ 人工态 + 预览。"""
+        """坐席工作台:列出所有客户的会话(跨用户)+ 人工态 + 预览 + 显示名。"""
         out = []
+        _name_cache: dict = {}   # 本次请求内缓存 user_id→显示名,避免逐条重复查库
+        def _display_name(uid):
+            if uid not in _name_cache:
+                u = get_db().get_user(uid) if uid else None
+                _name_cache[uid] = (u or {}).get("name") or uid or "匿名"
+            return _name_cache[uid]
         for c in get_db().list_all_conversations(limit=limit):
             sid = c["conversation_id"]
             msgs = _admin_load_messages(sid)   # 热存储空时回退快照,保证列表有预览
@@ -423,6 +429,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
             out.append({
                 "conversation_id": sid,
                 "user_id": c.get("user_id"),
+                "name": _display_name(c.get("user_id")),
                 "status": c.get("status"),
                 "created_at": c.get("created_at"),
                 "manual": bool(hitl and hitl.manual_mode.is_manual(sid)),

@@ -4,6 +4,14 @@ export function avatarColor(seed: string): string {
   return `hsl(${h} 55% 55%)`;
 }
 
+// 千牛风头像:同一 seed 稳定的双色斜向渐变,更有质感。
+export function avatarGradient(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) % 360;
+  const h2 = (h + 38) % 360;
+  return `linear-gradient(135deg, hsl(${h} 62% 60%), hsl(${h2} 64% 46%))`;
+}
+
 export function initials(name: string): string {
   const s = (name || "?").trim();
   if (/^[\x00-\x7f]+$/.test(s)) return s.slice(0, 2).toUpperCase();  // 英文/数字取两位
