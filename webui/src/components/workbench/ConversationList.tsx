@@ -13,8 +13,7 @@ export function ConversationList({ items, selected, onSelect, filter, onFilter, 
   const q = query.trim().toLowerCase();
   const shown = items.filter((c) => {
     const passTab = filter === "all" ? true : filter === "manual" ? c.manual : c.status === "open";
-    const passQ = !q || (c.name || "").toLowerCase().includes(q)
-      || (c.user_id || "").toLowerCase().includes(q) || (c.preview || "").toLowerCase().includes(q);
+    const passQ = !q || (c.user_id || "").toLowerCase().includes(q) || (c.preview || "").toLowerCase().includes(q);
     return passTab && passQ;
   });
   const tabs: { key: Filter; label: string }[] = [
@@ -56,7 +55,7 @@ export function ConversationList({ items, selected, onSelect, filter, onFilter, 
               const sm = statusMeta(c);
               const active = c.conversation_id === selected;
               const unread = unreadIds.has(c.conversation_id) && !active;
-              const label = c.name || ("客户 " + c.user_id);
+              const label = "客户 " + c.user_id;
               return (
                 <li key={c.conversation_id} className="relative">
                   {active && <span className="absolute inset-y-0 left-0 w-[3px] rounded-r bg-primary" />}
@@ -66,7 +65,7 @@ export function ConversationList({ items, selected, onSelect, filter, onFilter, 
                     <span className="relative shrink-0">
                       <span className="flex h-10 w-10 items-center justify-center rounded-full text-xs font-semibold text-white shadow-sm ring-2 ring-background"
                         style={{ backgroundImage: avatarGradient(c.user_id) }}>
-                        {initials(label)}
+                        {initials(c.user_id)}
                       </span>
                       {unread && <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-medium text-white ring-2 ring-background">
                         {Math.min(99, Math.max(1, c.turns))}

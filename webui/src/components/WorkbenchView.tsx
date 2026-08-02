@@ -77,7 +77,7 @@ export function WorkbenchView() {
       <ConversationList items={convs} selected={selected} onSelect={setSelected}
         filter={filter} onFilter={setFilter} query={query} onQuery={setQuery} unreadIds={unreadIds} />
       {selConv ? (
-        <MessageThread sessionId={selConv.conversation_id} userId={selConv.name || selConv.user_id}
+        <MessageThread sessionId={selConv.conversation_id} userId={selConv.user_id}
           manual={selConv.manual} turns={turns}
           onAfterReply={setTurns} onToggleManual={onToggleManual} />
       ) : (
