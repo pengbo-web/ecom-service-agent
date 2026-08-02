@@ -1,11 +1,12 @@
 import * as React from "react";
-import { MessageSquare, LayoutDashboard, Headset, FlaskConical, Brain, RotateCcw } from "lucide-react";
+import { MessageSquare, LayoutDashboard, Headset, FlaskConical, Brain, RotateCcw, ShoppingBag } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
-export type View = "chat" | "dash" | "seat" | "eval" | "mem";
+export type View = "shop" | "chat" | "dash" | "seat" | "eval" | "mem";
 
 const TABS: { v: View; icon: React.ReactNode; label: string }[] = [
+  { v: "shop", icon: <ShoppingBag className="h-4 w-4" />, label: "商城" },
   { v: "chat", icon: <MessageSquare className="h-4 w-4" />, label: "聊天" },
   { v: "dash", icon: <LayoutDashboard className="h-4 w-4" />, label: "看板" },
   { v: "seat", icon: <Headset className="h-4 w-4" />, label: "工作台" },

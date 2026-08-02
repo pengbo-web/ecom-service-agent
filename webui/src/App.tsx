@@ -3,6 +3,7 @@ import { AppShell, type View } from "@/components/AppShell";
 import { ChatView } from "@/components/ChatView";
 import { DashboardView } from "@/components/DashboardView";
 import { WorkbenchView } from "@/components/WorkbenchView";
+import { ShopView } from "@/components/ShopView";
 import { EvalView } from "@/components/EvalView";
 import { MemoryView } from "@/components/MemoryView";
 import { LoginCard } from "@/components/LoginCard";
@@ -20,6 +21,8 @@ export default function App() {
   const [authedUser, setAuthedUser] = useState<string | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [resetNonce, setResetNonce] = useState(0);   // 重置对话时自增,强制 ChatView 重挂载(会话ID不变也清屏)
+  const [itemId, setItemId] = useState<string>(() =>   // 当前咨询商品:初值来自 ?item=,商城点"咨询"时更新
+    typeof location !== "undefined" ? (new URLSearchParams(location.search).get("item") || "") : "");
 
   useEffect(() => {
     (async () => {
@@ -86,7 +89,8 @@ export default function App() {
 
   return (
     <AppShell view={view} onView={setView} onReset={onReset}>
-      {view === "chat" && <ChatView key={`${sessionId}:${resetNonce}`} sessionId={sessionId} userId={userId} onUserId={onUserId} onConversation={setSessionId} />}
+      {view === "shop" && <ShopView onConsult={(id) => { setItemId(id); setView("chat"); }} />}
+      {view === "chat" && <ChatView key={`${sessionId}:${resetNonce}`} sessionId={sessionId} userId={userId} itemId={itemId} onUserId={onUserId} onConversation={setSessionId} />}
       {view === "dash" && <DashboardView sessionId={sessionId} />}
       {view === "seat" && <WorkbenchView />}
       {view === "eval" && <EvalView />}

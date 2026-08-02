@@ -16,8 +16,8 @@ import {
 
 type Turn = { id: number; userText: string; activity: SSEEvent[]; reply?: string; meta?: Meta; handoff?: string[] };
 
-export function ChatView({ sessionId, userId, onUserId, onConversation }: {
-  sessionId: string; userId: string; onUserId: (uid: string) => void;
+export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversation }: {
+  sessionId: string; userId: string; itemId?: string; onUserId: (uid: string) => void;
   onConversation: (conversationId: string) => void;
 }) {
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -33,8 +33,6 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
   const [pastBubbles, setPastBubbles] = useState<HistoryTurn[] | null>(null);
   const idRef = useRef(0);
   const cur = useRef<number>(-1);
-  const [itemId] = useState<string>(() =>
-    typeof location !== "undefined" ? (new URLSearchParams(location.search).get("item") || "") : "");
 
   // 拉取已落盘历史:挂载/切用户/重置/翻篇时刷新聊天区。
   // 唯一例外是流中的 rotated 换发——此时新会话历史为空,重拉会 setTurns([])

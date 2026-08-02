@@ -127,6 +127,31 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return {"demo_mode": settings.demo_mode,
                 "demo_user_id": settings.demo_hmdp_user_id if settings.demo_mode else ""}
 
+    @app.get("/api/products")
+    def products(keyword: str = ""):
+        """商城:代理 hmdp 商品列表(公开),供前端渲染商品卡。失败返回空列表(降级)。"""
+        try:
+            import httpx
+            base = settings.hmdp_base_url.rstrip("/")
+            with httpx.Client(timeout=3.0) as c:
+                r = c.get(f"{base}/product/list", params={"keyword": keyword}, timeout=3.0)
+                data = r.json() if r.status_code == 200 else {}
+            items = (data.get("data") or []) if data.get("success") else []
+            out = []
+            for p in items:
+                imgs = p.get("images")
+                img = imgs.split(",")[0] if isinstance(imgs, str) and imgs else (
+                    imgs[0] if isinstance(imgs, list) and imgs else "")
+                out.append({
+                    "id": str(p.get("id")), "title": p.get("title"),
+                    "price": round((p.get("price") or 0) / 100, 2),
+                    "stock": p.get("stock"), "image": img,
+                    "description": p.get("description") or "",
+                })
+            return {"products": out}
+        except Exception:  # noqa: BLE001
+            return {"products": []}
+
     _UID_RE = re.compile(r"^[\w一-龥-]{1,32}$")
 
     def _token_user(request: Request):

@@ -432,17 +432,17 @@ class EcomAgent:
         messages: list[dict] = [
             {"role": "system", "content": system_content}
         ]
-        # 当前咨询商品上下文:顾客带商品进客服时注入,让"这/它/这款"指代消解到该商品并接地介绍。
-        # 每轮按 item_id 缓存,避免一轮内多次 _build_messages 重复请求 hmdp。
+        # 当前咨询商品上下文:顾客带商品进客服时,让"这/它/这款"指代消解到该商品并接地介绍。
+        # 每轮按 item_id 缓存(避免一轮内多次 _build_messages 重复请求 hmdp);
+        # 块的**位置**放到最后一条用户消息之前(见下),让当前商品在 recency 上压过历史里聊过的旧商品。
+        product_block = None
         from app.agent.runtime_context import get_current_item
         item_id = get_current_item()
         if item_id:
             if self._turn_item_ctx is None or self._turn_item_ctx[0] != item_id:
                 from app.agent.product_context import fetch_product_context
                 self._turn_item_ctx = (item_id, fetch_product_context(item_id))
-            block = self._turn_item_ctx[1]
-            if block:
-                messages.append({"role": "system", "content": block})
+            product_block = self._turn_item_ctx[1]
         last_user = next(
             (m.get("content") for m in reversed(self.raw_messages)
              if m.get("role") == "user"),
@@ -474,7 +474,19 @@ class EcomAgent:
                     "content": f"以下是此前对话的摘要，用于延续上下文记忆：\n{self.summary}",
                 }
             )
-        messages.extend(self.raw_messages)
+        # 当前商品块插到最后一条用户消息之前(紧邻本轮问题),recency 压过历史里讨论过的其它商品
+        raw = self.raw_messages
+        if product_block and raw:
+            lu = max((i for i, m in enumerate(raw) if m.get("role") == "user"), default=None)
+            if lu is not None:
+                messages.extend(raw[:lu])
+                messages.append({"role": "system", "content": product_block})
+                messages.extend(raw[lu:])
+            else:
+                messages.extend(raw)
+                messages.append({"role": "system", "content": product_block})
+        else:
+            messages.extend(raw)
         return sanitize_tool_pairs(messages)   # 送模型前自愈 tool_calls/tool 结果配对
 
     def _compress_history(self) -> None:

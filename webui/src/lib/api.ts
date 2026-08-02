@@ -41,6 +41,17 @@ export async function me(): Promise<{ user_id: string; name: string } | null> {
   return r.ok ? r.json() : null;
 }
 
+// 商城:hmdp 商品列表(供商品卡渲染 + "咨询"带 item 进聊天)
+export type Product = { id: string; title: string; price: number; stock: number; image: string; description: string };
+export async function getProducts(keyword = ""): Promise<Product[]> {
+  try {
+    const r = await fetch(`/api/products?keyword=${encodeURIComponent(keyword)}`);
+    return r.ok ? (await r.json()).products as Product[] : [];
+  } catch {
+    return [];
+  }
+}
+
 // demo 一键体验:后端开 DEMO_MODE 时,前端自动登录 demo_user_id、跳过登录卡片。
 export async function getConfig(): Promise<{ demo_mode: boolean; demo_user_id: string }> {
   try {
