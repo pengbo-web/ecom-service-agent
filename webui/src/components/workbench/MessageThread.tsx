@@ -33,7 +33,7 @@ export function MessageThread({ sessionId, userId, manual, turns, onAfterReply, 
         </Button>
       </div>
 
-      <ScrollArea className="flex-1">
+      <ScrollArea className="min-h-0 flex-1">
         <div className="mx-auto flex max-w-2xl flex-col gap-3 p-5">
           {turns.length === 0 ? (
             <div className="mt-16 text-center text-sm text-muted-foreground">该会话暂无消息</div>

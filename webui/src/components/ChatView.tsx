@@ -272,7 +272,7 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
               </ul>}
         </div>
       )}
-      <ScrollArea className="flex-1">
+      <ScrollArea className="min-h-0 flex-1">
         <div className="mx-auto flex max-w-3xl flex-col gap-4 p-6">
           {turns.length === 0 && <div className="mt-20 text-center text-muted-foreground">你好，我是小夕 😊 有什么可以帮你？</div>}
           {turns.map((t) => (

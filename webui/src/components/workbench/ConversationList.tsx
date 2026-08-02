@@ -46,7 +46,7 @@ export function ConversationList({ items, selected, onSelect, filter, onFilter, 
         <span className="ml-auto pr-1 text-[11px] text-muted-foreground">{shown.length}</span>
       </div>
 
-      <ScrollArea className="flex-1">
+      <ScrollArea className="min-h-0 flex-1">
         {shown.length === 0 ? (
           <div className="p-6 text-center text-xs text-muted-foreground">没有匹配的会话</div>
         ) : (

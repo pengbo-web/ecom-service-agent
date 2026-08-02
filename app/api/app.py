@@ -414,14 +414,21 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.get("/api/admin/conversations", dependencies=[Depends(admin_auth)])
     def admin_conversations(limit: int = 50):
-        """坐席工作台:列出所有客户的会话(跨用户)+ 人工态 + 预览。"""
+        """坐席工作台:**每个客户只列一条**(其最活跃会话,与客户端登录复用的同一条),
+        保证同一客户不出现多个窗口、且坐席看到的与客户端一致。"""
         out = []
-        for c in get_db().list_all_conversations(limit=limit):
+        seen_users = set()
+        # 拉足量后按用户去重;list 已按(open优先, 活跃时间倒序)排序,每个用户首次出现的即其规范会话
+        for c in get_db().list_all_conversations(limit=500):
+            uid = c.get("user_id")
+            if uid in seen_users:
+                continue
+            seen_users.add(uid)   # 每个用户只取这一条(规范会话),后续同用户的碎片跳过
             sid = c["conversation_id"]
             msgs = _admin_load_messages(sid)   # 热存储空时回退快照,保证列表有预览
             user_msgs = [m for m in msgs if m.get("role") == "user"]
             if not user_msgs:
-                continue   # 只列有对话的会话(过滤掉从未发过消息的空会话)
+                continue   # 该客户规范会话尚无对话 → 暂不显示(有消息后自动出现)
             preview = user_msgs[-1]["content"]
             out.append({
                 "conversation_id": sid,
@@ -433,6 +440,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 "preview": preview[:60],
                 "turns": len(user_msgs),
             })
+            if len(out) >= limit:
+                break
         return {"conversations": out}
 
     @app.get("/api/admin/session/{session_id}/messages", dependencies=[Depends(admin_auth)])
