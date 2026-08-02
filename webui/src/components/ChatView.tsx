@@ -5,13 +5,14 @@ import { MessageBubble } from "@/components/MessageBubble";
 import { AgentActivity } from "@/components/AgentActivity";
 import { MetadataChips, type Meta } from "@/components/MetadataChips";
 import { Composer } from "@/components/Composer";
+import { ProductCard } from "@/components/ProductCard";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  consolidateMemory, getHistory, listConversations,
+  consolidateMemory, getHistory, listConversations, getProduct,
   login, createUser, setToken, clearToken, setUserId,
-  type ConsolidateResult, type ConversationMeta, type HistoryTurn,
+  type ConsolidateResult, type ConversationMeta, type HistoryTurn, type Product,
 } from "@/lib/api";
 
 type Turn = { id: number; userText: string; activity: SSEEvent[]; reply?: string; meta?: Meta; handoff?: string[] };
@@ -33,6 +34,15 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
   const [pastBubbles, setPastBubbles] = useState<HistoryTurn[] | null>(null);
   const idRef = useRef(0);
   const cur = useRef<number>(-1);
+  const [product, setProduct] = useState<Product | null>(null);   // 当前咨询商品(会话内商品卡)
+
+  // itemId 变化(带商品进入 / 商城点咨询切商品)时拉取商品详情渲染卡片
+  useEffect(() => {
+    if (!itemId) { setProduct(null); return; }
+    let alive = true;
+    getProduct(itemId).then((p) => { if (alive) setProduct(p); });
+    return () => { alive = false; };
+  }, [itemId]);
 
   // 拉取已落盘历史:挂载/切用户/重置/翻篇时刷新聊天区。
   // 唯一例外是流中的 rotated 换发——此时新会话历史为空,重拉会 setTurns([])
@@ -207,9 +217,9 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
           {memBusy ? "巩固中…" : "巩固记忆"}
         </Button>
       </div>
-      {itemId && (
+      {itemId && !product && (
         <div className="flex items-center gap-2 border-b bg-primary/5 px-6 py-1.5 text-xs text-primary">
-          🛍️ 正在咨询商品 <b>#{itemId}</b> —— 可直接问“这是什么 / 多少钱 / 有货吗”
+          🛍️ 正在咨询商品 <b>#{itemId}</b>
         </div>
       )}
       {historyOpen && (
@@ -280,7 +290,8 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
       )}
       <ScrollArea className="min-h-0 flex-1">
         <div className="mx-auto flex max-w-3xl flex-col gap-4 p-6">
-          {turns.length === 0 && <div className="mt-20 text-center text-muted-foreground">你好，我是小夕 😊 有什么可以帮你？</div>}
+          {product && <ProductCard product={product} onAsk={onSend} />}
+          {turns.length === 0 && !product && <div className="mt-20 text-center text-muted-foreground">你好，我是小夕 😊 有什么可以帮你？</div>}
           {turns.map((t) => (
             <div key={t.id} className="flex flex-col gap-1">
               {t.userText && <MessageBubble role="user">{t.userText}</MessageBubble>}

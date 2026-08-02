@@ -51,6 +51,14 @@ export async function getProducts(keyword = ""): Promise<Product[]> {
     return [];
   }
 }
+export async function getProduct(itemId: string): Promise<Product | null> {
+  try {
+    const r = await fetch(`/api/product/${encodeURIComponent(itemId)}`);
+    return r.ok ? ((await r.json()).product as Product | null) : null;
+  } catch {
+    return null;
+  }
+}
 
 // demo 一键体验:后端开 DEMO_MODE 时,前端自动登录 demo_user_id、跳过登录卡片。
 export async function getConfig(): Promise<{ demo_mode: boolean; demo_user_id: string }> {

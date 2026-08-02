@@ -127,6 +127,17 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return {"demo_mode": settings.demo_mode,
                 "demo_user_id": settings.demo_hmdp_user_id if settings.demo_mode else ""}
 
+    def _map_hmdp_product(p: dict) -> dict:
+        imgs = p.get("images")
+        img = imgs.split(",")[0] if isinstance(imgs, str) and imgs else (
+            imgs[0] if isinstance(imgs, list) and imgs else "")
+        return {
+            "id": str(p.get("id")), "title": p.get("title"),
+            "price": round((p.get("price") or 0) / 100, 2),
+            "stock": p.get("stock"), "image": img,
+            "description": p.get("description") or "",
+        }
+
     @app.get("/api/products")
     def products(keyword: str = ""):
         """商城:代理 hmdp 商品列表(公开),供前端渲染商品卡。失败返回空列表(降级)。"""
@@ -137,20 +148,25 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 r = c.get(f"{base}/product/list", params={"keyword": keyword}, timeout=3.0)
                 data = r.json() if r.status_code == 200 else {}
             items = (data.get("data") or []) if data.get("success") else []
-            out = []
-            for p in items:
-                imgs = p.get("images")
-                img = imgs.split(",")[0] if isinstance(imgs, str) and imgs else (
-                    imgs[0] if isinstance(imgs, list) and imgs else "")
-                out.append({
-                    "id": str(p.get("id")), "title": p.get("title"),
-                    "price": round((p.get("price") or 0) / 100, 2),
-                    "stock": p.get("stock"), "image": img,
-                    "description": p.get("description") or "",
-                })
-            return {"products": out}
+            return {"products": [_map_hmdp_product(p) for p in items]}
         except Exception:  # noqa: BLE001
             return {"products": []}
+
+    @app.get("/api/product/{item_id}")
+    def product_detail(item_id: str):
+        """按 id 取单个商品(结构化),供聊天窗内商品卡渲染。失败/无返回 null。"""
+        if not item_id.isdigit():
+            return {"product": None}
+        try:
+            import httpx
+            base = settings.hmdp_base_url.rstrip("/")
+            with httpx.Client(timeout=3.0) as c:
+                r = c.get(f"{base}/product/{item_id}", timeout=3.0)
+                data = r.json() if r.status_code == 200 else {}
+            p = data.get("data") if data.get("success") else None
+            return {"product": _map_hmdp_product(p) if p else None}
+        except Exception:  # noqa: BLE001
+            return {"product": None}
 
     _UID_RE = re.compile(r"^[\w一-龥-]{1,32}$")
 
