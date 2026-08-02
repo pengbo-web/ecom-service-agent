@@ -40,6 +40,7 @@ class EcomAgent:
         self.user_id = user_id or settings.memory_user_id   # 长期记忆按用户隔离
         self.system_prompt = SYSTEM_PROMPT   # 可切换:多 Agent 编排按路由画像覆盖
         self._turn_recall = None   # (last_user, RecallResult) 每轮预召回缓存:react 多步共享,不重复 embedding
+        self._turn_item_ctx = None   # (item_id, 商品块) 每轮缓存:同商品不重复请求 hmdp
         self._turn_qu = None       # 查询理解结果(orchestrator 每轮注入;引擎独立运行时 None=老行为)
         self.history_threshold = settings.history_threshold
         self.history_keep_recent = settings.history_keep_recent
@@ -131,6 +132,7 @@ class EcomAgent:
         self.raw_messages.append({"role": "user", "content": user_input})
         self._step_seq = 0
         self._turn_recall = None   # 新一轮:召回缓存作废,按本轮问题重检索
+        self._turn_item_ctx = None
         self._checkpoint("in_flight")   # 回合开始:持久化用户消息 + 标记进行中
 
         # FAQ 语义缓存秒答(文档2.5缓存预热):QU 判定需检索的政策类问题先查预热缓存,
@@ -430,6 +432,17 @@ class EcomAgent:
         messages: list[dict] = [
             {"role": "system", "content": system_content}
         ]
+        # 当前咨询商品上下文:顾客带商品进客服时注入,让"这/它/这款"指代消解到该商品并接地介绍。
+        # 每轮按 item_id 缓存,避免一轮内多次 _build_messages 重复请求 hmdp。
+        from app.agent.runtime_context import get_current_item
+        item_id = get_current_item()
+        if item_id:
+            if self._turn_item_ctx is None or self._turn_item_ctx[0] != item_id:
+                from app.agent.product_context import fetch_product_context
+                self._turn_item_ctx = (item_id, fetch_product_context(item_id))
+            block = self._turn_item_ctx[1]
+            if block:
+                messages.append({"role": "system", "content": block})
         last_user = next(
             (m.get("content") for m in reversed(self.raw_messages)
              if m.get("role") == "user"),

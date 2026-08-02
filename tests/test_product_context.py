@@ -40,3 +40,21 @@ def test_fetch_product_context_formats_block():
 def test_fetch_product_context_degrades_on_failure():
     assert fetch_product_context("", client=_FakeClient({})) is None
     assert fetch_product_context("155", client=_FakeClient({"success": False})) is None
+
+
+import app.agent.product_context as pc
+from app.multi_agent.orchestrator import MultiAgentOrchestrator
+
+
+def test_build_messages_injects_current_product(monkeypatch, tmp_path):
+    monkeypatch.setattr(pc, "fetch_product_context",
+                        lambda item_id, client=None: "【当前咨询商品】名称：测试大衣" if item_id else None)
+    set_current_item("155")
+    agent = MultiAgentOrchestrator(session_path=str(tmp_path / "s.json"), user_id="u1")
+    engine = agent.engine
+    engine.raw_messages = [{"role": "user", "content": "这是什么"}]
+    msgs = engine._build_messages()
+    assert any(m["role"] == "system" and "【当前咨询商品】" in m["content"] for m in msgs)
+    set_current_item(None)
+    msgs2 = engine._build_messages()
+    assert not any("【当前咨询商品】" in m.get("content", "") for m in msgs2)
