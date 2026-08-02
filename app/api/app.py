@@ -257,6 +257,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
                     agent, req.message, tracer=tracer,
                     session_id=req.session_id, guard_pipeline=guard_pipeline,
                     hitl=hitl, confirm=req.confirm, hmdp_token=req.hmdp_token,
+                    current_item_id=req.current_item_id,
                 ):
                     yield _sse_frame(event)
 

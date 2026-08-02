@@ -32,3 +32,17 @@ def set_current_token(token: Optional[str]) -> None:
 
 def get_current_token() -> Optional[str]:
     return _current_token.get()
+
+
+# 当前咨询商品 id(顾客正在看的商品):用于"这/它/这款"的指代消解与商品介绍接地。
+# 与 current_user/current_token 同模式:每轮由 streaming worker 刷新;不信任模型传参。
+_current_item: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_item", default=None)
+
+
+def set_current_item(item_id: Optional[str]) -> None:
+    _current_item.set(item_id)
+
+
+def get_current_item() -> Optional[str]:
+    return _current_item.get()
