@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useChatStream } from "@/hooks/useChatStream";
 import type { SSEEvent } from "@/lib/sse";
 import { MessageBubble } from "@/components/MessageBubble";
@@ -35,6 +35,7 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
   const idRef = useRef(0);
   const cur = useRef<number>(-1);
   const [product, setProduct] = useState<Product | null>(null);   // 当前咨询商品(会话内商品卡)
+  const [cardIndex, setCardIndex] = useState<number | null>(null); // 商品卡插入的会话位置(=进入咨询时历史条数);null=不显示
 
   // itemId 变化(带商品进入 / 商城点咨询切商品)时拉取商品详情渲染卡片
   useEffect(() => {
@@ -64,8 +65,10 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
         else restored.push({ id: ++idRef.current, userText: "", activity: [], reply: b.content });  // 连续 assistant(如人工坐席消息)独立成气泡,不覆盖上一条
       }
       setTurns(restored);
+      setCardIndex(itemId ? restored.length : null);   // 商品卡落在"进入咨询时历史之后"的位置,而非最顶
     });
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId]);
 
   // 切换用户:清空历史面板缓存。convList/pastConv/pastBubbles 是本地 state,不随
@@ -290,17 +293,21 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
       )}
       <ScrollArea className="min-h-0 flex-1">
         <div className="mx-auto flex max-w-3xl flex-col gap-4 p-6">
-          {product && <ProductCard product={product} onAsk={onSend} />}
-          {turns.length === 0 && !product && <div className="mt-20 text-center text-muted-foreground">你好，我是小夕 😊 有什么可以帮你？</div>}
-          {turns.map((t) => (
-            <div key={t.id} className="flex flex-col gap-1">
-              {t.userText && <MessageBubble role="user">{t.userText}</MessageBubble>}
-              {t.activity.length > 0 && <AgentActivity events={t.activity} defaultOpen={!t.reply} />}
-              {t.handoff && <div className="rounded-md bg-accent/15 px-3 py-2 text-sm text-accent">🎧 已转人工，原因：{t.handoff.join("、")}</div>}
-              {t.reply && <MessageBubble role="assistant">{t.reply}</MessageBubble>}
-              {t.meta && <MetadataChips meta={t.meta} />}
-            </div>
+          {turns.length === 0 && cardIndex === null && <div className="mt-20 text-center text-muted-foreground">你好，我是小夕 😊 有什么可以帮你？</div>}
+          {turns.map((t, i) => (
+            <Fragment key={t.id}>
+              {/* 商品卡插在"咨询发生时"的会话位置(进入咨询时历史之后),随后续对话自然上滑,而非钉在最顶 */}
+              {cardIndex === i && product && <ProductCard product={product} onAsk={onSend} />}
+              <div className="flex flex-col gap-1">
+                {t.userText && <MessageBubble role="user">{t.userText}</MessageBubble>}
+                {t.activity.length > 0 && <AgentActivity events={t.activity} defaultOpen={!t.reply} />}
+                {t.handoff && <div className="rounded-md bg-accent/15 px-3 py-2 text-sm text-accent">🎧 已转人工，原因：{t.handoff.join("、")}</div>}
+                {t.reply && <MessageBubble role="assistant">{t.reply}</MessageBubble>}
+                {t.meta && <MetadataChips meta={t.meta} />}
+              </div>
+            </Fragment>
           ))}
+          {cardIndex !== null && cardIndex >= turns.length && product && <ProductCard product={product} onAsk={onSend} />}
         </div>
       </ScrollArea>
       <div className="mx-auto w-full max-w-3xl">
