@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 import { splitSSEFrames, type SSEEvent } from "@/lib/sse";
 import { authHeaders } from "@/lib/api";
 
-export function useChatStream(opts: { sessionId: string; userId: string; onEvent: (e: SSEEvent) => void }) {
+export function useChatStream(opts: { sessionId: string; userId: string; currentItemId?: string; onEvent: (e: SSEEvent) => void }) {
   const [streaming, setStreaming] = useState(false);
 
   const send = useCallback(async (message: string, confirm = false) => {
@@ -11,7 +11,8 @@ export function useChatStream(opts: { sessionId: string; userId: string; onEvent
       const resp = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json", ...authHeaders() },
-        body: JSON.stringify({ session_id: opts.sessionId, message, confirm, user_id: opts.userId }),
+        body: JSON.stringify({ session_id: opts.sessionId, message, confirm, user_id: opts.userId,
+          current_item_id: opts.currentItemId || "" }),
       });
       if (resp.status === 401) {
         opts.onEvent({ type: "error", status: 401, message: "登录已过期" });

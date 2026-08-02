@@ -33,6 +33,8 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
   const [pastBubbles, setPastBubbles] = useState<HistoryTurn[] | null>(null);
   const idRef = useRef(0);
   const cur = useRef<number>(-1);
+  const [itemId] = useState<string>(() =>
+    typeof location !== "undefined" ? (new URLSearchParams(location.search).get("item") || "") : "");
 
   // 拉取已落盘历史:挂载/切用户/重置/翻篇时刷新聊天区。
   // 唯一例外是流中的 rotated 换发——此时新会话历史为空,重拉会 setTurns([])
@@ -84,6 +86,7 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
   const { send, streaming } = useChatStream({
     sessionId,
     userId,
+    currentItemId: itemId,
     onEvent: (e) => {
       // 首帧可能缺席(人工接管/限流/成本上限三个短路分支无此事件):只在收到且 rotated 时才换发,不等待不依赖
       if (e.type === "conversation") {
@@ -206,6 +209,11 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
           {memBusy ? "巩固中…" : "巩固记忆"}
         </Button>
       </div>
+      {itemId && (
+        <div className="flex items-center gap-2 border-b bg-primary/5 px-6 py-1.5 text-xs text-primary">
+          🛍️ 正在咨询商品 <b>#{itemId}</b> —— 可直接问“这是什么 / 多少钱 / 有货吗”
+        </div>
+      )}
       {historyOpen && (
         <div className="max-h-64 overflow-auto border-b bg-secondary/30 px-6 py-3">
           {pastConv ? (
