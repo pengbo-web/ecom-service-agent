@@ -60,6 +60,26 @@ export async function getProduct(itemId: string): Promise<Product | null> {
   }
 }
 
+// ---- 自助下单:商品卡/商城点『立即购买』→ 建单;"我的订单"页拉列表 ----
+export type OrderItem = { name: string; sku: string; quantity: number; price: number };
+export type MyOrder = {
+  order_id: string; status: string; status_label: string;
+  items: OrderItem[]; total: number; created_at: string; shipping_address: string;
+};
+export async function createOrder(itemId: string, quantity = 1): Promise<{ success: boolean; order_id: string; status_label: string; total: number }> {
+  const r = await fetch("/api/order", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ item_id: itemId, quantity }),
+  });
+  if (!r.ok) throw Object.assign(new Error("order"), { status: r.status });
+  return r.json();
+}
+export async function getMyOrders(): Promise<MyOrder[]> {
+  const r = await fetch("/api/orders", { headers: authHeaders() });
+  return r.ok ? (await r.json()).orders as MyOrder[] : [];
+}
+
 // demo 一键体验:后端开 DEMO_MODE 时,前端自动登录 demo_user_id、跳过登录卡片。
 export async function getConfig(): Promise<{ demo_mode: boolean; demo_user_id: string }> {
   try {

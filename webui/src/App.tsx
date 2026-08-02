@@ -4,11 +4,12 @@ import { ChatView } from "@/components/ChatView";
 import { DashboardView } from "@/components/DashboardView";
 import { WorkbenchView } from "@/components/WorkbenchView";
 import { ShopView } from "@/components/ShopView";
+import { OrdersView } from "@/components/OrdersView";
 import { EvalView } from "@/components/EvalView";
 import { MemoryView } from "@/components/MemoryView";
 import { LoginCard } from "@/components/LoginCard";
 import { adminFetch, openConversation, getUserId, setUserId, me, clearToken,
-  getConfig, getToken, setToken, createUser, login } from "@/lib/api";
+  getConfig, getToken, setToken, createUser, login, createOrder } from "@/lib/api";
 
 export default function App() {
   const [view, setView] = useState<View>(
@@ -61,6 +62,18 @@ export default function App() {
     setAuthedUser(clean);   // 与 token 对应的登录用户保持一致,防陈旧值(评审建议)
   }
 
+  const [ordersNonce, setOrdersNonce] = useState(0);   // 下单成功后自增,强制"我的订单"重挂载刷新
+  async function onBuy(id: string) {
+    try {
+      const r = await createOrder(id, 1);
+      setOrdersNonce((n) => n + 1);
+      setView("orders");
+      alert(`下单成功！订单号 ${r.order_id}（${r.status_label}），实付 ¥${r.total}`);
+    } catch {
+      alert("下单失败，请确认已登录、商品仍在售");
+    }
+  }
+
   async function onReset() {
     const r = await adminFetch("/api/session/reset", {
       method: "POST",
@@ -89,8 +102,9 @@ export default function App() {
 
   return (
     <AppShell view={view} onView={setView} onReset={onReset}>
-      {view === "shop" && <ShopView onConsult={(id) => { setItemId(id); setView("chat"); }} />}
-      {view === "chat" && <ChatView key={`${sessionId}:${resetNonce}`} sessionId={sessionId} userId={userId} itemId={itemId} onUserId={onUserId} onConversation={setSessionId} />}
+      {view === "shop" && <ShopView onConsult={(id) => { setItemId(id); setView("chat"); }} onBuy={onBuy} />}
+      {view === "chat" && <ChatView key={`${sessionId}:${resetNonce}`} sessionId={sessionId} userId={userId} itemId={itemId} onUserId={onUserId} onConversation={setSessionId} onBuy={onBuy} />}
+      {view === "orders" && <OrdersView key={ordersNonce} onShop={() => setView("shop")} />}
       {view === "dash" && <DashboardView sessionId={sessionId} />}
       {view === "seat" && <WorkbenchView />}
       {view === "eval" && <EvalView />}

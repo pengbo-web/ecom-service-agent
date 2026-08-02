@@ -4,7 +4,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
-export function ShopView({ onConsult }: { onConsult: (itemId: string) => void }) {
+export function ShopView({ onConsult, onBuy }: { onConsult: (itemId: string) => void; onBuy: (itemId: string) => void }) {
   const [items, setItems] = useState<Product[] | null>(null);
   const [q, setQ] = useState("");
 
@@ -42,7 +42,10 @@ export function ShopView({ onConsult }: { onConsult: (itemId: string) => void })
                     <span className="text-base font-semibold text-red-500">¥{p.price}</span>
                     <span className="text-[11px] text-muted-foreground">库存 {p.stock}</span>
                   </div>
-                  <Button size="sm" className="mt-auto" onClick={() => onConsult(p.id)}>咨询这件商品</Button>
+                  <div className="mt-auto flex gap-1.5 pt-1">
+                    <Button size="sm" variant="outline" className="flex-1" onClick={() => onConsult(p.id)}>咨询</Button>
+                    <Button size="sm" className="flex-1 bg-red-500 hover:bg-red-600" onClick={() => onBuy(p.id)}>立即购买</Button>
+                  </div>
                 </div>
               </Card>
             ))}

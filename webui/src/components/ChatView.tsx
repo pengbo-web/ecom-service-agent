@@ -17,9 +17,10 @@ import {
 
 type Turn = { id: number; userText: string; activity: SSEEvent[]; reply?: string; meta?: Meta; handoff?: string[] };
 
-export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversation }: {
+export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversation, onBuy }: {
   sessionId: string; userId: string; itemId?: string; onUserId: (uid: string) => void;
   onConversation: (conversationId: string) => void;
+  onBuy?: (itemId: string) => void;
 }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [mem, setMem] = useState<ConsolidateResult | null>(null);
@@ -297,7 +298,7 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
           {turns.map((t, i) => (
             <Fragment key={t.id}>
               {/* 商品卡插在"咨询发生时"的会话位置(进入咨询时历史之后),随后续对话自然上滑,而非钉在最顶 */}
-              {cardIndex === i && product && <ProductCard product={product} onAsk={onSend} />}
+              {cardIndex === i && product && <ProductCard product={product} onAsk={onSend} onBuy={onBuy} />}
               <div className="flex flex-col gap-1">
                 {t.userText && <MessageBubble role="user">{t.userText}</MessageBubble>}
                 {t.activity.length > 0 && <AgentActivity events={t.activity} defaultOpen={!t.reply} />}
@@ -307,7 +308,7 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
               </div>
             </Fragment>
           ))}
-          {cardIndex !== null && cardIndex >= turns.length && product && <ProductCard product={product} onAsk={onSend} />}
+          {cardIndex !== null && cardIndex >= turns.length && product && <ProductCard product={product} onAsk={onSend} onBuy={onBuy} />}
         </div>
       </ScrollArea>
       <div className="mx-auto w-full max-w-3xl">

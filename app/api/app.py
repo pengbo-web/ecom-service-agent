@@ -10,8 +10,8 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api.conversations import ensure_active, open_or_reuse
-from app.api.schemas import (AgentReplyRequest, ChatRequest, CreateUserRequest, LoginRequest,
-                              OpenConversationRequest, ResetRequest)
+from app.api.schemas import (AgentReplyRequest, ChatRequest, CreateOrderRequest, CreateUserRequest,
+                              LoginRequest, OpenConversationRequest, ResetRequest)
 from app.api.session_manager import SessionManager
 from app.api.streaming import run_agent_streaming
 from app.auth.token import sign_token, verify_token
@@ -152,11 +152,10 @@ def create_app(session_manager: Optional[SessionManager] = None,
         except Exception:  # noqa: BLE001
             return {"products": []}
 
-    @app.get("/api/product/{item_id}")
-    def product_detail(item_id: str):
-        """按 id 取单个商品(结构化),供聊天窗内商品卡渲染。失败/无返回 null。"""
+    def _fetch_hmdp_product(item_id: str) -> Optional[dict]:
+        """按 id 从 hmdp 取单个商品并映射为前端结构;失败/无则 None。"""
         if not item_id.isdigit():
-            return {"product": None}
+            return None
         try:
             import httpx
             base = settings.hmdp_base_url.rstrip("/")
@@ -164,9 +163,59 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 r = c.get(f"{base}/product/{item_id}", timeout=3.0)
                 data = r.json() if r.status_code == 200 else {}
             p = data.get("data") if data.get("success") else None
-            return {"product": _map_hmdp_product(p) if p else None}
+            return _map_hmdp_product(p) if p else None
         except Exception:  # noqa: BLE001
-            return {"product": None}
+            return None
+
+    @app.get("/api/product/{item_id}")
+    def product_detail(item_id: str):
+        """按 id 取单个商品(结构化),供聊天窗内商品卡渲染。失败/无返回 null。"""
+        return {"product": _fetch_hmdp_product(item_id)}
+
+    _ORDER_STATUS_LABELS = {
+        "pending": "待发货", "shipped": "已发货",
+        "delivered": "已签收", "refund_processing": "退款中",
+    }
+
+    def _my_orders(user: str) -> list[dict]:
+        """当前用户的订单概要(新→旧),供"我的订单"页渲染。"""
+        raw = [o for o in get_db().list_orders() if o.get("user") == user]
+        raw.sort(key=lambda o: o.get("created_at") or "", reverse=True)
+        return [{
+            "order_id": o["order_id"],
+            "status": o["status"],
+            "status_label": _ORDER_STATUS_LABELS.get(o["status"], o["status"]),
+            "items": o.get("items", []),
+            "total": o["total"],
+            "created_at": o["created_at"],
+            "shipping_address": o.get("shipping_address") or "",
+        } for o in raw]
+
+    @app.post("/api/order")
+    def create_order(req: CreateOrderRequest, request: Request):
+        """自助下单:用户在商城/商品卡点『立即购买』→ 按登录身份建单(写入订单库)。"""
+        user = _resolve_user(request, None)
+        p = _fetch_hmdp_product(req.item_id)
+        if not p:
+            raise HTTPException(404, "商品不存在或已下架")
+        qty = max(1, min(int(req.quantity or 1), 99))
+        total = round((p.get("price") or 0) * qty, 2)
+        order = get_db().create_order(
+            user=user,
+            items=[{"name": p["title"], "sku": f"HMDP-{req.item_id}", "quantity": qty, "price": p["price"]}],
+            total=total,
+            status="pending",
+            shipping_address=req.shipping_address,
+        )
+        return {"success": True, "order_id": order["order_id"],
+                "status_label": _ORDER_STATUS_LABELS.get(order["status"], order["status"]),
+                "total": order["total"]}
+
+    @app.get("/api/orders")
+    def my_orders(request: Request):
+        """当前登录用户的订单列表(供"我的订单"页)。"""
+        user = _resolve_user(request, None)
+        return {"orders": _my_orders(user)}
 
     _UID_RE = re.compile(r"^[\w一-龥-]{1,32}$")
 

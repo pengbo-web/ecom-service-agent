@@ -214,6 +214,32 @@ class Database:
     def _now(self) -> str:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    def create_order(self, user: str, items: list[dict], total: float,
+                     status: str = "pending", shipping_address: str = "") -> dict:
+        """自助下单:把用户在商城/商品卡点『立即购买』的商品写入订单库。
+        items: [{name, sku, quantity, price}]。返回新建订单(含 items),供前端与
+        list_user_orders 读取。order_id 格式 ORD-YYYYMMDD-XXXX(日期+随机后缀)。"""
+        import uuid
+        now = self._now()
+        oid = f"ORD-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:4].upper()}"
+        conn = self.connect()
+        try:
+            conn.execute(
+                "INSERT INTO orders (order_id, user, status, total, created_at, shipping_address) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (oid, user, status, total, now, shipping_address),
+            )
+            conn.executemany(
+                "INSERT INTO order_items (order_id, name, sku, quantity, price) VALUES (?, ?, ?, ?, ?)",
+                [(oid, it.get("name"), it.get("sku", ""), it.get("quantity", 1), it.get("price", 0))
+                 for it in items],
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM orders WHERE order_id = ?", (oid,)).fetchone()
+            return self._order_from_row(conn, row)
+        finally:
+            conn.close()
+
     def set_refund(self, order_id: str, reason: str) -> bool:
         conn = self.connect()
         try:

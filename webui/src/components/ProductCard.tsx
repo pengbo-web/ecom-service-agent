@@ -2,14 +2,13 @@ import { type Product } from "@/lib/api";
 
 // 会话内商品卡片(对齐千牛/闲鱼:顾客带商品进客服时,对话顶部展示当前咨询商品)。
 // onAsk 把快捷问句作为一条用户消息发出去(AI 已绑定当前商品,会接地回答)。
-export function ProductCard({ product, onAsk }: {
-  product: Product; onAsk: (text: string) => void;
+export function ProductCard({ product, onAsk, onBuy }: {
+  product: Product; onAsk: (text: string) => void; onBuy?: (itemId: string) => void;
 }) {
   const chips = [
     { label: "规格属性", msg: "这个商品有哪些规格和属性？" },
     { label: "有货吗", msg: "现在有货吗，什么时候能发货？" },
     { label: "能便宜吗", msg: "这个能便宜点吗，帮我砍砍价" },
-    { label: "帮我下单", msg: "帮我下单这件商品" },
   ];
   return (
     <div className="mx-auto w-full max-w-md overflow-hidden rounded-xl border bg-card shadow-sm">
@@ -38,13 +37,19 @@ export function ProductCard({ product, onAsk }: {
           <Tag tone="warn">现货</Tag><span className="text-muted-foreground">现在付款，次日发货</span>
         </div>
       </div>
-      <div className="flex flex-wrap gap-1.5 border-t px-3 py-2">
+      <div className="flex flex-wrap items-center gap-1.5 border-t px-3 py-2">
         {chips.map((c) => (
           <button key={c.label} onClick={() => onAsk(c.msg)}
             className="rounded-md border border-primary/40 px-2.5 py-1 text-xs text-primary transition hover:bg-primary/10">
             {c.label}
           </button>
         ))}
+        {onBuy && (
+          <button onClick={() => onBuy(String(product.id))}
+            className="ml-auto rounded-md bg-red-500 px-3.5 py-1.5 text-xs font-medium text-white transition hover:bg-red-600">
+            立即购买
+          </button>
+        )}
       </div>
     </div>
   );

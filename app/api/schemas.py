@@ -30,3 +30,9 @@ class LoginRequest(BaseModel):
 
 class AgentReplyRequest(BaseModel):
     text: str = ""
+
+
+class CreateOrderRequest(BaseModel):
+    item_id: str            # hmdp 商品 id(自助下单:用户在商城/商品卡点『立即购买』)
+    quantity: int = 1
+    shipping_address: str = ""
