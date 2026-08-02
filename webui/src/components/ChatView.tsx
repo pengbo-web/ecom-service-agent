@@ -9,7 +9,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  consolidateMemory, getHistory, listConversations,
+  consolidateMemory, getHistory, listConversations, me,
   login, createUser, setToken, clearToken, setUserId,
   type ConsolidateResult, type ConversationMeta, type HistoryTurn,
 } from "@/lib/api";
@@ -25,6 +25,7 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
   const [memBusy, setMemBusy] = useState(false);
   const [memErr, setMemErr] = useState<string | null>(null);
   const [uidDraft, setUidDraft] = useState(userId);
+  const [displayName, setDisplayName] = useState(userId);   // 展示昵称,与工作台一致(不显示裸 user_id)
   const [switching, setSwitching] = useState(false);
   const [switchErr, setSwitchErr] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -66,6 +67,8 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
     setConvList(null);
     setPastConv(null);
     setPastBubbles(null);
+    setDisplayName(userId);                                  // 先回落 id,拉到昵称再覆盖
+    me().then((u) => { if (u?.name) setDisplayName(u.name); });
   }, [userId]);
 
   async function onConsolidate() {
@@ -196,7 +199,7 @@ export function ChatView({ sessionId, userId, onUserId, onConversation }: {
           {switching ? "切换中…" : "切换"}
         </Button>
         {switchErr && <span className="text-xs text-destructive">{switchErr}</span>}
-        <span className="text-xs text-muted-foreground">当前:<b>{userId}</b> · 会话 {sessionId}</span>
+        <span className="text-xs text-muted-foreground">当前:<b>{displayName}</b>（{userId}） · 会话 {sessionId}</span>
         <Button variant="ghost" size="sm" className="ml-auto h-7 text-xs" onClick={toggleHistory}>
           {historyOpen ? "收起历史" : "历史会话"}
         </Button>
