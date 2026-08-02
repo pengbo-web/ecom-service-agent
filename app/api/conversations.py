@@ -19,6 +19,42 @@ def open_or_reuse(db, user_id: str) -> dict:
     return db.create_conversation(user_id)
 
 
+def merge_user_conversations(db, user_id: str, store=None) -> dict | None:
+    """把某用户的多条(碎片)open 会话消息**按时间合并进其规范会话**,并关闭其余——
+    修复历史碎片化:登录即见全部历史。返回合并摘要;无需合并(≤1条)返回 None。
+
+    合并后需重启/重载 agent,使内存态从合并后的存储重新加载(否则在跑的旧内存会覆盖)。
+    """
+    open_convs = [c for c in db.list_conversations(user_id, limit=1000)
+                  if c.get("status") == "open"]
+    if len(open_convs) <= 1:
+        return None
+    canonical = db.latest_conversation(user_id)
+    if canonical is None:
+        return None
+    canon_id = canonical["conversation_id"]
+    # 按创建时间升序=按时间线拼接(旧对话在前,规范会话自身消息在后)
+    ordered = sorted(open_convs, key=lambda c: (c.get("created_at") or "", c["conversation_id"]))
+    merged: list = []
+    for c in ordered:
+        snap = db.get_session_snapshot(c["conversation_id"])
+        merged.extend((snap.get("messages") or []) if snap else [])
+    if store is None:
+        from app.session.store import get_session_store
+        store = get_session_store()
+    path = f"app/sessions/api/{canon_id}.json"
+    state = store.load(path) or {}
+    state["messages"] = merged
+    store.save(path, state)                                    # 热存储
+    db.upsert_session_snapshot(canon_id, user_id, merged, state.get("summary"))  # 冷快照
+    closed = 0
+    for c in ordered:
+        if c["conversation_id"] != canon_id:
+            db.close_conversation(c["conversation_id"], "merged")   # 关闭碎片,不再复用/展示
+            closed += 1
+    return {"canonical": canon_id, "merged_msgs": len(merged), "closed": closed}
+
+
 def ensure_active(db, session_id: str, user_id: str) -> tuple[str, bool]:
     """确保拿到一个可用(open)且**属于该用户**的会话 ID;返回 (生效ID, 是否切换)。
 
