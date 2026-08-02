@@ -17,17 +17,24 @@ def _yuan(fen) -> float:
     return round((fen or 0) / 100, 2)
 
 
+def _get_product(client, url: str) -> dict:
+    resp = client.get(url, timeout=3.0)
+    return resp.json() if resp.status_code == 200 else {}
+
+
 def fetch_product_context(item_id: str, client=None) -> Optional[str]:
-    if not item_id:
+    # hmdp 商品 id 恒为数字;非数字直接降级(防以任意路径探测同 host,兼顾降级)
+    if not item_id or not str(item_id).isdigit():
         return None
     try:
         from app.config.settings import settings
-        base = settings.hmdp_base_url.rstrip("/")
-        if client is None:
+        url = f"{settings.hmdp_base_url.rstrip('/')}/product/{item_id}"
+        if client is not None:
+            data = _get_product(client, url)          # 注入的 client 由调用方负责生命周期
+        else:
             import httpx
-            client = httpx.Client(timeout=3.0)
-        resp = client.get(f"{base}/product/{item_id}", timeout=3.0)
-        data = resp.json() if resp.status_code == 200 else {}
+            with httpx.Client(timeout=3.0) as c:      # 内建 client 用 with 确保关闭,防连接泄漏
+                data = _get_product(c, url)
         p = data.get("data") if data.get("success") else None
         if not p:
             return None
