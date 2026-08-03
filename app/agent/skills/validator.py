@@ -17,6 +17,15 @@ from app.agent.skills.loader import _parse_frontmatter
 # 反引号内的 snake_case 标识符:小写字母开头,允许下划线与数字
 _INLINE_CODE_RE = re.compile(r"`([a-z][a-z0-9_]*)`")
 
+# skill 名必须是单个安全路径段:候选名来自 LLM 生成的 frontmatter(其素材是归档的
+# 顾客对话,可被提示注入),含 .. 或路径分隔符会让写入逃出候选目录、覆盖线上 skill。
+_SAFE_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def is_safe_skill_name(skill_name: str) -> bool:
+    """skill 名是否为单个安全路径段(全仓库唯一判定,勿再各处另写一份)。"""
+    return bool(_SAFE_SKILL_NAME_RE.match(skill_name or ""))
+
 
 def known_tool_names() -> set[str]:
     """registry 中真实注册的工具名全集(含按开关动态追加的工具)。"""
@@ -60,6 +69,8 @@ def validate_candidate(content: str, known: set[str] | None = None) -> dict:
     description = str(meta.get("description") or "").strip()
     if not name:
         errors.append("frontmatter 缺少 name")
+    elif not is_safe_skill_name(name):
+        errors.append(f"frontmatter 的 name 不是合法的单个路径段: {name!r}")
     if not description:
         errors.append("frontmatter 缺少 description")
 

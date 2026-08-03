@@ -141,3 +141,15 @@ workflow: 这不是字典
 """
     result = validate_candidate(content)
     assert result["valid"] is True     # 坏声明不额外报错(加载时同样按无约束处理)
+
+
+def test_validate_rejects_unsafe_name():
+    content = """---
+name: ../evil
+description: d
+---
+正文。
+"""
+    result = validate_candidate(content)
+    assert result["valid"] is False
+    assert any("路径段" in e for e in result["errors"])

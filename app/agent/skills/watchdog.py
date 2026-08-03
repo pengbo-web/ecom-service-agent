@@ -50,6 +50,10 @@ def evaluate_ab(traces: list[dict], min_samples: int = 10, max_drop: float = 0.1
     live_rate = success_rate(live)
     if live_rate is None:
         return _result(DECISION_WAIT, "无 live 对照样本,无法 A/B 判定", live, canary)
+    if len(live) < min_samples:
+        # 对照臂样本同样要够:1 条 live(恰好失败,rate=0)会让任何候选都"不劣化"而自动上线
+        return _result(DECISION_WAIT,
+                       f"对照样本不足({len(live)}/{min_samples})", live, canary)
 
     canary_rate = success_rate(canary)
     if canary_rate < live_rate - max_drop:

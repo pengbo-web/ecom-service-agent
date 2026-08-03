@@ -73,6 +73,14 @@ def test_ab_treats_missing_variant_as_live():
     assert result["decision"] == DECISION_PROMOTE
 
 
+def test_ab_waits_when_live_control_arm_too_small():
+    """对照臂样本不足也必须 wait:1 条恰好失败的 live 会让烂候选看起来"不劣化"。"""
+    traces = _rows(VARIANT_LIVE, 0, 1) + _rows(VARIANT_CANARY, 3, 7)
+    result = evaluate_ab(traces, min_samples=10)
+    assert result["decision"] == DECISION_WAIT
+    assert "对照样本不足" in result["reason"]
+
+
 # ---------- evaluate_absolute ----------
 
 def test_absolute_waits_until_enough_samples():

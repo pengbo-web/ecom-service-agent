@@ -14,27 +14,14 @@ fail-closed 原则:没有相关评测用例、或评测本身抛异常,都返回
 
 from __future__ import annotations
 
-import re
 import shutil
 from pathlib import Path
 
+from app.agent.skills.validator import is_safe_skill_name  # noqa: F401  (转出:供 promote CLI 复用同一判定)
 from app.evaluation.regression import compare_to_baseline
 
 # definitions/ 下这些前缀的目录是辅助目录(候选/备份),不属于正式技能集
 _AUX_PREFIX = "_"
-
-# skill 名必须是单个安全路径段:候选名来自 LLM 生成的 frontmatter,含 .. 或路径分隔符
-# 会让影子目录的写入落到 dest_root 之外。
-_SAFE_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-
-
-def is_safe_skill_name(skill_name: str) -> bool:
-    """skill 名是否为单个安全路径段。
-
-    门禁与转正 CLI 共用同一判定,避免两处规则漂移——候选名来自 LLM 生成的
-    frontmatter 或命令行参数,含 .. 或路径分隔符会让写入落到目标目录之外。
-    """
-    return bool(_SAFE_SKILL_NAME_RE.match(skill_name or ""))
 
 
 def build_shadow_dir(definitions_dir: str, skill_name: str,

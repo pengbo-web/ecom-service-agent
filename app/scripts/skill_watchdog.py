@@ -147,6 +147,26 @@ def check_canaries(definitions_dir: str, candidates_dir: str, archive_dir: str,
 
         if verdict["decision"] == DECISION_PROMOTE:
             if is_ab:
+                # 转正前**重新判档**:开灰度后候选文件可能被 improve_skill 原地覆盖,
+                # 变成动钱内容。只在开灰度时判过一次是 TOCTOU,必须在真正上线前再判。
+                cand_file = Path(candidates_dir) / skill_name / "SKILL.md"
+                try:
+                    now_content = cand_file.read_text(encoding="utf-8")
+                except OSError as exc:
+                    entry["action"] = "promote_blocked"
+                    entry["detail"] = f"转正前读不到候选文件,拒绝上线: {exc}"
+                    results.append(entry)
+                    continue
+                now_is_new = not (Path(definitions_dir) / skill_name / "SKILL.md").exists()
+                now_risk = risk_mod.classify_risk(now_content, is_new_skill=now_is_new)
+                if risk_mod.promotion_policy(now_risk) == risk_mod.POLICY_MANUAL:
+                    entry["action"] = "promote_blocked_risk_changed"
+                    entry["detail"] = (
+                        f"候选在灰度期间变成高危档({now_risk}),拒绝自动上线,需人工处理:"
+                        f"python -m app.scripts.promote_skill {skill_name}")
+                    db.finish_canary(skill_name, "rolled_back")
+                    results.append(entry)
+                    continue
                 # 灰度实战胜出 → 转正(force:实战证据强于离线门禁,校验仍会跑)
                 promoted = promote(skill_name, definitions_dir, candidates_dir, archive_dir,
                                    gate_result=None, force=True, timestamp=_now_stamp())

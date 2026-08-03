@@ -71,6 +71,7 @@ class SkillTurn:
     """单轮对话的 skill 执行轨迹。未加载 skill 的轮次不会被落库(has_skill=False)。"""
 
     skill_name: str = ""
+    loaded_skills: list[str] = field(default_factory=list)   # 本轮加载过的**全部** skill(守卫要对每个都判)
     tool_calls: list[dict] = field(default_factory=list)
     variant: str = "live"   # 本轮实际加载的版本(灰度期可能是 canary)
 
@@ -85,6 +86,8 @@ class SkillTurn:
             if loaded:
                 self.skill_name = loaded
                 self.variant = _loaded_variant(result_str)
+                if loaded not in self.loaded_skills:
+                    self.loaded_skills.append(loaded)
         self.tool_calls.append({"name": name, "ok": ok, "error": error,
                                 "args": dict(args or {})})
 

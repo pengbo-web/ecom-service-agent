@@ -21,7 +21,9 @@ class _FakeSkillManager:
         self.enabled = True
 
     def get_workflow(self, skill_name):
-        return self._workflow
+        # 只认 "process-return":让"多个 skill 遍历"的测试真正证明循环
+        # 走到了更早加载的那个 skill,而不是随便哪个名字都能命中同一份 workflow。
+        return self._workflow if skill_name == "process-return" else {}
 
 
 class _FakeToolManager:
@@ -171,3 +173,24 @@ def test_bad_param_format_is_blocked():
     data = json.loads(result)
     assert data["workflow_guard"] is True
     assert "order_id" in data["error"]
+
+
+def test_second_load_skill_does_not_disable_first_guard():
+    """一轮内再 load 另一个 skill,不得把前一个 skill 的守卫顶掉。
+
+    先 load process-return(带退款守卫)、再 load track-order(无守卫),
+    然后直接调 apply_refund —— 必须仍被拦住。
+    """
+    agent = _agent(WORKFLOW, skill_name="process-return")
+    agent._skill_turn.loaded_skills = ["process-return"]
+
+    # 第二次加载一个无 workflow 声明的 skill
+    agent._skill_turn.note_tool_call("load_skill", json.dumps(
+        {"success": True, "skill_name": "track-order", "instructions": "x"},
+        ensure_ascii=False))
+    assert agent._skill_turn.skill_name == "track-order"      # 末次加载仍用于归因
+
+    denial = agent._workflow_denial(
+        "apply_refund", {"order_id": "ORD-20240115-001", "reason": "尺码不合适"})
+    assert denial is not None                                  # 守卫未被顶掉
+    assert "query_order" in denial

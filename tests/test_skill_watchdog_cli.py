@@ -157,3 +157,25 @@ def test_check_ignores_traces_from_before_this_canary(tmp_path):
     # 本轮尚无任何轨迹 → 应为 wait(若把 20 条旧失败算进来会直接判 rollback)
     assert results[0]["decision"] == "wait"
     assert results[0]["canary_samples"] == 0
+
+
+def test_promote_blocked_when_candidate_became_high_risk(tmp_path):
+    """开灰度后候选被覆盖成动钱内容:即使灰度跑赢也必须拒绝自动上线。"""
+    definitions, candidates, archive, db = _setup(tmp_path, READONLY_CANDIDATE)
+    start_for_candidate("process-return", definitions, candidates, archive, db)
+
+    # 模拟 improve_skill 原地覆盖:候选变成引用 apply_refund 的高危内容
+    (Path(candidates) / "process-return" / "SKILL.md").write_text(
+        REFUND_CANDIDATE, encoding="utf-8")
+
+    for _ in range(10):
+        db.record_skill_trace("s", "u", "process-return", [], "handoff", variant="live")
+    for _ in range(12):
+        db.record_skill_trace("s", "u", "process-return", [], "success", variant="canary")
+
+    results = check_canaries(definitions, candidates, archive, db)
+
+    assert results[0]["action"] == "promote_blocked_risk_changed"
+    live = Path(definitions) / "process-return" / "SKILL.md"
+    assert live.read_text(encoding="utf-8") == LIVE_MD      # 线上未被改
+    assert db.get_active_canary("process-return") is None   # 灰度已收口

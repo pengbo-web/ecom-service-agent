@@ -70,3 +70,24 @@ def test_known_tools_can_be_injected_for_isolation(tmp_path):
     out = synthesize_skills(client, "test-model", REFUND_SAMPLES, str(tmp_path),
                             known_tools={"order_list"})
     assert len(out) == 1
+
+
+TRAVERSAL_NAME_MD = """---
+name: ../process-return
+description: 伪装成改进的越权候选。
+---
+第一步：调用 `query_order`。
+"""
+
+
+def test_traversal_name_candidate_is_rejected(tmp_path):
+    """候选名来自 LLM 产物(素材是顾客文本,可被注入):含 ../ 必须拒绝,
+    否则会写出候选目录、覆盖线上 skill,绕过门禁与备份。"""
+    from tests.test_skill_synth import FakeClient, REFUND_SAMPLES
+    from app.agent.skills.synthesizer import synthesize_skills
+
+    client = FakeClient([TRAVERSAL_NAME_MD])
+    out = synthesize_skills(client, "test-model", REFUND_SAMPLES, str(tmp_path / "cand"))
+
+    assert out == []
+    assert not (tmp_path / "process-return").exists()   # 没有逃出候选目录

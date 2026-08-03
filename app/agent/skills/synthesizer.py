@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.agent.skills.validator import known_tool_names, validate_candidate
+from app.agent.skills.validator import is_safe_skill_name, known_tool_names, validate_candidate
 
 # 粗聚类：会话首条 user 消息命中的意图关键词组（朴素规则，按顺序匹配，先中先得）
 INTENT_KEYWORDS: list[tuple[str, list[str]]] = [
@@ -191,6 +191,10 @@ def synthesize_skills(client, model: str, samples: list[dict], out_dir: str,
         if result is None:
             continue
 
+        # 兜底:写盘前再确认目录名安全(名字来自 LLM 产物,不能只依赖上游校验)
+        if not is_safe_skill_name(result["name"]):
+            continue
+
         skill_dir = out_root / result["name"]
         skill_dir.mkdir(parents=True, exist_ok=True)
         skill_file = skill_dir / "SKILL.md"
@@ -259,6 +263,9 @@ def improve_skill(
     name = report["name"]
     # name 一致性兜底:LLM 意外改名会让候选目录漂移,甚至静默覆盖其他候选——按坏输出丢弃。
     if name != str(skill.get("name") or "").strip():
+        return None
+
+    if not is_safe_skill_name(name):
         return None
 
     skill_dir = Path(out_dir) / name

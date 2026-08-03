@@ -365,10 +365,20 @@ class EcomAgent:
         try:
             from app.agent.skills.workflow import evaluate_guards
 
-            workflow = manager.get_workflow(turn.skill_name)
-            if not workflow:
-                return None
-            return evaluate_guards(workflow, name, args, turn.tool_calls)
+            # 一轮内可能加载多个 skill;必须对**每个**都判,否则后加载的 skill
+            # 会把前一个的守卫顶掉(先 load process-return 再 load track-order,
+            # 退款就不再要求先查单了)。
+            names = list(getattr(turn, "loaded_skills", None) or [])
+            if not names and turn.skill_name:
+                names = [turn.skill_name]
+            for loaded_name in names:
+                workflow = manager.get_workflow(loaded_name)
+                if not workflow:
+                    continue
+                denial = evaluate_guards(workflow, name, args, turn.tool_calls)
+                if denial is not None:
+                    return denial
+            return None
         except Exception:  # noqa: BLE001 守卫出错=放行,不阻断业务
             return None
 
