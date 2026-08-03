@@ -83,3 +83,61 @@ def test_validate_accepts_injected_known_set():
     result = validate_candidate(BAD_TOOL, known={"order_list", "coupon_query"})
     assert result["valid"] is True
     assert result["unknown_tools"] == []
+
+
+# ---------- G1:workflow 声明里的工具名同样要校验 ----------
+
+WORKFLOW_GOOD = """---
+name: process-return
+description: 退货处理。
+workflow:
+  guards:
+    - tool: apply_refund
+      requires_tools: [query_order]
+      deny: '先查单'
+---
+第一步：调用 `query_order`。
+"""
+
+WORKFLOW_BAD_TOOL = """---
+name: process-return
+description: 退货处理。
+workflow:
+  guards:
+    - tool: refund_apply
+      requires_tools: [order_lookup]
+      deny: '先查单'
+---
+正文不引用任何工具。
+"""
+
+
+def test_validate_accepts_workflow_with_real_tools():
+    result = validate_candidate(WORKFLOW_GOOD)
+    assert result["valid"] is True
+    assert result["unknown_tools"] == []
+
+
+def test_validate_flags_unknown_tools_in_workflow_block():
+    """声明里的错工具比正文里的更危险:会让守卫拦死真实调用。"""
+    result = validate_candidate(WORKFLOW_BAD_TOOL)
+    assert result["valid"] is False
+    assert result["unknown_tools"] == ["order_lookup", "refund_apply"]
+
+
+def test_validate_merges_body_and_workflow_unknown_tools():
+    content = WORKFLOW_BAD_TOOL.replace("正文不引用任何工具。", "还要调用 `bogus_tool`。")
+    result = validate_candidate(content)
+    assert set(result["unknown_tools"]) == {"bogus_tool", "order_lookup", "refund_apply"}
+
+
+def test_validate_ignores_malformed_workflow_block():
+    content = """---
+name: x
+description: d
+workflow: 这不是字典
+---
+调用 `query_order`。
+"""
+    result = validate_candidate(content)
+    assert result["valid"] is True     # 坏声明不额外报错(加载时同样按无约束处理)

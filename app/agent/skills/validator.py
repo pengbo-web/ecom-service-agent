@@ -63,8 +63,12 @@ def validate_candidate(content: str, known: set[str] | None = None) -> dict:
     if not description:
         errors.append("frontmatter 缺少 description")
 
+    from app.agent.skills.workflow import parse_workflow, referenced_workflow_tools
+
     known_set = known if known is not None else known_tool_names()
-    unknown = sorted(referenced_tools(content) - known_set)
+    # 正文引用 + workflow 声明引用一起校验:声明里的错工具会让守卫拦死真实调用,更危险
+    referenced = referenced_tools(content) | referenced_workflow_tools(parse_workflow(meta))
+    unknown = sorted(referenced - known_set)
     if unknown:
         errors.append(f"引用了未知工具: {', '.join(unknown)}")
 
