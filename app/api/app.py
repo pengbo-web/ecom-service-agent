@@ -650,6 +650,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
                     item["risk"] = classify_risk(content, is_new_skill=not item["is_improvement"])
                     item["policy"] = promotion_policy(item["risk"])
                 except Exception:  # noqa: BLE001
+                    # None 在这里表示"判不了",不是"低危/可自动上线"——
+                    # 下游必须把它当成需要人工复核处理,绝不能当作可自动转正。
                     item["risk"] = None
                     item["policy"] = None
         except Exception:  # noqa: BLE001 候选目录异常不该让总览 500

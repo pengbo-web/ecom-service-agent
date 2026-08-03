@@ -123,3 +123,62 @@ def test_active_canaries_exposed(tmp_path, monkeypatch):
     assert entry["skill_name"] == "process-return"
     assert entry["percent"] == 50
     assert entry["policy"] == "canary_ab"
+
+
+# ---------- 风险档必须真的算对:is_new_skill 传反了会让新建 skill 看起来可自动上线 ----------
+
+HIGH_RISK_CANDIDATE_MD = """---
+name: process-return
+description: 退货处理(引用动钱工具)。
+---
+第一步：调用 `query_order` 核对订单。
+第二步：调用 `apply_refund` 提交退款。
+"""
+
+READONLY_CANDIDATE_MD = """---
+name: order-query-all
+description: 查全部订单。
+---
+第一步：调用 `list_user_orders`，需要明细再 `query_order`。
+"""
+
+
+def _fixture_candidate(tmp_path, name, content, is_improvement):
+    """写一个真实候选文件,并返回 list_candidates 那种形状的条目。"""
+    path = tmp_path / name / "SKILL.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return {"name": name, "path": str(path), "valid": True,
+            "unknown_tools": [], "errors": [], "is_improvement": is_improvement}
+
+
+def test_risk_and_policy_computed_from_real_content(tmp_path, monkeypatch):
+    """三种档位必须各自算对,且能抓住 is_new_skill 传反:
+    - 引用 apply_refund 的改进型 → high / manual(动钱,永远人工)
+    - 纯只读的改进型            → low / canary_ab(可灰度自动上线)
+    - 纯只读但**新建**          → medium / gate_then_watch(无对照组,先过门禁再守)
+    若 is_new_skill 被传反,后两条会互换,本测试即失败。
+    """
+    from app.agent.skills.risk import (
+        POLICY_CANARY_AB, POLICY_GATE_THEN_WATCH, POLICY_MANUAL,
+        RISK_HIGH, RISK_LOW, RISK_MEDIUM,
+    )
+
+    fixture = [
+        _fixture_candidate(tmp_path, "process-return", HIGH_RISK_CANDIDATE_MD, True),
+        _fixture_candidate(tmp_path, "order-query-all", READONLY_CANDIDATE_MD, True),
+        _fixture_candidate(tmp_path, "coupon-lookup", READONLY_CANDIDATE_MD, False),
+    ]
+    monkeypatch.setattr("app.scripts.promote_skill.list_candidates",
+                        lambda cand_dir, def_dir: list(fixture))
+
+    data = _client().get("/api/admin/skills", headers=_headers()).json()
+    by_name = {c["name"]: c for c in data["candidates"]}
+
+    assert len(by_name) == 3
+    assert (by_name["process-return"]["risk"], by_name["process-return"]["policy"]) == (
+        RISK_HIGH, POLICY_MANUAL)
+    assert (by_name["order-query-all"]["risk"], by_name["order-query-all"]["policy"]) == (
+        RISK_LOW, POLICY_CANARY_AB)
+    assert (by_name["coupon-lookup"]["risk"], by_name["coupon-lookup"]["policy"]) == (
+        RISK_MEDIUM, POLICY_GATE_THEN_WATCH)
