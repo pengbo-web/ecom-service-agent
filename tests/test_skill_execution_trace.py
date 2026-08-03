@@ -56,6 +56,17 @@ def test_non_json_result_treated_as_ok():
     assert turn.tool_calls[0]["ok"] is True
 
 
+def test_success_true_with_error_field_counts_as_ok():
+    """success 为真时权威:带 error 字段(警告类)不得被误判成失败(不制造假失败)。"""
+    turn = SkillTurn()
+    turn.note_tool_call("query_order", json.dumps(
+        {"success": True, "error": "库存字段缺失,已用默认值"}, ensure_ascii=False))
+
+    assert turn.tool_calls[0]["ok"] is True
+    assert turn.tool_calls[0]["error"] is None
+    assert turn.outcome(requires_human=False) == OUTCOME_SUCCESS
+
+
 def test_outcome_handoff_wins_over_tool_error():
     turn = SkillTurn()
     turn.note_tool_call("apply_refund", json.dumps({"success": False, "error": "x"}, ensure_ascii=False))

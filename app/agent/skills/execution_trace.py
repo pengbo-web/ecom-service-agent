@@ -23,6 +23,8 @@ def _parse_result(result_str: str) -> tuple[bool, str | None]:
 
     - `{"success": false, ...}` / 含 `error` 字段 → 失败,带错误文案。
     - 非 JSON / 无这两个字段 → 无法判定,按成功计(不制造假失败)。
+    - `success` 字段优先于 `error`:两者同时出现时,`success: true` 权威,
+      即使带 `error`(警告类文案)也判成功,不制造假失败。
     """
     try:
         data = json.loads(result_str)
@@ -33,6 +35,8 @@ def _parse_result(result_str: str) -> tuple[bool, str | None]:
 
     if data.get("success") is False:
         return False, str(data.get("error") or data.get("message") or "")
+    if data.get("success") is True:
+        return True, None          # success 为真时权威:即使带 error 字段(警告类)也算成功
     if data.get("error"):
         return False, str(data["error"])
     return True, None
