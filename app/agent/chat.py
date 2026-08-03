@@ -349,12 +349,55 @@ class EcomAgent:
 
         return self._answer_without_tools()
 
+    def _workflow_denial(self, name: str, args: dict) -> str | None:
+        """G1:本轮已加载的 skill 是否禁止此刻调用该工具(前置步骤/参数未满足)。
+
+        返回 None = 放行;字符串 = 拒绝理由(会被当作工具结果回传给模型)。
+        fail-open:守卫判定自身任何异常都放行——绝不能让守卫的 bug 让工具全线不可用。
+        """
+        turn = getattr(self, "_skill_turn", None)
+        if turn is None or not getattr(turn, "skill_name", ""):
+            return None            # 本轮没加载 skill → 无 skill 级约束
+        manager = getattr(self, "skill_manager", None)
+        if manager is None or not getattr(manager, "enabled", False):
+            return None
+        try:
+            from app.agent.skills.workflow import evaluate_guards
+
+            workflow = manager.get_workflow(turn.skill_name)
+            if not workflow:
+                return None
+            return evaluate_guards(workflow, name, args, turn.tool_calls)
+        except Exception:  # noqa: BLE001 守卫出错=放行,不阻断业务
+            return None
+
     def _execute_tool_call(self, tool_call_id: str, name: str, args: dict) -> str:
         """工具生命周期缝(observe):before(埋点)→ 执行 → after(埋点+挂起观察+写历史)。
 
         埋点是"观察"——只记录不否决;真正的动作授权在工具内部的 consent 门强制。
         """
         self._emit({"type": "tool_call", "name": name, "args": args})          # before
+
+        # G1 工作流守卫:前置步骤/参数未满足 → 不执行工具,把拒绝当作工具结果回传,
+        # 模型据此自行补齐前置步骤(零改动 ReAct 结构,对话不中断)。
+        denial = self._workflow_denial(name, args)
+        if denial is not None:
+            result_str = json.dumps(
+                {"success": False, "error": denial, "workflow_guard": True},
+                ensure_ascii=False)
+            self._emit({"type": "workflow_guard", "name": name, "reason": denial})
+            turn = getattr(self, "_skill_turn", None)
+            if turn is not None:
+                try:
+                    turn.note_blocked(name, args, denial)
+                except Exception:  # noqa: BLE001
+                    pass
+            self.raw_messages.append(
+                {"role": "tool", "tool_call_id": tool_call_id, "content": result_str})
+            self._step_seq += 1
+            self._checkpoint("in_flight")
+            return result_str
+
         result_str = self.tool_manager.execute_tool(name, args)
         self._emit({"type": "tool_result", "content": result_str})             # after
 
