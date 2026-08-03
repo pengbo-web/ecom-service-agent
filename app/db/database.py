@@ -111,6 +111,17 @@ class Database:
                     close_reason TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id, status);
+                CREATE TABLE IF NOT EXISTS skill_traces (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    user_id TEXT,
+                    skill_name TEXT NOT NULL,
+                    tool_calls TEXT,
+                    outcome TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_skill_traces_name
+                    ON skill_traces(skill_name, id);
                 """
             )
             # 兼容旧库：products 补 floor_price 列
@@ -308,6 +319,56 @@ class Database:
                 item = dict(row)
                 try:
                     item["messages"] = json.loads(item["messages"]) if item["messages"] else []
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                results.append(item)
+            return results
+        finally:
+            conn.close()
+
+    # ---------- Skill 执行轨迹(G2:每轮"加载了哪个 skill/调了哪些工具/结局如何") ----------
+    def record_skill_trace(self, session_id: str, user_id: str, skill_name: str,
+                           tool_calls: list[dict], outcome: str) -> None:
+        """记录一轮 skill 执行轨迹。供 G3 按真实轨迹采集失败案例、G4 门禁分析。"""
+        conn = self.connect()
+        try:
+            conn.execute(
+                "INSERT INTO skill_traces (session_id, user_id, skill_name, tool_calls, "
+                "outcome, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, user_id, skill_name,
+                 json.dumps(tool_calls or [], ensure_ascii=False), outcome, self._now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def list_skill_traces(self, skill_name: Optional[str] = None,
+                          outcomes: Optional[list[str]] = None,
+                          limit: int = 200) -> list[dict]:
+        """按 id DESC 取轨迹;可按 skill 名与结局过滤。tool_calls 反序列化成 list,
+        坏 JSON 的行跳过(与 list_recent_archives 同口径,单条脏数据不崩离线脚本)。"""
+        sql = "SELECT * FROM skill_traces"
+        clauses: list[str] = []
+        params: list = []
+        if skill_name:
+            clauses.append("skill_name = ?")
+            params.append(skill_name)
+        if outcomes:
+            clauses.append(f"outcome IN ({','.join('?' * len(outcomes))})")
+            params.extend(outcomes)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
+        conn = self.connect()
+        try:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+            results = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["tool_calls"] = json.loads(item["tool_calls"]) if item["tool_calls"] else []
                 except (json.JSONDecodeError, TypeError):
                     continue
                 results.append(item)
