@@ -147,8 +147,42 @@ class SkillManager:
         skill = self._skills.get(skill_name)
         return copy.deepcopy(skill.workflow) if skill else {}
 
+    def _canary_body(self, skill_name: str) -> str | None:
+        """灰度路由:该 skill 有活跃候选且当前会话落桶 → 返回候选正文,否则 None。
+
+        fail-soft:开关关闭、取不到会话、DB 异常、候选文件缺失都返回 None(退回
+        正式版)。灰度是增强,绝不能因为它让 load_skill 失败。
+        """
+        from app.config.settings import settings
+
+        if not getattr(settings, "skill_canary_enabled", False):
+            return None
+        try:
+            from app.agent.skills.canary import in_canary_bucket
+            from app.agent.tools.bargain import get_current_session
+            from app.db import get_db
+
+            session_id = get_current_session()
+            if not session_id:
+                return None
+            canary = get_db().get_active_canary(skill_name)
+            if not canary:
+                return None
+            if not in_canary_bucket(skill_name, session_id, int(canary["percent"])):
+                return None
+            path = Path(canary["candidate_path"])
+            if not path.exists():
+                return None
+            return _parse_body(path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 灰度任何异常都退回正式版
+            return None
+
     def load_skill(self, skill_name: str) -> dict:
-        """加载指定 skill 的完整指令。供 load_skill 工具调用。"""
+        """加载指定 skill 的完整指令。供 load_skill 工具调用。
+
+        返回值带 variant(live/canary):灰度期本会话拿到的是哪个版本,由调用方
+        记进执行轨迹,供看门狗做 A/B 判定。
+        """
         if not self.enabled:
             return {"success": False, "error": "技能系统未启用"}
 
@@ -160,13 +194,24 @@ class SkillManager:
                 "error": f"未找到技能「{skill_name}」，可用技能：{available}",
             }
 
+        from app.agent.skills.canary import VARIANT_CANARY, VARIANT_LIVE
+
         body = skill.load_body()
+        variant = VARIANT_LIVE
+        canary_body = self._canary_body(skill_name)
+        if canary_body is not None:
+            body = canary_body
+            variant = VARIANT_CANARY
 
         # G1:把硬约束附在指令后,让模型事先知道(而不是被拦回才发现),省一轮往返
+        # 灰度期约束声明恒用 LIVE skill 的 workflow(而非候选的):候选只替换指令
+        # 正文,声明(guards/slots)不在灰度覆盖范围内——改声明的候选风险分级会被
+        # 判到最高档,直接走人工审核,不会流到这条自动灰度路径。
         from app.agent.skills.workflow import render_constraints
 
         return {
             "success": True,
             "skill_name": skill.name,
             "instructions": body + render_constraints(skill.workflow),
+            "variant": variant,
         }

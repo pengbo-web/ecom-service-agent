@@ -53,12 +53,26 @@ def _loaded_skill_name(result_str: str) -> str:
     return str(data.get("skill_name") or "").strip()
 
 
+def _loaded_variant(result_str: str) -> str:
+    """从 load_skill 返回里取本轮实际加载的版本(live/canary);缺失按 live。"""
+    from app.agent.skills.canary import VARIANT_LIVE
+
+    try:
+        data = json.loads(result_str)
+    except (ValueError, TypeError):
+        return VARIANT_LIVE
+    if not isinstance(data, dict):
+        return VARIANT_LIVE
+    return str(data.get("variant") or VARIANT_LIVE)
+
+
 @dataclass
 class SkillTurn:
     """单轮对话的 skill 执行轨迹。未加载 skill 的轮次不会被落库(has_skill=False)。"""
 
     skill_name: str = ""
     tool_calls: list[dict] = field(default_factory=list)
+    variant: str = "live"   # 本轮实际加载的版本(灰度期可能是 canary)
 
     def note_tool_call(self, name: str, result_str: str, args: dict | None = None) -> None:
         """记录一次工具调用。若是成功的 load_skill,同时记下 skill 名与加载的版本。
@@ -70,6 +84,7 @@ class SkillTurn:
             loaded = _loaded_skill_name(result_str)
             if loaded:
                 self.skill_name = loaded
+                self.variant = _loaded_variant(result_str)
         self.tool_calls.append({"name": name, "ok": ok, "error": error,
                                 "args": dict(args or {})})
 

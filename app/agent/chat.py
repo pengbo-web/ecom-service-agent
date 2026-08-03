@@ -209,6 +209,7 @@ class EcomAgent:
                 session_id=self.session_id, user_id=self.user_id,
                 skill_name=turn.skill_name, tool_calls=turn.tool_calls,
                 outcome=turn.outcome(result.requires_human),
+                variant=turn.variant,
             )
         except Exception:  # noqa: BLE001 埋点失败绝不影响本轮回复
             pass

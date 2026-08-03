@@ -122,6 +122,19 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_skill_traces_name
                     ON skill_traces(skill_name, id);
+                CREATE TABLE IF NOT EXISTS skill_canaries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    skill_name TEXT NOT NULL,
+                    candidate_path TEXT NOT NULL,
+                    percent INTEGER NOT NULL,
+                    risk TEXT,
+                    policy TEXT,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_skill_canaries_active
+                    ON skill_canaries(skill_name, status);
                 """
             )
             # 兼容旧库：products 补 floor_price 列
@@ -142,6 +155,12 @@ class Database:
             if "updated_at" not in ccols:
                 conn.execute("ALTER TABLE conversations ADD COLUMN updated_at TEXT")
                 conn.execute("UPDATE conversations SET updated_at = created_at WHERE updated_at IS NULL")
+                conn.commit()
+            # 兼容旧库：skill_traces 补 variant 列(灰度 A/B 需区分 live/canary)
+            stcols = {r[1] for r in conn.execute("PRAGMA table_info(skill_traces)").fetchall()}
+            if "variant" not in stcols:
+                conn.execute("ALTER TABLE skill_traces ADD COLUMN variant TEXT DEFAULT 'live'")
+                conn.execute("UPDATE skill_traces SET variant = 'live' WHERE variant IS NULL")
                 conn.commit()
             conn.commit()
         finally:
@@ -328,15 +347,17 @@ class Database:
 
     # ---------- Skill 执行轨迹(G2:每轮"加载了哪个 skill/调了哪些工具/结局如何") ----------
     def record_skill_trace(self, session_id: str, user_id: str, skill_name: str,
-                           tool_calls: list[dict], outcome: str) -> None:
-        """记录一轮 skill 执行轨迹。供 G3 按真实轨迹采集失败案例、G4 门禁分析。"""
+                           tool_calls: list[dict], outcome: str,
+                           variant: str = "live") -> None:
+        """记录一轮 skill 执行轨迹。variant 区分现行版/灰度候选,供 A/B 判定。"""
         conn = self.connect()
         try:
             conn.execute(
                 "INSERT INTO skill_traces (session_id, user_id, skill_name, tool_calls, "
-                "outcome, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "outcome, created_at, variant) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (session_id, user_id, skill_name,
-                 json.dumps(tool_calls or [], ensure_ascii=False), outcome, self._now()),
+                 json.dumps(tool_calls or [], ensure_ascii=False), outcome,
+                 self._now(), variant),
             )
             conn.commit()
         finally:
@@ -373,6 +394,56 @@ class Database:
                     continue
                 results.append(item)
             return results
+        finally:
+            conn.close()
+
+    # ---------- Skill 灰度登记(分级授权:候选按会话接管部分流量) ----------
+    def start_canary(self, skill_name: str, candidate_path: str, percent: int,
+                     risk: str, policy: str) -> None:
+        """登记一个活跃灰度。同 skill 已有活跃记录先置 superseded,保证同时只有一个。"""
+        conn = self.connect()
+        try:
+            conn.execute(
+                "UPDATE skill_canaries SET status = 'superseded', finished_at = ? "
+                "WHERE skill_name = ? AND status = 'active'", (self._now(), skill_name))
+            conn.execute(
+                "INSERT INTO skill_canaries (skill_name, candidate_path, percent, risk, "
+                "policy, status, started_at) VALUES (?, ?, ?, ?, ?, 'active', ?)",
+                (skill_name, candidate_path, percent, risk, policy, self._now()))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_active_canary(self, skill_name: str) -> Optional[dict]:
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM skill_canaries WHERE skill_name = ? AND status = 'active' "
+                "ORDER BY id DESC LIMIT 1", (skill_name,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def list_active_canaries(self) -> list[dict]:
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM skill_canaries WHERE status = 'active' "
+                "ORDER BY id DESC").fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def finish_canary(self, skill_name: str, status: str) -> bool:
+        """结束该 skill 的活跃灰度(status: promoted / rolled_back)。"""
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE skill_canaries SET status = ?, finished_at = ? "
+                "WHERE skill_name = ? AND status = 'active'",
+                (status, self._now(), skill_name))
+            conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
 
