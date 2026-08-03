@@ -39,6 +39,7 @@ from app.agent.skills.synthesizer import (  # noqa: E402
     synthesize_skills,
 )
 from app.agent.skills.user_modeling import model_user  # noqa: E402
+from app.utils.console import enable_utf8_stdout  # noqa: E402
 
 CANDIDATES_DIR = "app/agent/skills/definitions/_candidates"
 DEFINITIONS_DIR = "app/agent/skills/definitions"
@@ -179,7 +180,41 @@ def run_improvements(
     return out_paths
 
 
+def run_improvements_from_traces(
+    client, model: str, traces: list[dict], archives: list[dict],
+    skills_dir: str, out_dir: str, known_tools: set[str] | None = None,
+) -> list[Path]:
+    """步骤③(G3 升级版):按真实执行轨迹挑失败样本,给对应 skill 产改进候选。
+
+    与关键词启发式版 `run_improvements` 的区别:这里的"某 skill 没搞定"是
+    `skill_traces` 里的事实(该轮确实加载了它且结局为转人工/工具失败),不是猜的。
+
+    - 无失败轨迹 → 不调 LLM,返回 [];
+    - 轨迹指向正式库里已不存在的 skill → 跳过;
+    - 改进候选只写 out_dir(候选目录),绝不碰正式目录。
+    """
+    from app.agent.skills.failure_cases import collect_failures_by_skill
+
+    grouped = collect_failures_by_skill(traces, archives)
+    if not grouped:
+        return []
+
+    out_paths: list[Path] = []
+    for skill_name, cases in grouped.items():
+        content = _read_skill_content(skills_dir, skill_name)
+        if content is None:
+            continue   # 正式库已无此 skill(被删/改名),跳过
+        result = improve_skill(
+            client, model, {"name": skill_name, "content": content}, cases, out_dir,
+            known_tools=known_tools,
+        )
+        if result is not None:
+            out_paths.append(result)
+    return out_paths
+
+
 def main() -> None:
+    enable_utf8_stdout()
     if not settings.skill_synth_enabled:
         print(
             "skill_synth_enabled=False，已跳过（离线工具默认关闭，不静默做事）。\n"
@@ -217,20 +252,54 @@ def main() -> None:
     except Exception as exc:
         print(f"② 聚类创建失败，跳过本步: {exc}")
 
+    # ②b 金牌客服蒸馏(G5):从人工接管过的会话学人的处理经验
+    golden_paths: list[Path] = []
+    try:
+        from app.agent.skills.golden_corpus import synthesize_from_golden
+        golden_paths = synthesize_from_golden(client, model, samples, out_dir=CANDIDATES_DIR)
+    except Exception as exc:
+        print(f"②b 金牌客服蒸馏失败，跳过本步: {exc}")
+
+    # ③ 失败自改进:优先用真实执行轨迹(G3);无轨迹的老库回退关键词启发式
     improve_paths: list[Path] = []
     try:
-        improve_paths = run_improvements(
-            client, model, samples, skills_dir=DEFINITIONS_DIR, out_dir=CANDIDATES_DIR,
+        traces = get_db().list_skill_traces(
+            outcomes=["handoff", "tool_error"], limit=limit * 4,
         )
+        if traces:
+            improve_paths = run_improvements_from_traces(
+                client, model, traces, samples,
+                skills_dir=DEFINITIONS_DIR, out_dir=CANDIDATES_DIR,
+            )
+            print(f"③ 失败自改进:读到 {len(traces)} 条失败轨迹(按真实轨迹关联)")
+        else:
+            improve_paths = run_improvements(
+                client, model, samples, skills_dir=DEFINITIONS_DIR, out_dir=CANDIDATES_DIR,
+            )
+            print("③ 失败自改进:暂无执行轨迹,回退关键词启发式")
     except Exception as exc:
         print(f"③ 失败自改进失败，跳过本步: {exc}")
 
     print("\n===== 离线闭环摘要 =====")
     print(f"用户建模: {len(user_tags)} 个用户，标签 {user_tags}")
-    print(f"新候选 skill: {[str(p) for p in candidate_paths]}")
-    print(f"改进候选: {[str(p) for p in improve_paths]}")
-    print("\n注意：以上候选/标签中，候选文件不会被 SkillManager 自动加载。")
-    print("请人工审核候选内容后，再手动移入 app/agent/skills/definitions/ 使其生效。")
+    print(f"新候选 skill: {[p.parent.name for p in candidate_paths]}")
+    print(f"金牌蒸馏候选: {[p.parent.name for p in golden_paths]}")
+    print(f"改进候选: {[p.parent.name for p in improve_paths]}")
+
+    # 校验摘要:候选已在合成时过校验,这里再打一次结论供人工审核决策
+    from app.scripts.promote_skill import list_candidates
+    print("\n===== 候选校验结论 =====")
+    items = list_candidates(CANDIDATES_DIR, DEFINITIONS_DIR)
+    if not items:
+        print("(无候选)")
+    for item in items:
+        kind = "改进" if item["is_improvement"] else "新建"
+        status = "✅ 可送门禁" if item["valid"] else f"❌ {'; '.join(item['errors'])}"
+        print(f"[{kind}] {item['name']}: {status}")
+
+    print("\n候选不会被 SkillManager 自动加载。转正需过门禁:")
+    print("  python -m app.scripts.promote_skill --list")
+    print("  python -m app.scripts.promote_skill <skill-name>")
 
 
 if __name__ == "__main__":
