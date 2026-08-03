@@ -38,6 +38,11 @@ _ROOT = Path(__file__).resolve().parents[2]
 _WEB_DIR = Path(__file__).resolve().parents[2] / "web"
 _DIST_DIR = _WEB_DIR / "dist"
 
+# /api/admin/skills 的 traces 段查询窗口:按最近轨迹取样,全 skill 共用一个上限
+# (高频 skill 可能挤占低频 skill 的样本)。响应里 traces_window.limit 直接引用
+# 这个常量,保证"披露的数字"与"实际查询用的数字"不会走偏。
+_TRACE_WINDOW = 500
+
 
 def _sse_frame(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -621,31 +626,59 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.get("/api/admin/skills", dependencies=[Depends(admin_auth)])
     def admin_skills():
-        """自进化状态总览:现行技能 / 待审候选(含校验结论) / 各 skill 实战结局分布。
+        """自进化状态总览:现行技能 / 待审候选(含校验结论、风险档与放行策略) /
+        各 skill 实战结局分布(含取样窗口披露) / 当前活跃灰度。
 
         candidates 只读 _candidates 目录,绝不在此处转正——转正只走
         app/scripts/promote_skill.py(校验+门禁+备份)。
         """
+        from pathlib import Path as _Path
+
         from app.agent.skills.loader import SkillManager
+        from app.agent.skills.risk import classify_risk, promotion_policy
         from app.scripts.promote_skill import CANDIDATES_DIR, DEFINITIONS_DIR, list_candidates
 
         live = SkillManager(skills_dir=settings.skills_dir, enabled=True).get_catalog()
 
         try:
             candidates = list_candidates(CANDIDATES_DIR, DEFINITIONS_DIR)
+            for item in candidates:
+                # 逐项容错:某一条候选的文件读不出/判不了风险,不该拖累整份列表——
+                # 该候选仍要出现在响应里,只是 risk/policy 降级为 None。
+                try:
+                    content = _Path(item["path"]).read_text(encoding="utf-8")
+                    item["risk"] = classify_risk(content, is_new_skill=not item["is_improvement"])
+                    item["policy"] = promotion_policy(item["risk"])
+                except Exception:  # noqa: BLE001
+                    item["risk"] = None
+                    item["policy"] = None
         except Exception:  # noqa: BLE001 候选目录异常不该让总览 500
             candidates = []
 
+        try:
+            canaries = get_db().list_active_canaries()
+        except Exception:  # noqa: BLE001
+            canaries = []
+
         traces: dict[str, dict[str, int]] = {}
         try:
-            for row in get_db().list_skill_traces(limit=500):
+            for row in get_db().list_skill_traces(limit=_TRACE_WINDOW):
                 bucket = traces.setdefault(row["skill_name"], {})
                 outcome = row.get("outcome") or "unknown"
                 bucket[outcome] = bucket.get(outcome, 0) + 1
         except Exception:  # noqa: BLE001
             traces = {}
 
-        return {"live": live, "candidates": candidates, "traces": traces}
+        return {
+            "live": live,
+            "candidates": candidates,
+            "traces": traces,
+            "traces_window": {
+                "limit": _TRACE_WINDOW,
+                "note": "按最近轨迹计数的窗口值,非全时段统计;窗口为所有 skill 共用,高频 skill 可能挤占低频 skill 的样本",
+            },
+            "canaries": canaries,
+        }
 
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():

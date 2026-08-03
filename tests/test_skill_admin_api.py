@@ -55,9 +55,16 @@ def test_candidate_entries_carry_validation_verdict(monkeypatch):
 
     assert len(data["candidates"]) == 2
     for item, expected in zip(data["candidates"], fixture):
-        assert set(item) >= {"name", "valid", "unknown_tools", "errors", "is_improvement"}
+        assert set(item) >= {"name", "valid", "unknown_tools", "errors", "is_improvement",
+                              "risk", "policy"}
         assert isinstance(item["valid"], bool)
-        assert item == expected
+        for key, value in expected.items():
+            assert item[key] == value
+        # 夹具里的 path 并非磁盘上的真实文件,风险判定读不到内容——
+        # 该候选仍必须出现(不能被这一项的异常拖累整份列表清空),
+        # 只是 risk/policy 降级为 None,这正是"逐项容错"要覆盖的场景。
+        assert item["risk"] is None
+        assert item["policy"] is None
 
 
 def test_traces_map_counts_outcomes(tmp_path, monkeypatch):
@@ -79,3 +86,40 @@ def test_traces_map_counts_outcomes(tmp_path, monkeypatch):
     assert counts["success"] == 1
     assert counts["handoff"] == 2
     assert counts.get("tool_error", 0) == 0
+
+
+def test_traces_window_discloses_query_limit():
+    """traces 段的计数来自有界、按时间倒序的窗口(全 skill 共用一个上限),
+    高频 skill 会挤占低频 skill 的样本——响应必须把这个窗口值明示出来,
+    且断言的是端点里真正传给查询的同一个常量,不能各说各话。"""
+    from app.api.app import _TRACE_WINDOW
+
+    data = _client().get("/api/admin/skills", headers=_headers()).json()
+
+    assert data["traces_window"]["limit"] == _TRACE_WINDOW
+
+
+# ---------- 分级授权可见性(Task 15) ----------
+
+def test_candidates_carry_risk_and_policy():
+    data = _client().get("/api/admin/skills", headers=_headers()).json()
+    for item in data["candidates"]:
+        assert item["risk"] in {"high", "medium", "low", None}
+        assert item["policy"] in {"manual", "canary_ab", "gate_then_watch", None}
+
+
+def test_active_canaries_exposed(tmp_path, monkeypatch):
+    from app.db import Database
+
+    db = Database(str(tmp_path / "t.db"))
+    db.init_schema()
+    db.start_canary("process-return", "/p/SKILL.md", 50, "low", "canary_ab")
+    monkeypatch.setattr("app.api.app.get_db", lambda: db)
+
+    data = _client().get("/api/admin/skills", headers=_headers()).json()
+
+    assert len(data["canaries"]) == 1
+    entry = data["canaries"][0]
+    assert entry["skill_name"] == "process-return"
+    assert entry["percent"] == 50
+    assert entry["policy"] == "canary_ab"
