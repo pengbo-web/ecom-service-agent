@@ -128,6 +128,20 @@ def test_prerequisites_reject_when_args_mismatch():
     assert "order_id" in msg
 
 
+def test_prerequisites_distinguish_falsy_value_from_missing():
+    """same_args 比较不能把 0/False 与"字段缺失"混为一谈,否则守卫对数值字段形同虚设。"""
+    guard = {"tool": "apply_refund", "requires_tools": ["query_order"], "same_args": ["amount"]}
+    prior = [{"name": "query_order", "ok": True, "args": {}}]   # amount 字段缺失
+    assert check_prerequisites(guard, {"amount": 0}, prior) is not None
+
+
+def test_prerequisites_match_on_equal_numeric_values():
+    """数值相等仍应判一致(归一化后比较,不是要求类型相同)。"""
+    guard = {"tool": "apply_refund", "requires_tools": ["query_order"], "same_args": ["amount"]}
+    prior = [{"name": "query_order", "ok": True, "args": {"amount": 100}}]
+    assert check_prerequisites(guard, {"amount": "100"}, prior) is None
+
+
 def test_prerequisites_ignore_blocked_prior_calls():
     """被守卫拦下的调用不算"已成功调用过"。"""
     guard = WORKFLOW["guards"][0]

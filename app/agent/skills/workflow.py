@@ -19,6 +19,15 @@ from __future__ import annotations
 import re
 
 
+def _norm(value) -> str:
+    """归一化参数值用于比较:None → 空串,其余转字符串后 strip。
+
+    刻意不用 `value or ""`——那会把 0 / False / [] 与"字段缺失"混为同一桶,
+    使 same_args 对数值/布尔字段形同虚设(查的是 A 单退的是 B 单那类跳步就漏了)。
+    """
+    return "" if value is None else str(value).strip()
+
+
 def parse_workflow(meta: dict | None) -> dict:
     """从 frontmatter dict 取 workflow 声明块;缺失或结构不对 → {}(视为无约束)。"""
     if not isinstance(meta, dict):
@@ -55,7 +64,7 @@ def check_slots(workflow: dict, args: dict, fields: list[str]) -> str | None:
 
     for field in fields:
         value = args.get(field) if isinstance(args, dict) else None
-        text = "" if value is None else str(value).strip()
+        text = _norm(value)
         spec = _slot_spec(workflow, field)
         hint = str(spec.get("hint") or "").strip()
 
@@ -101,9 +110,9 @@ def check_prerequisites(guard: dict, args: dict, prior_calls: list[dict]) -> str
 
         if same_args:
             for field in same_args:
-                want = str((args or {}).get(field) or "").strip()
+                want = _norm((args or {}).get(field))
                 got_any = any(
-                    str((c.get("args") or {}).get(field) or "").strip() == want
+                    _norm((c.get("args") or {}).get(field)) == want
                     for c in matches
                 )
                 if not got_any:
