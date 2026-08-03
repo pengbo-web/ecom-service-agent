@@ -619,6 +619,34 @@ def create_app(session_manager: Optional[SessionManager] = None,
         get_db().touch_conversation(session_id)   # 人工回复也刷新活跃时间
         return {"status": "ok", "turns": bubbles}
 
+    @app.get("/api/admin/skills", dependencies=[Depends(admin_auth)])
+    def admin_skills():
+        """自进化状态总览:现行技能 / 待审候选(含校验结论) / 各 skill 实战结局分布。
+
+        candidates 只读 _candidates 目录,绝不在此处转正——转正只走
+        app/scripts/promote_skill.py(校验+门禁+备份)。
+        """
+        from app.agent.skills.loader import SkillManager
+        from app.scripts.promote_skill import CANDIDATES_DIR, DEFINITIONS_DIR, list_candidates
+
+        live = SkillManager(skills_dir=settings.skills_dir, enabled=True).get_catalog()
+
+        try:
+            candidates = list_candidates(CANDIDATES_DIR, DEFINITIONS_DIR)
+        except Exception:  # noqa: BLE001 候选目录异常不该让总览 500
+            candidates = []
+
+        traces: dict[str, dict[str, int]] = {}
+        try:
+            for row in get_db().list_skill_traces(limit=500):
+                bucket = traces.setdefault(row["skill_name"], {})
+                outcome = row.get("outcome") or "unknown"
+                bucket[outcome] = bucket.get(outcome, 0) + 1
+        except Exception:  # noqa: BLE001
+            traces = {}
+
+        return {"live": live, "candidates": candidates, "traces": traces}
+
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():
         return hitl.queue.list_pending() if hitl else []
