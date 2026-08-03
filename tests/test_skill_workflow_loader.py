@@ -56,6 +56,21 @@ def test_get_workflow_returns_parsed_block(tmp_path):
     assert wf["slots"]["order_id"]["pattern"].startswith("^ORD-")
 
 
+def test_get_workflow_returns_deep_copy(tmp_path):
+    """调用方改动返回值(含嵌套 guards/slots)不得污染 SkillManager 里的活声明。"""
+    mgr = _mgr(tmp_path, {"process-return": WITH_WORKFLOW})
+
+    wf = mgr.get_workflow("process-return")
+    wf["guards"][0]["deny"] = "被篡改"
+    wf["guards"].append({"tool": "injected"})
+    wf["slots"]["order_id"]["pattern"] = "^.*$"
+
+    fresh = mgr.get_workflow("process-return")
+    assert fresh["guards"][0]["deny"] == "退款前必须先用 query_order 核对该订单"
+    assert len(fresh["guards"]) == 1
+    assert fresh["slots"]["order_id"]["pattern"].startswith("^ORD-")
+
+
 def test_get_workflow_empty_without_declaration(tmp_path):
     mgr = _mgr(tmp_path, {"track-order": WITHOUT_WORKFLOW})
     assert mgr.get_workflow("track-order") == {}

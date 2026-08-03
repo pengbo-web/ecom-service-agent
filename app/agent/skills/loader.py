@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import copy
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -137,9 +138,14 @@ class SkillManager:
         return "\n".join(lines)
 
     def get_workflow(self, skill_name: str) -> dict:
-        """该 skill 的工作流声明(无声明/未知 skill → {},即无约束)。"""
+        """该 skill 的工作流声明(无声明/未知 skill → {},即无约束)。
+
+        返回**深拷贝**:声明里 guards 是"列表套字典"、slots 是"字典套字典"的嵌套结构,
+        浅拷贝会让调用方顺手改到 SkillMeta 里的活声明——守卫被悄悄改写或清空就形同
+        虚设(这些声明守的是退款等动钱工具),故必须深拷。
+        """
         skill = self._skills.get(skill_name)
-        return dict(skill.workflow) if skill else {}
+        return copy.deepcopy(skill.workflow) if skill else {}
 
     def load_skill(self, skill_name: str) -> dict:
         """加载指定 skill 的完整指令。供 load_skill 工具调用。"""
