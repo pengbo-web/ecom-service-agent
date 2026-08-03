@@ -82,3 +82,22 @@ def test_trace_for_unknown_skill_is_ignored(tmp_path):
 
     assert paths == []
     assert client.calls == []
+
+
+def test_traces_present_but_no_failures_yields_no_candidates(tmp_path):
+    """有轨迹但全是 success:不该走关键词回退,也不该产出改进候选(系统健康)。
+
+    对应 main() 中"已有执行轨迹但无失败轨迹"分支——该分支不调用任何 LLM。
+    """
+    definitions = _definitions(tmp_path)
+    client = FakeClient([])
+
+    paths = run_improvements_from_traces(
+        client, "test-model",
+        traces=[_trace("s1", "process-return", "success")],
+        archives=[_archive("s1", "怎么退货")],
+        skills_dir=definitions, out_dir=str(tmp_path / "c"),
+    )
+
+    assert paths == []
+    assert client.calls == []

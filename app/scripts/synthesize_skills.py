@@ -16,10 +16,12 @@ H3.5 追加：把入口从"只做聚类创建"扩为完整离线闭环（三步�
      归纳行为偏好标签，直接写入结构化档案（H3.4 已定语义：低风险追加操作，
      不需要人工确认候选）。
   ② 聚类创建：沿用现有 synthesize_skills（不变）。
-  ③ 失败自改进：对 definitions/ 正式库里每个已入库 skill，挑出与其相关的
-     失败会话样本（朴素规则判定 + 关键词关联），跑 synthesizer.improve_skill
+  ②b 金牌客服蒸馏（G5）：从人工接管过的会话学人的处理经验，产出候选。
+  ③ 失败自改进：优先用真实执行轨迹（G3）关联到已入库 skill；无轨迹的老库
+     回退朴素规则判定 + 关键词关联（原逻辑），跑 synthesizer.improve_skill
      产出改进候选（同样只产候选，绝不覆盖正式目录）。
-各步 try/except 隔离：单步异常只打印该步失败、不影响其他两步（fail-soft）。
+各步 try/except 隔离：单步异常只打印该步失败、不影响其他步骤（fail-soft）。
+最后打印候选校验结论（复用 promote_skill.list_candidates）供人工审核决策。
 """
 
 import sys
@@ -263,20 +265,33 @@ def main() -> None:
     # ③ 失败自改进:优先用真实执行轨迹(G3);无轨迹的老库回退关键词启发式
     improve_paths: list[Path] = []
     try:
-        traces = get_db().list_skill_traces(
-            outcomes=["handoff", "tool_error"], limit=limit * 4,
+        trace_cap = limit * 4
+        failed_traces = get_db().list_skill_traces(
+            outcomes=["handoff", "tool_error"], limit=trace_cap,
         )
-        if traces:
+        if failed_traces:
             improve_paths = run_improvements_from_traces(
-                client, model, traces, samples,
+                client, model, failed_traces, samples,
                 skills_dir=DEFINITIONS_DIR, out_dir=CANDIDATES_DIR,
             )
-            print(f"③ 失败自改进:读到 {len(traces)} 条失败轨迹(按真实轨迹关联)")
+            print(f"③ 失败自改进:读到 {len(failed_traces)} 条失败轨迹(按真实轨迹关联)"
+                  f",产出 {len(improve_paths)} 份改进候选")
+            if len(improve_paths) == 0:
+                print("   注:失败轨迹存在但未产出候选 —— 常见原因:对应会话尚未归档、"
+                      "该 skill 已从正式库移除、或 LLM 产物未过校验")
+            if len(failed_traces) >= trace_cap:
+                print(f"   ⚠ 失败轨迹读取已达上限 {trace_cap} 条,更早的失败可能未纳入"
+                      f"(重跑时加大样本数 N 可放宽,当前 N={limit})")
         else:
-            improve_paths = run_improvements(
-                client, model, samples, skills_dir=DEFINITIONS_DIR, out_dir=CANDIDATES_DIR,
-            )
-            print("③ 失败自改进:暂无执行轨迹,回退关键词启发式")
+            # 区分"库里根本没有轨迹"与"有轨迹但没有失败"——两者含义完全不同
+            has_any_trace = bool(get_db().list_skill_traces(limit=1))
+            if has_any_trace:
+                print("③ 失败自改进:已有执行轨迹但**无失败轨迹**(系统健康),本步跳过")
+            else:
+                improve_paths = run_improvements(
+                    client, model, samples, skills_dir=DEFINITIONS_DIR, out_dir=CANDIDATES_DIR,
+                )
+                print("③ 失败自改进:skill_traces 尚无任何轨迹 → 回退关键词启发式")
     except Exception as exc:
         print(f"③ 失败自改进失败，跳过本步: {exc}")
 
@@ -286,16 +301,20 @@ def main() -> None:
     print(f"金牌蒸馏候选: {[p.parent.name for p in golden_paths]}")
     print(f"改进候选: {[p.parent.name for p in improve_paths]}")
 
-    # 校验摘要:候选已在合成时过校验,这里再打一次结论供人工审核决策
-    from app.scripts.promote_skill import list_candidates
-    print("\n===== 候选校验结论 =====")
-    items = list_candidates(CANDIDATES_DIR, DEFINITIONS_DIR)
-    if not items:
-        print("(无候选)")
-    for item in items:
-        kind = "改进" if item["is_improvement"] else "新建"
-        status = "✅ 可送门禁" if item["valid"] else f"❌ {'; '.join(item['errors'])}"
-        print(f"[{kind}] {item['name']}: {status}")
+    # 校验摘要:候选已在合成时过校验,这里再打一次结论供人工审核决策。
+    # 同样 fail-soft:本步异常不得吞掉下面的转正指引。
+    try:
+        from app.scripts.promote_skill import list_candidates
+        print("\n===== 候选校验结论 =====")
+        items = list_candidates(CANDIDATES_DIR, DEFINITIONS_DIR)
+        if not items:
+            print("(无候选)")
+        for item in items:
+            kind = "改进" if item["is_improvement"] else "新建"
+            status = "✅ 可送门禁" if item["valid"] else f"❌ {'; '.join(item['errors'])}"
+            print(f"[{kind}] {item['name']}: {status}")
+    except Exception as exc:
+        print(f"候选校验结论生成失败,跳过本节: {exc}")
 
     print("\n候选不会被 SkillManager 自动加载。转正需过门禁:")
     print("  python -m app.scripts.promote_skill --list")
