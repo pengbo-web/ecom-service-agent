@@ -34,8 +34,16 @@ class EvalCase:
     max_tokens: int | None = None  # token 预算上限，None=不设上限
     expected_route: str | None = None  # 多 Agent 期望路由（presale/postsale/complaint），可选
 
+    # ---------- G4 门禁 ----------
+    related_skills: list[str] = field(default_factory=list)  # 本用例覆盖哪些 skill，供候选灰度评测筛子集
+
 
 def load_dataset(path: str | Path) -> list[EvalCase]:
     """从 JSON 文件加载用例列表，文件格式为 {"cases": [ {EvalCase 字段}, ... ]}。"""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     return [EvalCase(**item) for item in data["cases"]]
+
+
+def filter_by_skill(cases: list[EvalCase], skill_name: str) -> list[EvalCase]:
+    """筛出覆盖指定 skill 的用例(G4 门禁只跑相关子集,避免两遍全量评测)。"""
+    return [c for c in cases if skill_name in (c.related_skills or [])]

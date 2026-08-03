@@ -20,7 +20,8 @@
       "expected_requires_human": false,
       "expected_tools": ["query_logistics"],
       "min_tool_calls": 1,
-      "max_tokens": 6000
+      "max_tokens": 6000,
+      "related_skills": ["track-order"]
     },
     {
       "id": "logistics_no_tracking",
@@ -42,7 +43,8 @@
       "expected_requires_human": false,
       "expected_tools": ["query_product"],
       "min_tool_calls": 1,
-      "max_tokens": 6000
+      "max_tokens": 6000,
+      "related_skills": ["product-recommend"]
     },
     {
       "id": "return_request",
@@ -52,7 +54,8 @@
       "expected_keywords": ["退款"],
       "expected_requires_human": false,
       "expected_tools": [],
-      "max_tokens": 8000
+      "max_tokens": 8000,
+      "related_skills": ["process-return"]
     },
     {
       "id": "knowledge_policy",
