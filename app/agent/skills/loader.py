@@ -23,6 +23,7 @@ class SkillMeta:
     description: str
     path: Path
     body: str = ""
+    workflow: dict = field(default_factory=dict)   # G1 工作流声明(无则空,行为不变)
     _body_loaded: bool = field(default=False, repr=False)
 
     def load_body(self) -> str:
@@ -89,8 +90,11 @@ class SkillManager:
             if not name or not description:
                 continue
 
+            from app.agent.skills.workflow import parse_workflow
+
             self._skills[name] = SkillMeta(
                 name=name, description=description, path=skill_file,
+                workflow=parse_workflow(meta),
             )
 
     @property
@@ -132,6 +136,11 @@ class SkillManager:
 
         return "\n".join(lines)
 
+    def get_workflow(self, skill_name: str) -> dict:
+        """该 skill 的工作流声明(无声明/未知 skill → {},即无约束)。"""
+        skill = self._skills.get(skill_name)
+        return dict(skill.workflow) if skill else {}
+
     def load_skill(self, skill_name: str) -> dict:
         """加载指定 skill 的完整指令。供 load_skill 工具调用。"""
         if not self.enabled:
@@ -146,8 +155,12 @@ class SkillManager:
             }
 
         body = skill.load_body()
+
+        # G1:把硬约束附在指令后,让模型事先知道(而不是被拦回才发现),省一轮往返
+        from app.agent.skills.workflow import render_constraints
+
         return {
             "success": True,
             "skill_name": skill.name,
-            "instructions": body,
+            "instructions": body + render_constraints(skill.workflow),
         }
