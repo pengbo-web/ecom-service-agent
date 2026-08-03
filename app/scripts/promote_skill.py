@@ -1,6 +1,15 @@
 """候选 Skill 转正 / 回滚 CLI(分级授权铁律的唯一写入点)。
 
-本文件是全仓库**唯一**允许写 `definitions/` 正式目录的代码。写入前必须:
+本文件是全仓库**唯一**写入"会被 SkillManager 加载的路径"
+`definitions/<name>/SKILL.md` 的代码。注意 `definitions/` 树下另有两处写入,
+但都只写 `_` 前缀的辅助目录、不会被加载:
+  - `gate.build_shadow_dir` → `definitions/_shadow/`(门禁用的影子技能集);
+  - `synthesizer` / `golden_corpus` → `definitions/_candidates/`(待审候选)。
+这条隔离依赖"`_` 前缀 + 目录深度"约定(见 loader._discover),因此候选名的
+路径安全校验是必需的(validator.is_safe_skill_name),否则 `../x` 之类的名字
+能逃出辅助目录、直接覆盖线上 skill。
+
+写入正式路径前必须:
   ① 过静态校验(frontmatter + 工具名真实性,validator);
   ② 过灰度评测门禁(影子目录对比,gate);
   ③ 把现行版本备份到 `_archive/<name>/<时间戳>/SKILL.md`。
