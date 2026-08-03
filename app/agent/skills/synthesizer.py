@@ -167,11 +167,12 @@ def synthesize_one(client, model: str, group: list[dict],
 
 def synthesize_skills(client, model: str, samples: list[dict], out_dir: str,
                       system_prompt: str = SYNTH_SYSTEM_PROMPT,
-                      known_tools: set[str] | None = None) -> list[Path]:
+                      known_tools: set[str] | None = None,
+                      min_group_size: int = MIN_GROUP_SIZE) -> list[Path]:
     """聚类 + 逐组合成候选 skill，写入 out_dir/<name>/SKILL.md。
 
     - 空样本 → []，不写文件。
-    - 样本数 <2 的组跳过(单例不成"重复模式")。
+    - 样本数 < min_group_size 的组跳过(默认 MIN_GROUP_SIZE，即单例不成"重复模式")。
     - 坏输出/引用未知工具的组跳过(fail-soft),不影响其他组。
     """
     if not samples:
@@ -182,7 +183,7 @@ def synthesize_skills(client, model: str, samples: list[dict], out_dir: str,
     written: list[Path] = []
 
     for _label, group in group_samples(samples).items():
-        if len(group) < MIN_GROUP_SIZE:
+        if len(group) < min_group_size:
             continue
 
         result = synthesize_one(client, model, group,

@@ -18,6 +18,9 @@ from app.agent.skills.synthesizer import synthesize_skills
 
 HUMAN_AGENT_INTENT = "human_agent"
 
+# 金牌语料稀少:一次人工救场就值得学,故不套用"同类样本需≥2"的门槛(否则每桶常仅1条→全被跳过)
+GOLDEN_MIN_GROUP_SIZE = 1
+
 GOLDEN_SYSTEM_PROMPT = """你是电商客服 Skill 蒸馏器。
 
 下面会给你一组**人工客服接管处理过**的历史会话样本(AI 未能独立解决,由人工
@@ -26,8 +29,15 @@ GOLDEN_SYSTEM_PROMPT = """你是电商客服 Skill 蒸馏器。
 
 归纳重点:
 - 人工是怎么判断的(先确认什么、依据什么下结论);
-- 人工做了哪些 AI 漏掉的步骤(补充核对、主动让利、升级处理);
-- 人工的话术分寸(如何安抚、如何给承诺而不越权)。
+- 人工做了哪些 AI 漏掉的**核对与升级步骤**(补充查询、交叉验证、及时转人工);
+- 人工的话术分寸(如何安抚、如何表达歉意)。
+
+授权红线(必须体现在产出的 SKILL.md 里,不得省略):
+- 人工做出的让利、补偿、免运费、超常规退款等**酌情决定**属于人工权限,
+  **不得**归纳成 AI 可自主执行的步骤;
+- 凡涉及金钱或对外承诺的动作,产出的流程必须写明"经用户确认后调用对应工具"
+  或"转人工处理",不得写成由 AI 直接给出;
+- 不要把某一次的个案让利写成通用规则。
 
 严格要求:
 - 只输出一份完整的 SKILL.md 文本,不要任何额外说明、不要用 markdown 代码块包裹。
@@ -69,4 +79,5 @@ def synthesize_from_golden(client, model: str, archives: list[dict], out_dir: st
     if not samples:
         return []
     return synthesize_skills(client, model, samples, out_dir,
-                             system_prompt=GOLDEN_SYSTEM_PROMPT, known_tools=known_tools)
+                             system_prompt=GOLDEN_SYSTEM_PROMPT, known_tools=known_tools,
+                             min_group_size=GOLDEN_MIN_GROUP_SIZE)

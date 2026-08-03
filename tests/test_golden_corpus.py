@@ -86,3 +86,22 @@ def test_synthesize_from_golden_no_human_sessions_no_llm_call(tmp_path):
 
     assert out == []
     assert client.calls == []
+
+
+def test_single_human_session_still_produces_candidate(tmp_path):
+    """金牌语料稀少:单条人工接管会话也应产出候选(不套用"同类≥2"门槛)。"""
+    archives = [_archive("s1", [{"role": "user", "content": "退款一直不到账"},
+                                _human_msg("我帮您加急")])]
+    client = FakeClient([GOLDEN_MD])
+    out = synthesize_from_golden(client, "test-model", archives, str(tmp_path))
+
+    assert len(out) == 1
+    assert len(client.calls) == 1
+
+
+def test_golden_prompt_forbids_autonomous_concessions():
+    """授权红线:让利/补偿类酌情决定不得被归纳成 AI 可自主执行的步骤。"""
+    assert "授权红线" in GOLDEN_SYSTEM_PROMPT
+    assert "不得" in GOLDEN_SYSTEM_PROMPT
+    assert "转人工" in GOLDEN_SYSTEM_PROMPT
+    assert "主动让利" not in GOLDEN_SYSTEM_PROMPT
