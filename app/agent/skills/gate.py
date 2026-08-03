@@ -28,6 +28,15 @@ _AUX_PREFIX = "_"
 _SAFE_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
+def is_safe_skill_name(skill_name: str) -> bool:
+    """skill 名是否为单个安全路径段。
+
+    门禁与转正 CLI 共用同一判定,避免两处规则漂移——候选名来自 LLM 生成的
+    frontmatter 或命令行参数,含 .. 或路径分隔符会让写入落到目标目录之外。
+    """
+    return bool(_SAFE_SKILL_NAME_RE.match(skill_name or ""))
+
+
 def build_shadow_dir(definitions_dir: str, skill_name: str,
                      candidate_path: str, dest_root: str) -> Path:
     """构建影子技能目录:正式技能全量复制 + 用候选覆盖(或新增)目标 skill。
@@ -36,7 +45,7 @@ def build_shadow_dir(definitions_dir: str, skill_name: str,
 
     skill_name 非法(不是单个安全路径段)时抛 ValueError。
     """
-    if not _SAFE_SKILL_NAME_RE.match(skill_name or ""):
+    if not is_safe_skill_name(skill_name):
         raise ValueError(f"非法 skill 名(必须是单个安全路径段): {skill_name!r}")
 
     src = Path(definitions_dir)

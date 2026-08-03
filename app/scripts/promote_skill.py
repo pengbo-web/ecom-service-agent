@@ -27,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.agent.skills.gate import is_safe_skill_name  # noqa: E402
 from app.agent.skills.validator import validate_candidate  # noqa: E402
 from app.utils.console import enable_utf8_stdout  # noqa: E402
 
@@ -50,7 +51,14 @@ def list_candidates(candidates_dir: str, definitions_dir: str) -> list[dict]:
         skill_file = skill_dir / "SKILL.md"
         if not skill_dir.is_dir() or not skill_file.exists():
             continue
-        report = validate_candidate(skill_file.read_text(encoding="utf-8"))
+        if not is_safe_skill_name(skill_dir.name):
+            continue   # 目录名不合法(不可能是我们写出的候选),跳过
+        # 逐项容错:单个候选文件读不出/解不开不该让整份清单崩掉,标为不合法继续列。
+        try:
+            report = validate_candidate(skill_file.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            report = {"valid": False, "unknown_tools": [],
+                      "errors": [f"读取候选失败: {type(exc).__name__}: {exc}"]}
         items.append({
             "name": skill_dir.name,
             "path": str(skill_file),
@@ -68,6 +76,8 @@ def backup_current(definitions_dir: str, skill_name: str, archive_dir: str,
 
     正式目录尚无该 skill(全新候选)→ 无需备份,返回 None。
     """
+    if not is_safe_skill_name(skill_name):
+        return None
     live = Path(definitions_dir) / skill_name / "SKILL.md"
     if not live.exists():
         return None
@@ -86,6 +96,10 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
     返回 `{"promoted": bool, "reason": str, "backup": str | None}`。
     任一关卡不过都不写正式目录(force 只放行门禁,不放行校验)。
     """
+    if not is_safe_skill_name(skill_name):
+        return {"promoted": False, "reason": f"非法 skill 名,拒绝操作: {skill_name!r}",
+                "backup": None}
+
     candidate = Path(candidates_dir) / skill_name / "SKILL.md"
     if not candidate.exists():
         return {"promoted": False, "reason": f"候选不存在: {candidate}", "backup": None}
@@ -116,6 +130,10 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
 
 def rollback(skill_name: str, definitions_dir: str, archive_dir: str) -> dict:
     """从最新备份恢复正式目录里的该 skill(劣化回滚)。"""
+    if not is_safe_skill_name(skill_name):
+        return {"rolled_back": False, "reason": f"非法 skill 名,拒绝操作: {skill_name!r}",
+                "restored_from": None}
+
     skill_archive = Path(archive_dir) / skill_name
     stamps = sorted(
         (d for d in skill_archive.iterdir() if d.is_dir() and (d / "SKILL.md").exists()),

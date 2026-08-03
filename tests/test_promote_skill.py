@@ -3,6 +3,8 @@
 强调：这是全仓库唯一允许写 definitions/ 正式目录的自动化路径。
 """
 
+from pathlib import Path
+
 from app.scripts.promote_skill import (
     backup_current,
     list_candidates,
@@ -190,3 +192,49 @@ def test_archive_dir_not_loaded_by_skill_manager(tmp_path):
     sm = SkillManager(skills_dir=definitions, enabled=True)
     assert sm.skill_names == ["process-return"]
     assert sm.skill_count == 1
+
+
+# ---------- 路径安全:本模块是唯一允许写正式目录的入口,必须自守 ----------
+
+def test_rollback_rejects_unsafe_skill_name(tmp_path):
+    """rollback("..") 会把 _archive/.. 解回 definitions/,必须在动手之前拒绝。"""
+    definitions, cand_dir, archive = _dirs(tmp_path)
+    before = (tmp_path / "definitions" / "process-return" / "SKILL.md").read_text(encoding="utf-8")
+
+    for bad in ("..", "../evil", "a/b", "a\\b", ""):
+        result = rollback(bad, definitions, archive)
+        assert result["rolled_back"] is False, bad
+        assert "非法" in result["reason"], bad
+
+    assert (tmp_path / "definitions" / "process-return" / "SKILL.md").read_text(
+        encoding="utf-8") == before
+    assert not (tmp_path / "SKILL.md").exists()      # 没写到 definitions/ 之外
+
+
+def test_promote_rejects_unsafe_skill_name(tmp_path):
+    definitions, cand_dir, archive = _dirs(tmp_path, candidates={"process-return": CANDIDATE_MD})
+
+    for bad in ("..", "../evil", "a/b", ""):
+        result = promote(bad, definitions, cand_dir, archive,
+                         gate_result=PASS_GATE, force=True, timestamp="t1")
+        assert result["promoted"] is False, bad
+        assert "非法" in result["reason"], bad
+
+
+def test_backup_current_rejects_unsafe_skill_name(tmp_path):
+    definitions, _, archive = _dirs(tmp_path)
+    assert backup_current(definitions, "..", archive, "t1") is None
+
+
+def test_list_candidates_survives_unreadable_candidate(tmp_path):
+    """单个候选解不开不能让整份清单崩掉——标为不合法,其余照常列出。"""
+    definitions, cand_dir, _ = _dirs(tmp_path, candidates={"process-return": CANDIDATE_MD})
+    broken = Path(cand_dir) / "broken-skill"
+    broken.mkdir(parents=True)
+    (broken / "SKILL.md").write_bytes(b"\xff\xfe\x00 not utf-8 \xff")
+
+    items = {c["name"]: c for c in list_candidates(cand_dir, definitions)}
+
+    assert items["process-return"]["valid"] is True          # 好的仍在
+    assert items["broken-skill"]["valid"] is False           # 坏的被标记而非崩掉
+    assert any("读取候选失败" in e for e in items["broken-skill"]["errors"])
