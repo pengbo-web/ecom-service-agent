@@ -1,6 +1,20 @@
 ---
 name: process-return
 description: 当用户要退货、退款、换货时使用。指导客服完成完整的退货退款流程：确认订单信息、验证退货资格、检索退换货政策、申请退款、告知后续进度。适用关键词：退货、退款、换货、不想要了、质量问题、尺码不合适。
+workflow:
+  slots:
+    order_id:
+      pattern: '^ORD-\d{8}-[\w-]+$'
+      hint: '订单号形如 ORD-20240115-001；查不到时请先用 list_user_orders 让用户确认'
+    reason:
+      min_length: 2
+      hint: '退款原因必须先与用户确认，不能替用户填写'
+  guards:
+    - tool: apply_refund
+      requires_tools: [query_order]
+      same_args: [order_id]
+      validate: [order_id, reason]
+      deny: '退款前必须先用 query_order 核对该订单，并与用户确认退款原因（本流程第一步与第四步）'
 ---
 
 ## 退货退款处理流程
