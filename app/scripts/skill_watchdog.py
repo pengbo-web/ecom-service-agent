@@ -210,6 +210,10 @@ def main() -> None:
             rates = (f"live={r['live_rate']} canary={r['canary_rate']} "
                      f"n={r['canary_samples']}")
             print(f"[{r['decision']}/{r['action']}] {r['skill_name']}: {r['reason']} | {rates}")
+            # detail 里放的是可执行指引(尤其"无法自动回滚→该 skill 仍在线上,需人工处理"),
+            # 不打出来等于护栏只改对了库里的记账,却没人知道要去处理。
+            if r.get("detail"):
+                print(f"    → {r['detail']}")
 
     if not (args.start or args.start_all or args.check):
         parser.error("需要 --start / --start-all / --check 之一")
