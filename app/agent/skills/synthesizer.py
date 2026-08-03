@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.agent.skills.loader import _parse_frontmatter
+from app.agent.skills.validator import known_tool_names, validate_candidate
 
 # 粗聚类：会话首条 user 消息命中的意图关键词组（朴素规则，按顺序匹配，先中先得）
 INTENT_KEYWORDS: list[tuple[str, list[str]]] = [
@@ -58,6 +58,16 @@ description: <一句话描述适用场景与关键词，供路由匹配>
 - frontmatter 之后是 Markdown body，写出处理该类问题的步骤化流程
   （参考：第一步...第二步...注意事项，风格对齐已有 skill）。
 """
+
+def build_tool_hint(known: set[str] | None = None) -> str:
+    """把真实工具清单拼成 prompt 片段,防 LLM 凭空编工具名(实测编过 order_list)。"""
+    names = sorted(known if known is not None else known_tool_names())
+    return (
+        "\n可用工具清单(**只能使用**下列工具名,禁止编造其它工具):\n"
+        + "\n".join(f"- {n}" for n in names)
+        + "\n引用工具时用反引号包裹,例如 `query_order`。\n"
+    )
+
 
 IMPROVE_SYSTEM_PROMPT = """你是电商客服 Skill 改进器。
 
@@ -128,40 +138,46 @@ def _build_prompt(group: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def synthesize_one(client, model: str, group: list[dict]) -> dict | None:
+def synthesize_one(client, model: str, group: list[dict],
+                   system_prompt: str = SYNTH_SYSTEM_PROMPT,
+                   known_tools: set[str] | None = None) -> dict | None:
     """LLM 从同类样本归纳出一个候选 skill。
 
-    坏 LLM 输出（无法解析出 name/description）→ 返回 None，调用方跳过不崩。
+    - system_prompt 可替换(金牌客服蒸馏用不同的归纳指令)。
+    - 真实工具清单注入 system prompt;产物再过 validate_candidate 兜底——
+      坏 frontmatter 或引用未知工具 → 返回 None,调用方跳过不崩。
     """
+    known = known_tools if known_tools is not None else known_tool_names()
     prompt = _build_prompt(group)
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": SYNTH_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt + build_tool_hint(known)},
             {"role": "user", "content": prompt},
         ],
     )
     content = response.choices[0].message.content or ""
 
-    meta = _parse_frontmatter(content)
-    name = str(meta.get("name") or "").strip()
-    description = str(meta.get("description") or "").strip()
-    if not name or not description:
+    report = validate_candidate(content, known=known)
+    if not report["valid"]:
         return None
 
-    return {"name": name, "content": content}
+    return {"name": report["name"], "content": content}
 
 
-def synthesize_skills(client, model: str, samples: list[dict], out_dir: str) -> list[Path]:
+def synthesize_skills(client, model: str, samples: list[dict], out_dir: str,
+                      system_prompt: str = SYNTH_SYSTEM_PROMPT,
+                      known_tools: set[str] | None = None) -> list[Path]:
     """聚类 + 逐组合成候选 skill，写入 out_dir/<name>/SKILL.md。
 
     - 空样本 → []，不写文件。
-    - 样本数 <2 的组跳过（单例不成"重复模式"）。
-    - 坏 LLM 输出的组跳过（fail-soft），不影响其他组。
+    - 样本数 <2 的组跳过(单例不成"重复模式")。
+    - 坏输出/引用未知工具的组跳过(fail-soft),不影响其他组。
     """
     if not samples:
         return []
 
+    known = known_tools if known_tools is not None else known_tool_names()
     out_root = Path(out_dir)
     written: list[Path] = []
 
@@ -169,7 +185,8 @@ def synthesize_skills(client, model: str, samples: list[dict], out_dir: str) -> 
         if len(group) < MIN_GROUP_SIZE:
             continue
 
-        result = synthesize_one(client, model, group)
+        result = synthesize_one(client, model, group,
+                               system_prompt=system_prompt, known_tools=known)
         if result is None:
             continue
 
@@ -204,7 +221,8 @@ def _build_improve_prompt(skill: dict, failure_cases: list[dict]) -> str:
 
 
 def improve_skill(
-    client, model: str, skill: dict, failure_cases: list[dict], out_dir: str
+    client, model: str, skill: dict, failure_cases: list[dict], out_dir: str,
+    known_tools: set[str] | None = None,
 ) -> Path | None:
     """针对失败会话样本改进已有 skill，产出候选（不自动生效）。
 
@@ -215,28 +233,29 @@ def improve_skill(
       / HITL 升级且当轮 load 过该 skill）不在本函数实现，H3.5 的闭环入口
       会拼装好样本后传入。
     - 空失败样本 → 返回 None，不改、不调 LLM。
-    - LLM 输出经 `_parse_frontmatter` 校验；解析失败或 name 丢失（坏输出）
-      → 返回 None，不崩、不写文件。
+    - LLM 输出经 `validate_candidate` 校验（frontmatter 完整性 + 工具名真实存在）；
+      未通过（坏输出）→ 返回 None，不崩、不写文件。
     - 产物写 `out_dir/<name>/SKILL.md`（与 H3.1 候选同名则覆盖，均为候选，
       以新为准），返回写出的文件路径。
     """
     if not failure_cases:
         return None
 
+    known = known_tools if known_tools is not None else known_tool_names()
     prompt = _build_improve_prompt(skill, failure_cases)
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {"role": "system", "content": IMPROVE_SYSTEM_PROMPT},
+            {"role": "system", "content": IMPROVE_SYSTEM_PROMPT + build_tool_hint(known)},
             {"role": "user", "content": prompt},
         ],
     )
     content = response.choices[0].message.content or ""
 
-    meta = _parse_frontmatter(content)
-    name = str(meta.get("name") or "").strip()
-    if not name:
+    report = validate_candidate(content, known=known)
+    if not report["valid"]:
         return None
+    name = report["name"]
     # name 一致性兜底:LLM 意外改名会让候选目录漂移,甚至静默覆盖其他候选——按坏输出丢弃。
     if name != str(skill.get("name") or "").strip():
         return None
