@@ -114,13 +114,26 @@ def start_for_candidate(skill_name: str, definitions_dir: str, candidates_dir: s
 
 def check_canaries(definitions_dir: str, candidates_dir: str, archive_dir: str,
                    db) -> list[dict]:
-    """评估所有活跃灰度并自动收口:转正 / 回滚 / 继续观察。"""
+    """评估所有活跃灰度并自动收口:转正 / 回滚 / 继续观察。
+
+    收口铁律:**只有动作真的成功了才关闭灰度记录**。动作失败(如新建 skill
+    绩效不达标却无历史版本可回滚)必须保持灰度为活跃并明确升级给人工——否则
+    差劲的 skill 会永久留在线上,而库里却记着"已回滚",监控就此静默停止。
+    """
     results: list[dict] = []
     for row in db.list_active_canaries():
         skill_name = row["skill_name"]
-        traces = db.list_skill_traces(skill_name=skill_name, limit=1000)
+        is_ab = row.get("policy") == risk_mod.POLICY_CANARY_AB
 
-        if row.get("policy") == risk_mod.POLICY_CANARY_AB:
+        # 只取本轮灰度开始之后的轨迹:同一 skill 之前被废弃/已收口的灰度会留下
+        # variant=canary 的旧行,混进来会污染本候选的成功率与样本数。
+        started_at = str(row.get("started_at") or "")
+        traces = [
+            t for t in db.list_skill_traces(skill_name=skill_name, limit=1000)
+            if str(t.get("created_at") or "") >= started_at
+        ]
+
+        if is_ab:
             verdict = evaluate_ab(traces, min_samples=risk_mod.CANARY_MIN_SAMPLES,
                                   max_drop=risk_mod.CANARY_MAX_DROP)
         else:
@@ -133,25 +146,38 @@ def check_canaries(definitions_dir: str, candidates_dir: str, archive_dir: str,
                  "canary_samples": verdict["canary_samples"], "action": "none"}
 
         if verdict["decision"] == DECISION_PROMOTE:
-            if row.get("policy") == risk_mod.POLICY_CANARY_AB:
+            if is_ab:
                 # 灰度实战胜出 → 转正(force:实战证据强于离线门禁,校验仍会跑)
                 promoted = promote(skill_name, definitions_dir, candidates_dir, archive_dir,
                                    gate_result=None, force=True, timestamp=_now_stamp())
                 entry["action"] = "promoted" if promoted["promoted"] else "promote_failed"
                 entry["detail"] = promoted["reason"]
+                if promoted["promoted"]:
+                    db.finish_canary(skill_name, "promoted")
+                # 转正失败 → 灰度保持活跃,下轮再判(不留"已转正"的假记录)
             else:
                 entry["action"] = "watch_passed"   # 绝对值达标,结束监控
-            db.finish_canary(skill_name, "promoted")
+                db.finish_canary(skill_name, "promoted")
 
         elif verdict["decision"] == DECISION_ROLLBACK:
-            if row.get("policy") == risk_mod.POLICY_CANARY_AB:
+            if is_ab:
                 # 候选还没进正式目录,废弃灰度即等于回滚,不必动 definitions
                 entry["action"] = "canary_discarded"
+                db.finish_canary(skill_name, "rolled_back")
             else:
                 back = rollback(skill_name, definitions_dir, archive_dir)
-                entry["action"] = "rolled_back" if back["rolled_back"] else "rollback_failed"
-                entry["detail"] = back["reason"]
-            db.finish_canary(skill_name, "rolled_back")
+                if back["rolled_back"]:
+                    entry["action"] = "rolled_back"
+                    entry["detail"] = back["reason"]
+                    db.finish_canary(skill_name, "rolled_back")
+                else:
+                    # 新建 skill 无历史版本可恢复 → 无法自动撤回。灰度保持活跃,
+                    # 明确升级人工:它此刻**仍在线上服务**,必须有人处理。
+                    entry["action"] = "rollback_failed_manual_required"
+                    entry["detail"] = (
+                        f"绩效不达标但无法自动回滚({back['reason']})。"
+                        f"该 skill 仍在线上生效,需人工处理:"
+                        f"检查 definitions/{skill_name}/SKILL.md 并决定改进或移除")
 
         results.append(entry)
     return results
