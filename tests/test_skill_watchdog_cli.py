@@ -159,6 +159,23 @@ def test_check_ignores_traces_from_before_this_canary(tmp_path):
     assert results[0]["canary_samples"] == 0
 
 
+def test_losing_candidate_is_moved_out_of_candidates(tmp_path):
+    """落败候选必须移出 _candidates/,否则下次 --start-all 会再拿真实流量试同一个烂候选。"""
+    definitions, candidates, archive, db = _setup(tmp_path, READONLY_CANDIDATE)
+    start_for_candidate("process-return", definitions, candidates, archive, db)
+
+    for _ in range(10):
+        db.record_skill_trace("s", "u", "process-return", [], "success", variant="live")
+    for _ in range(12):
+        db.record_skill_trace("s", "u", "process-return", [], "handoff", variant="canary")
+
+    results = check_canaries(definitions, candidates, archive, db)
+
+    assert results[0]["action"] == "canary_discarded"
+    assert not (Path(candidates) / "process-return" / "SKILL.md").exists()
+    assert list(Path(archive).glob("process-return/rejected-*/SKILL.md"))
+
+
 def test_promote_blocked_when_candidate_became_high_risk(tmp_path):
     """开灰度后候选被覆盖成动钱内容:即使灰度跑赢也必须拒绝自动上线。"""
     definitions, candidates, archive, db = _setup(tmp_path, READONLY_CANDIDATE)

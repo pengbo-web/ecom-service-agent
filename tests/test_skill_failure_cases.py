@@ -60,3 +60,11 @@ def test_respects_max_per_skill():
 
 def test_empty_inputs_return_empty():
     assert collect_failures_by_skill([], []) == {}
+
+
+def test_canary_variant_failures_are_not_blamed_on_live_skill():
+    """灰度候选造成的失败不得算作 live skill 的失败。"""
+    traces = [{"session_id": "s1", "skill_name": "process-return",
+               "outcome": "handoff", "variant": "canary", "tool_calls": []}]
+    archives = [_archive("s1", "退款没人管")]
+    assert collect_failures_by_skill(traces, archives) == {}

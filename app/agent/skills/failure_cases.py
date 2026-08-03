@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+from app.agent.skills.canary import VARIANT_CANARY
 from app.agent.skills.execution_trace import OUTCOME_HANDOFF, OUTCOME_TOOL_ERROR
 
 # 视为"该 skill 没搞定"的结局:转人工 / 工具报错
@@ -22,6 +23,8 @@ def collect_failures_by_skill(
     """把失败轨迹关联到归档会话,按 skill 分组返回可用于改进的样本。
 
     - 只取 outcome 命中 FAILURE_OUTCOMES 的轨迹;
+    - 跳过 variant=canary 的轨迹:灰度候选造成的失败不能算在 live skill 头上
+      (否则会拿它去"改进"线上版,顺带覆盖候选文件);
     - 按 session_id 关联归档会话,关联不到的轨迹跳过(会话尚未归档);
     - 同一会话在同一 skill 下只算一个样本(去重,避免重复内容喂 LLM);
     - 每个 skill 最多 max_per_skill 条(控 prompt 体积与成本)。
@@ -34,6 +37,8 @@ def collect_failures_by_skill(
     for trace in traces:
         if trace.get("outcome") not in FAILURE_OUTCOMES:
             continue
+        if trace.get("variant") == VARIANT_CANARY:
+            continue   # 灰度候选造成的失败不能算在 live skill 头上(否则会拿它去"改进"线上版)
         skill_name = str(trace.get("skill_name") or "").strip()
         session_id = trace.get("session_id")
         if not skill_name or not session_id:

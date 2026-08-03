@@ -226,6 +226,49 @@ def test_backup_current_rejects_unsafe_skill_name(tmp_path):
     assert backup_current(definitions, "..", archive, "t1") is None
 
 
+MISMATCHED_NAME_MD = """---
+name: some-other-skill
+description: 目录名与 frontmatter name 不一致。
+---
+第一步：调用 `query_order`。
+"""
+
+
+def test_promote_rejects_name_dir_mismatch(tmp_path):
+    """目录名与 frontmatter name 不一致必须拒绝:否则线上会注册成另一个名字。"""
+    definitions, cand_dir, archive = _dirs(tmp_path, candidates={"process-return": MISMATCHED_NAME_MD})
+
+    result = promote("process-return", definitions, cand_dir, archive,
+                     gate_result=PASS_GATE, force=True, timestamp="t1")
+
+    assert result["promoted"] is False
+    assert "不一致" in result["reason"]
+    live = tmp_path / "definitions" / "process-return" / "SKILL.md"
+    assert live.read_text(encoding="utf-8") == LIVE_MD
+
+
+def test_list_candidates_flags_name_dir_mismatch(tmp_path):
+    definitions, cand_dir, _ = _dirs(tmp_path, candidates={"process-return": MISMATCHED_NAME_MD})
+    item = list_candidates(cand_dir, definitions)[0]
+    assert item["valid"] is False
+    assert any("不一致" in e for e in item["errors"])
+
+
+def test_rollback_ignores_rejected_archive_dirs(tmp_path):
+    """rejected-* 是落败候选的存档,从未上线过,不得被当成可回滚的版本。"""
+    definitions, cand_dir, archive = _dirs(tmp_path, candidates={"process-return": CANDIDATE_MD})
+    promote("process-return", definitions, cand_dir, archive, PASS_GATE, False, "20260801-090000")
+    rej = Path(archive) / "process-return" / "rejected-99999999-999999"
+    rej.mkdir(parents=True)
+    (rej / "SKILL.md").write_text("REJECTED CONTENT", encoding="utf-8")
+
+    result = rollback("process-return", definitions, archive)
+
+    assert result["rolled_back"] is True
+    live = tmp_path / "definitions" / "process-return" / "SKILL.md"
+    assert live.read_text(encoding="utf-8") == LIVE_MD     # 恢复的是真正上线过的版本
+
+
 def test_list_candidates_survives_unreadable_candidate(tmp_path):
     """单个候选解不开不能让整份清单崩掉——标为不合法,其余照常列出。"""
     definitions, cand_dir, _ = _dirs(tmp_path, candidates={"process-return": CANDIDATE_MD})

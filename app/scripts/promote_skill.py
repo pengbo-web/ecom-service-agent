@@ -40,6 +40,15 @@ def _now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
+def _atomic_write(dest: Path, content: str) -> None:
+    """先写临时文件再原子替换:半截写入会让 frontmatter 解析失败,而 SkillManager
+    对解析失败的 skill 是**静默跳过** —— 线上会直接少一个 skill 且无任何报错。
+    本流程由看门狗无人值守执行,必须原子。"""
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.write_text(content, encoding="utf-8")
+    tmp.replace(dest)
+
+
 def list_candidates(candidates_dir: str, definitions_dir: str) -> list[dict]:
     """列出候选及其校验结果。is_improvement=正式目录已存在同名 skill(改进版)。"""
     root = Path(candidates_dir)
@@ -59,6 +68,16 @@ def list_candidates(candidates_dir: str, definitions_dir: str) -> list[dict]:
         except Exception as exc:  # noqa: BLE001
             report = {"valid": False, "unknown_tools": [],
                       "errors": [f"读取候选失败: {type(exc).__name__}: {exc}"]}
+
+        # 目录名必须与 frontmatter 的 name 一致:否则影子目录会把候选放进 <dir> 槽位,
+        # 而 SkillManager 按 frontmatter name 注册 → 被测 skill 直接从影子集里消失,
+        # 基线与候选打成平手 → 门禁误判"无劣化"而放行。
+        declared = str(report.get("name") or "")
+        if declared and declared != skill_dir.name:
+            report = {"valid": False, "unknown_tools": report.get("unknown_tools", []),
+                      "errors": list(report.get("errors", []))
+                      + [f"目录名 {skill_dir.name!r} 与 frontmatter name {declared!r} 不一致"]}
+
         items.append({
             "name": skill_dir.name,
             "path": str(skill_file),
@@ -110,6 +129,12 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
         return {"promoted": False,
                 "reason": "校验未通过: " + "; ".join(report["errors"]), "backup": None}
 
+    if report["name"] != skill_name:
+        return {"promoted": False,
+                "reason": f"frontmatter name {report['name']!r} 与目标 skill 名 {skill_name!r} 不一致,"
+                          "拒绝转正(会让线上目录注册成另一个名字,真 skill 从目录中消失)",
+                "backup": None}
+
     if not force:
         if gate_result is None:
             return {"promoted": False, "reason": "缺少门禁结果,拒绝转正", "backup": None}
@@ -121,7 +146,7 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
 
     dest_dir = Path(definitions_dir) / skill_name
     dest_dir.mkdir(parents=True, exist_ok=True)
-    (dest_dir / "SKILL.md").write_text(content, encoding="utf-8")
+    _atomic_write(dest_dir / "SKILL.md", content)
 
     return {"promoted": True,
             "reason": "已转正" + ("(--force 跳过门禁)" if force else ""),
@@ -136,7 +161,8 @@ def rollback(skill_name: str, definitions_dir: str, archive_dir: str) -> dict:
 
     skill_archive = Path(archive_dir) / skill_name
     stamps = sorted(
-        (d for d in skill_archive.iterdir() if d.is_dir() and (d / "SKILL.md").exists()),
+        (d for d in skill_archive.iterdir()
+         if d.is_dir() and not d.name.startswith("rejected-") and (d / "SKILL.md").exists()),
         key=lambda d: d.name,
     ) if skill_archive.exists() else []
 
@@ -146,7 +172,8 @@ def rollback(skill_name: str, definitions_dir: str, archive_dir: str) -> dict:
     newest = stamps[-1]
     dest_dir = Path(definitions_dir) / skill_name
     dest_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(newest / "SKILL.md", dest_dir / "SKILL.md")
+    _atomic_write(dest_dir / "SKILL.md",
+                  (newest / "SKILL.md").read_text(encoding="utf-8"))
     return {"rolled_back": True, "reason": f"已回滚到 {newest.name}",
             "restored_from": str(newest / "SKILL.md")}
 
@@ -168,7 +195,16 @@ def main() -> None:
         for item in items:
             kind = "改进" if item["is_improvement"] else "新建"
             status = "✅ 可转正" if item["valid"] else f"❌ {'; '.join(item['errors'])}"
-            print(f"[{kind}] {item['name']}: {status}")
+            tier = ""
+            if item["valid"]:
+                try:
+                    from app.agent.skills.risk import classify_risk, promotion_policy
+                    _risk = classify_risk(Path(item["path"]).read_text(encoding="utf-8"),
+                                          is_new_skill=not item["is_improvement"])
+                    tier = f" | 风险={_risk} 放行={promotion_policy(_risk)}"
+                except Exception:  # noqa: BLE001 判档失败不影响列表可用
+                    tier = " | 风险=未知(判档失败)"
+            print(f"[{kind}] {item['name']}: {status}{tier}")
         return
 
     if not args.skill_name:

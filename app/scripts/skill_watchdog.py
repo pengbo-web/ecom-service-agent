@@ -18,6 +18,7 @@ promote() 内部的工具名校验照跑——force 从不放行编造工具名�
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -112,6 +113,24 @@ def start_for_candidate(skill_name: str, definitions_dir: str, candidates_dir: s
             "detail": promoted["reason"]}
 
 
+def _archive_rejected(skill_name: str, candidates_dir: str, archive_dir: str) -> str | None:
+    """把落败候选从 _candidates/ 移到 _archive/<name>/rejected-<ts>/SKILL.md。
+
+    保留以便复盘,同时确保它不再被 list_candidates 选中重开灰度。移动失败返回 None
+    (不抛:收口流程不该因归档失败而中断)。
+    """
+    src = Path(candidates_dir) / skill_name / "SKILL.md"
+    if not src.exists():
+        return None
+    try:
+        dest_dir = Path(archive_dir) / skill_name / f"rejected-{_now_stamp()}"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dest_dir / "SKILL.md"))
+        return str(dest_dir / "SKILL.md")
+    except OSError:
+        return None
+
+
 def check_canaries(definitions_dir: str, candidates_dir: str, archive_dir: str,
                    db) -> list[dict]:
     """评估所有活跃灰度并自动收口:转正 / 回滚 / 继续观察。
@@ -181,8 +200,13 @@ def check_canaries(definitions_dir: str, candidates_dir: str, archive_dir: str,
 
         elif verdict["decision"] == DECISION_ROLLBACK:
             if is_ab:
-                # 候选还没进正式目录,废弃灰度即等于回滚,不必动 definitions
+                # 候选还没进正式目录,废弃灰度即等于回滚,不必动 definitions。
+                # 但必须把落败候选移出 _candidates/,否则下次 --start-all 会对同一个
+                # 已知烂候选再开一次 50% 灰度,反复拿真实流量试错。
                 entry["action"] = "canary_discarded"
+                moved = _archive_rejected(skill_name, candidates_dir, archive_dir)
+                entry["detail"] = (f"落败候选已移至 {moved}" if moved
+                                   else "落败候选移动失败,请手动清理 _candidates/")
                 db.finish_canary(skill_name, "rolled_back")
             else:
                 back = rollback(skill_name, definitions_dir, archive_dir)
@@ -234,6 +258,14 @@ def main() -> None:
             # 不打出来等于护栏只改对了库里的记账,却没人知道要去处理。
             if r.get("detail"):
                 print(f"    → {r['detail']}")
+
+        needs_human = [r for r in results
+                       if r["action"] in ("rollback_failed_manual_required",
+                                          "promote_blocked_risk_changed",
+                                          "promote_blocked", "promote_failed")]
+        if needs_human:
+            print(f"\n⚠ {len(needs_human)} 项需人工处理(见上方 → 指引),以非零码退出以便告警")
+            sys.exit(1)
 
     if not (args.start or args.start_all or args.check):
         parser.error("需要 --start / --start-all / --check 之一")

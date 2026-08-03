@@ -397,6 +397,7 @@ class EcomAgent:
                 {"success": False, "error": denial, "workflow_guard": True},
                 ensure_ascii=False)
             self._emit({"type": "workflow_guard", "name": name, "reason": denial})
+            self._emit({"type": "tool_result", "content": result_str})   # 与 tool_call 配对,否则前端工具卡片一直转
             turn = getattr(self, "_skill_turn", None)
             if turn is not None:
                 try:
