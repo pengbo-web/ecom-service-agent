@@ -41,6 +41,7 @@ from app.scripts.promote_skill import (  # noqa: E402
     promote,
     rollback,
 )
+from app.utils.console import enable_utf8_stdout  # noqa: E402
 
 
 def _now_stamp() -> str:
@@ -157,6 +158,7 @@ def check_canaries(definitions_dir: str, candidates_dir: str, archive_dir: str,
 
 
 def main() -> None:
+    enable_utf8_stdout()
     parser = argparse.ArgumentParser(description="Skill 灰度看门狗(在线自进化收口)")
     parser.add_argument("--start", metavar="SKILL", help="按风险档为该候选开灰度/走门禁")
     parser.add_argument("--start-all", action="store_true", help="对所有候选逐个执行 --start")
