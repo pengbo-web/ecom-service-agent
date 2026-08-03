@@ -60,20 +60,37 @@ class SkillTurn:
     skill_name: str = ""
     tool_calls: list[dict] = field(default_factory=list)
 
-    def note_tool_call(self, name: str, result_str: str) -> None:
-        """记录一次工具调用。若是成功的 load_skill,同时记下本轮加载的 skill 名。"""
+    def note_tool_call(self, name: str, result_str: str, args: dict | None = None) -> None:
+        """记录一次工具调用。若是成功的 load_skill,同时记下 skill 名与加载的版本。
+
+        args 一并记录:G1 守卫要据此判定"前置调用的参数与本次是否一致"。
+        """
         ok, error = _parse_result(result_str)
         if name == LOAD_SKILL_TOOL and ok:
             loaded = _loaded_skill_name(result_str)
             if loaded:
                 self.skill_name = loaded
-        self.tool_calls.append({"name": name, "ok": ok, "error": error})
+        self.tool_calls.append({"name": name, "ok": ok, "error": error,
+                                "args": dict(args or {})})
+
+    def note_blocked(self, name: str, args: dict | None, reason: str) -> None:
+        """记录一次被工作流守卫拦下的调用(未执行)。
+
+        blocked 条目不计入 tool_error:守卫拦住跳步、模型随后补齐并成功,是守卫
+        起作用而非本轮失败。若计入失败,守卫越有效灰度成功率越难看。
+        """
+        self.tool_calls.append({"name": name, "ok": False, "error": reason,
+                                "args": dict(args or {}), "blocked": True})
+
+    @property
+    def blocked_count(self) -> int:
+        return sum(1 for call in self.tool_calls if call.get("blocked"))
 
     def outcome(self, requires_human: bool) -> str:
-        """本轮结局:转人工 > 工具失败 > 成功(转人工是更强的负信号,优先)。"""
+        """本轮结局:转人工 > 真实工具失败 > 成功(守卫拦截不算失败)。"""
         if requires_human:
             return OUTCOME_HANDOFF
-        if any(not call["ok"] for call in self.tool_calls):
+        if any(not call["ok"] and not call.get("blocked") for call in self.tool_calls):
             return OUTCOME_TOOL_ERROR
         return OUTCOME_SUCCESS
 

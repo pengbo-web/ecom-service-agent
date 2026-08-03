@@ -44,8 +44,9 @@ def test_tool_call_ok_and_error_flags():
                                                    ensure_ascii=False))
     turn.note_tool_call("query_product", json.dumps({"error": "工具执行出错: boom"}, ensure_ascii=False))
 
-    assert turn.tool_calls[0] == {"name": "query_order", "ok": True, "error": None}
-    assert turn.tool_calls[1] == {"name": "apply_refund", "ok": False, "error": "订单不存在"}
+    assert turn.tool_calls[0] == {"name": "query_order", "ok": True, "error": None, "args": {}}
+    assert turn.tool_calls[1] == {"name": "apply_refund", "ok": False, "error": "订单不存在",
+                                  "args": {}}
     assert turn.tool_calls[2]["ok"] is False
 
 
@@ -141,3 +142,49 @@ def test_record_skill_turn_noop_without_skill(tmp_path, monkeypatch):
         requires_human=False, follow_up_question=None))
 
     assert db.list_skill_traces() == []   # 未加载 skill 的轮次不落库
+
+
+# ---------- G1:工具参数与守卫拦截标记 ----------
+
+def test_note_tool_call_records_args():
+    turn = SkillTurn()
+    turn.note_tool_call("query_order", json.dumps({"success": True}, ensure_ascii=False),
+                        args={"order_id": "ORD-20240115-001"})
+    assert turn.tool_calls[0]["args"] == {"order_id": "ORD-20240115-001"}
+
+
+def test_note_tool_call_args_default_empty_dict():
+    turn = SkillTurn()
+    turn.note_tool_call("query_order", json.dumps({"success": True}, ensure_ascii=False))
+    assert turn.tool_calls[0]["args"] == {}
+
+
+def test_note_blocked_marks_entry():
+    turn = SkillTurn()
+    turn.note_blocked("apply_refund", {"order_id": "X"}, "退款前必须先查单")
+
+    entry = turn.tool_calls[0]
+    assert entry["name"] == "apply_refund"
+    assert entry["ok"] is False
+    assert entry["blocked"] is True
+    assert "先查单" in entry["error"]
+    assert turn.blocked_count == 1
+
+
+def test_blocked_does_not_count_as_tool_error():
+    """守卫拦截后模型补齐并成功 → 本轮算成功,不能因拦截判失败。"""
+    turn = SkillTurn()
+    turn.note_blocked("apply_refund", {}, "退款前必须先查单")
+    turn.note_tool_call("query_order", json.dumps({"success": True}, ensure_ascii=False))
+    turn.note_tool_call("apply_refund", json.dumps({"success": True}, ensure_ascii=False))
+
+    assert turn.outcome(requires_human=False) == OUTCOME_SUCCESS
+    assert turn.blocked_count == 1
+
+
+def test_real_tool_failure_still_counts():
+    turn = SkillTurn()
+    turn.note_blocked("apply_refund", {}, "先查单")
+    turn.note_tool_call("query_order", json.dumps({"success": False, "error": "订单不存在"},
+                                                  ensure_ascii=False))
+    assert turn.outcome(requires_human=False) == OUTCOME_TOOL_ERROR

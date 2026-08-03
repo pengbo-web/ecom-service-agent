@@ -362,7 +362,7 @@ class EcomAgent:
         turn = getattr(self, "_skill_turn", None)
         if turn is not None:
             try:
-                turn.note_tool_call(name, result_str)
+                turn.note_tool_call(name, result_str, args=args)
             except Exception:  # noqa: BLE001
                 pass
 
