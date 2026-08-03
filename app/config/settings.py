@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     skills_dir: str = "app/agent/skills/definitions"
     # H3 Skill 离线合成入口开关（默认关，仅离线手动跑；产出候选，人工审核后才移入 definitions/ 生效）
     skill_synth_enabled: bool = False
+    skill_trace_enabled: bool = True   # G2:记录每轮 skill 执行轨迹(旁路埋点,异常不影响回复)
+    skill_gate_tolerance: float = 0.05  # G4:候选灰度评测允许的最大掉点,超过即拒绝转正
 
     # Evaluation 配置（第9期，离线评估工具，无聊天开关）
     eval_dataset_path: str = "app/evaluation/cases.json"

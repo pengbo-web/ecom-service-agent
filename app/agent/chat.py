@@ -133,6 +133,8 @@ class EcomAgent:
         self._step_seq = 0
         self._turn_recall = None   # 新一轮:召回缓存作废,按本轮问题重检索
         self._turn_item_ctx = None
+        from app.agent.skills.execution_trace import SkillTurn
+        self._skill_turn = SkillTurn()   # G2:新一轮 skill 执行轨迹(旁路埋点)
         self._checkpoint("in_flight")   # 回合开始:持久化用户消息 + 标记进行中
 
         # FAQ 语义缓存秒答(文档2.5缓存预热):QU 判定需检索的政策类问题先查预热缓存,
@@ -188,7 +190,28 @@ class EcomAgent:
         self._status = "complete"
         self.store.save(self.session_path, self._session_state())   # 回合结束:完整落盘(必落)
         self._write_snapshot()
+        self._record_skill_turn(result)
         return result
+
+    def _record_skill_turn(self, result: CustomerServiceResponse) -> None:
+        """G2:本轮若加载过 skill,把执行轨迹落库(供 G3 失败采集 / G4 门禁分析)。
+
+        旁路埋点:开关关闭、未加载 skill、或落库失败都直接返回,绝不影响回复。
+        """
+        if not settings.skill_trace_enabled:
+            return
+        turn = getattr(self, "_skill_turn", None)
+        if turn is None or not turn.has_skill:
+            return
+        try:
+            from app.db import get_db
+            get_db().record_skill_trace(
+                session_id=self.session_id, user_id=self.user_id,
+                skill_name=turn.skill_name, tool_calls=turn.tool_calls,
+                outcome=turn.outcome(result.requires_human),
+            )
+        except Exception:  # noqa: BLE001 埋点失败绝不影响本轮回复
+            pass
 
     def _session_state(self) -> dict:
         """当前会话状态(交给 SessionStore 持久化)。"""
@@ -334,6 +357,14 @@ class EcomAgent:
         self._emit({"type": "tool_call", "name": name, "args": args})          # before
         result_str = self.tool_manager.execute_tool(name, args)
         self._emit({"type": "tool_result", "content": result_str})             # after
+
+        # G2 旁路埋点:记进本轮 skill 轨迹。只观察不否决,异常一律吞掉。
+        turn = getattr(self, "_skill_turn", None)
+        if turn is not None:
+            try:
+                turn.note_tool_call(name, result_str)
+            except Exception:  # noqa: BLE001
+                pass
 
         # 记住/清除待确认动作:随会话状态持久化,供确认轮由服务端确定性重放(Phase 4 / R3)
         from app.agent.pending import evaluate_pending
