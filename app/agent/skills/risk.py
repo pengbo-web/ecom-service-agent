@@ -13,7 +13,9 @@
 
 from __future__ import annotations
 
+from app.agent.skills.loader import _parse_frontmatter
 from app.agent.skills.validator import referenced_tools
+from app.agent.skills.workflow import parse_workflow, referenced_workflow_tools
 
 RISK_HIGH = "high"
 RISK_MEDIUM = "medium"
@@ -29,9 +31,12 @@ HIGH_RISK_TOOLS = frozenset({
     "negotiate_price", "issue_invoice", "expedite_shipping",
 })
 
-# 承诺类措辞:即使只引用了只读工具,正文承诺免运费/赔付一样有资金后果
+# 承诺类措辞:即使只引用了只读工具,正文承诺免运费/赔付一样有资金后果。
+# 宁可误判成高危(多一次人工审核)也不能漏判——漏判会让让利承诺进入自动上线。
 COMMITMENT_KEYWORDS = (
-    "免运费", "免邮", "赔付", "补偿", "全额退", "承担运费", "包退", "先行赔付",
+    "免运费", "免邮", "包邮", "退运费", "承担运费",
+    "赔付", "先行赔付", "补偿", "全额退", "退差价", "返现",
+    "包退", "优惠券补发", "补发优惠券", "代金券",
 )
 
 # 灰度 A/B 参数(low 档)
@@ -44,9 +49,21 @@ ABSOLUTE_MIN_SAMPLES = 30
 ABSOLUTE_MIN_RATE = 0.6
 
 
+def _all_referenced_tools(content: str) -> set[str]:
+    """候选引用的工具全集:正文反引号 + workflow 声明里的 tool/requires_tools。
+
+    必须并上声明侧 —— workflow guards 正是本项目给"高危流程"用的惯用写法
+    (见 definitions/process-return),若只扫正文,一个把 apply_refund 只写在
+    guards 里的退款候选会被判成低危并进入自动上线,这是安全分级里最危险的漏判
+    方向。口径与 validator.validate_candidate 保持一致。
+    """
+    return referenced_tools(content) | referenced_workflow_tools(
+        parse_workflow(_parse_frontmatter(content)))
+
+
 def classify_risk(content: str, is_new_skill: bool = False) -> str:
     """判定候选风险档(high/medium/low)。规则按顺序命中即返回。"""
-    if referenced_tools(content) & HIGH_RISK_TOOLS:
+    if _all_referenced_tools(content) & HIGH_RISK_TOOLS:
         return RISK_HIGH
     if any(kw in content for kw in COMMITMENT_KEYWORDS):
         return RISK_HIGH
