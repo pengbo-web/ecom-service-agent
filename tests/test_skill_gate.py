@@ -5,6 +5,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from app.agent.skills.gate import build_shadow_dir, gate_candidate
 
 LIVE_MD = """---
@@ -148,3 +150,41 @@ def test_gate_fail_closed_when_eval_raises(tmp_path):
 
     assert result["promote"] is False
     assert "评测炸了" in result["reason"]
+
+
+def test_gate_fail_closed_when_eval_yields_no_comparable_metrics(tmp_path):
+    """评测返回空/缺 summary/指标全 None → 没有可比指标 → 必须拒绝。
+    "没测出劣化"不等于"证明了不劣化",绝不能据此放行。"""
+    definitions = _setup(tmp_path)
+    candidate = definitions / "_candidates" / "process-return" / "SKILL.md"
+
+    for bogus in (None, {}, {"summary": {}},
+                  {"summary": {"pass_rate": None, "avg_process_score": None,
+                               "avg_result_score": None}}):
+        result = gate_candidate("process-return", str(candidate), str(definitions),
+                                str(tmp_path / "shadow"), lambda d, c: bogus,
+                                ["return_request"])
+        assert result["promote"] is False, bogus
+        assert "可比指标" in result["reason"], bogus
+
+
+def test_build_shadow_dir_rejects_unsafe_skill_name(tmp_path):
+    """skill 名来自 LLM 生成的 frontmatter:含 .. 或分隔符必须拒绝。"""
+    definitions = _setup(tmp_path)
+    candidate = definitions / "_candidates" / "process-return" / "SKILL.md"
+
+    for bad in ("../evil", "a/b", "a\\b", "..", "/abs", ""):
+        with pytest.raises(ValueError):
+            build_shadow_dir(str(definitions), bad, str(candidate),
+                             str(tmp_path / "shadow-bad"))
+
+
+def test_gate_fail_closed_on_unsafe_skill_name(tmp_path):
+    """非法 skill 名走 gate 时同样 fail-closed(异常被兜住,不放行)。"""
+    definitions = _setup(tmp_path)
+    candidate = definitions / "_candidates" / "process-return" / "SKILL.md"
+    eval_fn, _ = _fake_eval({"live": 1.0, "shadow": 1.0})
+
+    result = gate_candidate("../evil", str(candidate), str(definitions),
+                            str(tmp_path / "shadow"), eval_fn, ["return_request"])
+    assert result["promote"] is False

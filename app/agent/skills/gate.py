@@ -14,6 +14,7 @@ fail-closed 原则:没有相关评测用例、或评测本身抛异常,都返回
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 
@@ -22,13 +23,22 @@ from app.evaluation.regression import compare_to_baseline
 # definitions/ 下这些前缀的目录是辅助目录(候选/备份),不属于正式技能集
 _AUX_PREFIX = "_"
 
+# skill 名必须是单个安全路径段:候选名来自 LLM 生成的 frontmatter,含 .. 或路径分隔符
+# 会让影子目录的写入落到 dest_root 之外。
+_SAFE_SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 
 def build_shadow_dir(definitions_dir: str, skill_name: str,
                      candidate_path: str, dest_root: str) -> Path:
     """构建影子技能目录:正式技能全量复制 + 用候选覆盖(或新增)目标 skill。
 
     dest_root 若已存在会被清空重建,保证每次门禁跑在干净目录上。
+
+    skill_name 非法(不是单个安全路径段)时抛 ValueError。
     """
+    if not _SAFE_SKILL_NAME_RE.match(skill_name or ""):
+        raise ValueError(f"非法 skill 名(必须是单个安全路径段): {skill_name!r}")
+
     src = Path(definitions_dir)
     dest = Path(dest_root)
     if dest.exists():
@@ -76,6 +86,13 @@ def gate_candidate(skill_name: str, candidate_path: str, definitions_dir: str,
                 "candidate": None, "comparison": None, "shadow_dir": None}
 
     comparison = compare_to_baseline(candidate, baseline, tolerance)
+    # fail-closed:没有任何可比指标(评测返回空/缺 summary/指标全为 None)时,
+    # compare_to_baseline 会给出 regressed=False —— 那是"没测出劣化",不是"证明了不劣化",
+    # 绝不能据此放行。
+    if not comparison["diffs"]:
+        return {"promote": False, "reason": "评测未产出可比指标,按 fail-closed 拒绝转正",
+                "baseline": baseline or None, "candidate": candidate or None,
+                "comparison": comparison, "shadow_dir": str(shadow)}
     regressed = comparison["regressed"]
     reason = "候选劣化超过容差,拒绝转正" if regressed else "候选未劣化,允许转正"
     return {"promote": not regressed, "reason": reason, "baseline": baseline,
