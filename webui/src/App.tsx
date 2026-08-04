@@ -7,6 +7,7 @@ import { ShopView } from "@/components/ShopView";
 import { OrdersView } from "@/components/OrdersView";
 import { EvalView } from "@/components/EvalView";
 import { MemoryView } from "@/components/MemoryView";
+import { SkillsView } from "@/components/SkillsView";
 import { LoginCard } from "@/components/LoginCard";
 import { adminFetch, openConversation, getUserId, setUserId, me, clearToken,
   getConfig, getToken, setToken, createUser, login, createOrder } from "@/lib/api";
@@ -109,6 +110,7 @@ export default function App() {
       {view === "seat" && <WorkbenchView />}
       {view === "eval" && <EvalView />}
       {view === "mem" && <MemoryView sessionId={sessionId} userId={userId} />}
+      {view === "skills" && <SkillsView />}
     </AppShell>
   );
 }

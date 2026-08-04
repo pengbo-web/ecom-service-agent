@@ -176,3 +176,31 @@ export async function adminTakeover(sessionId: string): Promise<{ mode: string }
   const r = await adminFetch(`/api/session/${sessionId}/takeover`, { method: "POST" });
   return r.json();
 }
+
+// ---- Skill 管理(自进化状态总览)----
+export type SkillCatalogEntry = { name: string; description: string };
+
+export type SkillCandidate = {
+  name: string; path: string; valid: boolean;
+  unknown_tools: string[]; errors: string[]; is_improvement: boolean;
+  // risk/policy 为 null 表示"判不了"(候选文件读不出等),必须按"需人工复核"处理,不是低危
+  risk: string | null; policy: string | null;
+};
+
+export type SkillCanary = {
+  skill_name: string; candidate_path: string; percent: number;
+  risk: string | null; policy: string | null; status: string;
+  started_at: string; finished_at: string | null;
+};
+
+export type SkillsOverview = {
+  live: SkillCatalogEntry[];
+  candidates: SkillCandidate[];
+  traces: Record<string, Record<string, number>>;
+  traces_window: { limit: number; note: string };
+  canaries: SkillCanary[];
+};
+
+export function getSkillsOverview(): Promise<SkillsOverview> {
+  return getJSON<SkillsOverview>("/api/admin/skills");
+}
