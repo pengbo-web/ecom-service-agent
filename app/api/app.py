@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -42,6 +42,9 @@ _DIST_DIR = _WEB_DIR / "dist"
 # (高频 skill 可能挤占低频 skill 的样本)。响应里 traces_window.limit 直接引用
 # 这个常量,保证"披露的数字"与"实际查询用的数字"不会走偏。
 _TRACE_WINDOW = 500
+
+# 上传技能包的体积上限(压缩包本身,解压后另有 bundle 模块的三重上限)
+_MAX_UPLOAD_BYTES = 5_000_000
 
 
 def _sse_frame(event: dict) -> str:
@@ -713,6 +716,76 @@ def create_app(session_manager: Optional[SessionManager] = None,
             },
             "canaries": canaries,
         }
+
+    @app.post("/api/admin/skills/upload", dependencies=[Depends(admin_auth)])
+    async def admin_upload_skill(file: UploadFile = File(...)):
+        """上传技能包(.zip)或单个 SKILL.md,作为**候选**(绝不直写正式目录)。
+
+        上传内容与 LLM 生成的候选同级不可信,故走同一套关卡:安全解压(防穿越/
+        炸弹/符链)+ validate_candidate(frontmatter 完整 + 工具名真实 + 名字是
+        安全路径段)。技能名只取**校验后 frontmatter 里的 name**,不取包内目录名、
+        不取上传文件名——多一个可控的路径来源就是多一个信任面。
+
+        流程:先解压到临时目录并校验,全部通过才整目录移进 _candidates/<name>/。
+        校验不通过返回 200 + accepted=false + 错误列表(前端统一渲染);
+        4xx 只留给鉴权与体积超限。
+        """
+        import shutil
+        import tempfile
+
+        from app.agent.skills.bundle import BundleError, extract_skill_bundle
+        from app.agent.skills.risk import classify_risk, promotion_policy
+        from app.agent.skills.validator import validate_candidate
+        from app.scripts import promote_skill as ps
+
+        raw = await file.read()
+        if len(raw) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(413, f"上传过大(上限 {_MAX_UPLOAD_BYTES} 字节)")
+
+        def _reject(errors: list[str], unknown: list[str] | None = None) -> dict:
+            return {"accepted": False, "name": "", "replaced": False, "risk": None,
+                    "policy": None, "files": [], "errors": errors,
+                    "unknown_tools": unknown or []}
+
+        filename = (file.filename or "").lower()
+        tmp_root = Path(tempfile.mkdtemp(prefix="skill_upload_"))
+        try:
+            if filename.endswith(".zip"):
+                try:
+                    info = extract_skill_bundle(raw, str(tmp_root))
+                except BundleError as exc:
+                    return _reject([str(exc)])
+                files = info["files"]
+            else:
+                # 单个 SKILL.md:视作只含一份说明的技能包
+                try:
+                    text = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    return _reject(["文件不是 UTF-8 文本(技能包请打成 .zip)"])
+                (tmp_root / "SKILL.md").write_text(text, encoding="utf-8")
+                files = []
+
+            content = (tmp_root / "SKILL.md").read_text(encoding="utf-8")
+            report = validate_candidate(content)
+            if not report["valid"]:
+                return _reject(report["errors"], report["unknown_tools"])
+
+            name = report["name"]
+            dest = Path(ps.CANDIDATES_DIR) / name
+            replaced = (dest / "SKILL.md").exists()
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.move(str(tmp_root), str(dest))
+
+            is_new = not (Path(ps.DEFINITIONS_DIR) / name / "SKILL.md").exists()
+            risk = classify_risk(content, is_new_skill=is_new)
+            return {"accepted": True, "name": name, "replaced": replaced,
+                    "risk": risk, "policy": promotion_policy(risk),
+                    "files": files, "errors": [], "unknown_tools": []}
+        finally:
+            if tmp_root.exists():
+                shutil.rmtree(tmp_root, ignore_errors=True)
 
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():
