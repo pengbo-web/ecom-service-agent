@@ -21,6 +21,9 @@ from app.agent.tools.shop_analytics import (
     shop_overview, product_diagnostics, service_quality,
 )
 from app.agent.tools.anomaly import anomaly_scan
+from app.agent.tools.growth import (
+    find_opportunities, draft_outreach, list_outreach_drafts_tool,
+)
 
 _TOOL_MAP: dict[str, Callable] = {
     "query_order": query_order,
@@ -43,6 +46,9 @@ _TOOL_MAP: dict[str, Callable] = {
     "product_diagnostics": product_diagnostics,
     "service_quality": service_quality,
     "anomaly_scan": anomaly_scan,
+    "find_opportunities": find_opportunities,
+    "draft_outreach": draft_outreach,
+    "list_outreach_drafts": list_outreach_drafts_tool,
 }
 
 if settings.bargain_enabled:
@@ -448,6 +454,59 @@ TOOL_DEFINITIONS.extend([
                 "type": "object",
                 "properties": {
                     "window_days": {"type": "integer", "description": "统计窗口天数，默认 7"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_opportunities",
+            "description": "【营销增长专用】按类型查找被漏掉的成交机会。kind: unpaid_order(已下单未付款) / stalled_bargain(议价未成交) / consulted_no_order(咨询过没下单)。只读。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string",
+                             "enum": ["unpaid_order", "stalled_bargain", "consulted_no_order"],
+                             "description": "商机类型"},
+                    "window_days": {"type": "integer", "description": "回看天数，默认 14"},
+                    "limit": {"type": "integer", "description": "最多返回条数，默认 20"},
+                },
+                "required": ["kind"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "draft_outreach",
+            "description": "【营销增长专用】为某个商机生成一条触达话术【草稿】，落入待审队列。注意：这只是草稿，不会发送给买家，必须由店主人工批准后才会发出。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "目标买家的 user_id"},
+                    "content": {"type": "string", "description": "触达话术正文，简短口语，3 句以内"},
+                    "kind": {"type": "string",
+                             "enum": ["unpaid_order", "stalled_bargain", "consulted_no_order"]},
+                    "order_id": {"type": "string", "description": "相关订单号（如有）"},
+                    "reason": {"type": "string", "description": "为什么触达这个人（给店主看的理由）"},
+                    "offer_note": {"type": "string", "description": "建议的优惠说明（不是承诺，需店主确认）"},
+                },
+                "required": ["user_id", "content", "kind"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_outreach_drafts",
+            "description": "【营销增长专用】查看触达草稿及其审批状态（draft/approved/rejected/sent）。只读。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "description": "按状态过滤，默认 draft"},
+                    "limit": {"type": "integer", "description": "最多返回条数，默认 20"},
                 },
                 "required": [],
             },
