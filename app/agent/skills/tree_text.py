@@ -55,7 +55,7 @@ def read_skill_tree(skill_dir: str | Path,
     """读取一个技能目录的全部文本。
 
     返回 `{"root_text", "attachment_text", "text", "files", "unreadable",
-    "file_truncated", "over_cap", "escaped"}`:
+    "file_truncated", "over_cap", "escaped", "walk_failed"}`:
     - `root_text`:根 `SKILL.md` 正文(读不出 → 空串,且 `unreadable` 含 "SKILL.md");
     - `attachment_text`:全部附带资料拼接(每份前加一行来源标注,便于人读报错);
     - `text`:`root_text` + `attachment_text`,可直接喂给 `classify_risk`
@@ -64,7 +64,11 @@ def read_skill_tree(skill_dir: str | Path,
     - `over_cap`:总量触顶,有内容没被审到(同样必须拒收);
     - `escaped`:解析后逃出技能目录的相对路径(通常是符号链接;**非空**说明磁盘上
       还有审核面之外的路径,`promote_skill._snapshot_candidate` 靠它在 copytree
-      解引用之前把关,见 `has_escaping_symlink`)。
+      解引用之前把关,见 `has_escaping_symlink`);
+    - `walk_failed`:目录整体遍历(`root.rglob`,或更早的 `root.resolve()`)本身
+      失败,连"有没有逃逸符号链接"都没能跑起来——`escaped` 恰好是空列表不代表
+      "确认没有逃逸",`has_escaping_symlink` 靠这个字段把这种"判不了"也当成
+      不安全,不能只看 `escaped` 是否非空。
 
     安全:`rglob` 会跟进**符号链接目录**,故逐个确认解析后仍在技能目录内;
     经符链逃出去的文件既不会被 loader 列出、也读不到,这里同样不纳入审核文本
@@ -83,9 +87,11 @@ def read_skill_tree(skill_dir: str | Path,
     try:
         root_resolved = root.resolve()
     except OSError:
+        # 连技能目录本身都 resolve 不出来:比 rglob 走不动更彻底的"判不了",
+        # 同样必须让 has_escaping_symlink 走 fail-closed,不能靠 escaped=[] 放行。
         return {"root_text": "", "attachment_text": "", "text": "", "files": [],
                 "unreadable": ["SKILL.md"], "file_truncated": False, "over_cap": False,
-                "escaped": []}
+                "escaped": [], "walk_failed": True}
 
     # 根文件按**总量**上限有界读取(而不是单文件上限):它没有 loader 侧的逐次
     # 截断,模型每次都会看到完整正文,所以一旦它自己就顶穿总量预算,必须直接
@@ -99,11 +105,16 @@ def read_skill_tree(skill_dir: str | Path,
         over_cap = True
     total = len(root_text)
 
+    walk_failed = False
     try:
         walked = sorted(p for p in root.rglob("*") if p.is_file())
     except OSError:
-        # 目录整体走不动:不能当成"没有附件",按读不出处理
+        # 目录整体走不动:不能当成"没有附件",按读不出处理。同时必须让
+        # `has_escaping_symlink` 也知道这次遍历"判不了"——遍历本身失败意味着
+        # 磁盘上到底还有没有逃逸符号链接根本没看到,不能因为 escaped 列表恰好是
+        # 空的就被当成"证明了没有逃逸"(fail-closed:判不了 ≠ 安全)。
         walked = []
+        walk_failed = True
         unreadable.append("(技能目录无法遍历)")
 
     for path in walked:
@@ -142,7 +153,7 @@ def read_skill_tree(skill_dir: str | Path,
     return {"root_text": root_text, "attachment_text": attachment_text,
             "text": root_text + attachment_text, "files": files,
             "unreadable": unreadable, "file_truncated": file_truncated,
-            "over_cap": over_cap, "escaped": escaped}
+            "over_cap": over_cap, "escaped": escaped, "walk_failed": walk_failed}
 
 
 def has_escaping_symlink(skill_dir: str | Path) -> bool:
@@ -153,8 +164,13 @@ def has_escaping_symlink(skill_dir: str | Path) -> bool:
     `promote_skill._snapshot_candidate` 在 `copytree`(会解引用符号链接、把逃逸
     目标的内容原样复制进去,而不是复制符号链接本身)之前把关:判档看不到的
     字节,不能被原样装进快照、再装进正式目录。
+
+    fail-closed:`root.rglob("*")` 这一层遍历本身失败(`walk_failed`)时,不能
+    因为逐个 resolve 判断根本没跑起来、`escaped` 恰好是空列表就返回 `False`——
+    "遍历不动"和"遍历完了、确认没有逃逸"是两码事,前者是"判不了",不是"安全"。
     """
-    return bool(read_skill_tree(skill_dir)["escaped"])
+    tree = read_skill_tree(skill_dir)
+    return bool(tree["escaped"]) or tree["walk_failed"]
 
 
 def validate_skill_tree(skill_dir: str | Path, known: set[str] | None = None,

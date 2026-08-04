@@ -14,6 +14,7 @@ from app.agent.skills.tree_text import (
     TREE_MAX_FILE_CHARS,
     TREE_MAX_TOTAL_CHARS,
     classify_tree_risk,
+    has_escaping_symlink,
     read_skill_tree,
     validate_skill_tree,
 )
@@ -100,6 +101,37 @@ def test_tree_ignores_symlink_escape(tmp_path):
 
     tree = read_skill_tree(d)
     assert "机密" not in tree["text"]
+
+
+def test_walk_level_failure_marks_walk_failed(tmp_path, monkeypatch):
+    """`root.rglob("*")` 这一层遍历本身炸掉(而不是某个文件 resolve 失败)时,
+    必须留下 walk_failed=True——"没跑起来"不能被当成"跑完了、什么都没发现"。
+    """
+    d = _skill(tmp_path)
+
+    def _boom(self, pattern):
+        raise OSError("模拟目录遍历失败")
+
+    monkeypatch.setattr(Path, "rglob", _boom)
+
+    tree = read_skill_tree(d)
+    assert tree["walk_failed"] is True
+    assert "(技能目录无法遍历)" in tree["unreadable"]
+
+
+def test_has_escaping_symlink_fails_closed_when_walk_fails(tmp_path, monkeypatch):
+    """遍历失败时 `escaped` 必然是空列表(逐文件的 resolve 判断根本没机会跑),
+    `has_escaping_symlink` 绝不能因此返回 False——判不了就必须当成有逃逸处理,
+    否则 `promote_skill._snapshot_candidate` 会在这种情况下把关放行。
+    """
+    d = _skill(tmp_path)
+
+    def _boom(self, pattern):
+        raise OSError("模拟目录遍历失败")
+
+    monkeypatch.setattr(Path, "rglob", _boom)
+
+    assert has_escaping_symlink(d) is True
 
 
 # ---------- classify_tree_risk:敌意轨迹 ----------

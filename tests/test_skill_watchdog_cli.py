@@ -1,6 +1,9 @@
 """看门狗 CLI:高危候选只列出不自动上线;低危候选灰度跑赢自动转正、跑输自动回滚。"""
 
+import sys
 from pathlib import Path
+
+import pytest
 
 from app.db import Database
 from app.scripts.skill_watchdog import check_canaries, start_for_candidate
@@ -24,6 +27,13 @@ name: process-return
 description: 退货处理(候选版,含退款)。
 ---
 第一步：调用 `apply_refund` 提交退款。
+"""
+
+NEW_SKILL_CANDIDATE = """---
+name: new-skill
+description: 全新技能(无对照组),用于测试 GATE_THEN_WATCH 分支。适用关键词：测试。
+---
+第一步：调用 `query_order` 核对订单。
 """
 
 
@@ -229,3 +239,90 @@ def test_promote_blocked_when_attachment_becomes_high_risk(tmp_path):
     assert (live_dir / "SKILL.md").read_text(encoding="utf-8") == LIVE_MD  # 线上未被改
     assert not (live_dir / "references").exists()             # 附件也没混进正式目录
     assert db.get_active_canary("process-return") is None      # 灰度已收口
+
+
+# ---------- Fix 1:无人值守自动转正被 block_on_high 拦下 ----------
+#
+# 场景:全新 skill(无对照组)走 POLICY_GATE_THEN_WATCH——门禁用的是判档那一刻
+# 读到的候选,但 promote() 真正装机前会对自己重新快照的字节再判一次档;这里用
+# 一个"第一次返回 medium、第二次返回 high"的假 classify_tree_risk 模拟"判档
+# 与快照之间那一瞬被并发写坏",不依赖真的并发写盘。
+
+
+def _fake_classify_medium_then_high():
+    calls = {"n": 0}
+
+    def _classify(*args, **kwargs):
+        calls["n"] += 1
+        return "medium" if calls["n"] == 1 else "high"
+
+    return _classify
+
+
+def _fake_gate_pass(**kwargs):
+    return {"promote": True, "reason": "fake gate pass", "baseline": None,
+            "candidate": None, "comparison": None, "shadow_dir": None}
+
+
+def test_start_reports_distinct_label_when_snapshot_reclassified_high(tmp_path, monkeypatch):
+    """必须打独立的 promote_blocked_risk_changed,不能折成看不出高危拦截的
+    promote_failed——否则无人值守的 --start-all 打出的这一行和一次普通的
+    "候选不达标"毫无区别。
+    """
+    definitions = tmp_path / "definitions"
+    definitions.mkdir(parents=True)
+    candidates = definitions / "_candidates"
+    (candidates / "new-skill").mkdir(parents=True)
+    (candidates / "new-skill" / "SKILL.md").write_text(NEW_SKILL_CANDIDATE, encoding="utf-8")
+
+    db = Database(str(tmp_path / "t.db"))
+    db.init_schema()
+
+    fake_classify = _fake_classify_medium_then_high()
+    monkeypatch.setattr("app.scripts.skill_watchdog.classify_tree_risk", fake_classify)
+    monkeypatch.setattr("app.scripts.promote_skill.classify_tree_risk", fake_classify)
+    monkeypatch.setattr("app.agent.skills.gate.gate_candidate", _fake_gate_pass)
+
+    result = start_for_candidate("new-skill", str(definitions), str(candidates),
+                                 str(definitions / "_archive"), db)
+
+    assert result["action"] == "promote_blocked_risk_changed"
+    assert result["risk"] == "high"
+    assert not (definitions / "new-skill").exists()          # 未被自动装机
+    assert db.get_active_canary("new-skill") is None          # 未登记进监控
+
+
+def test_start_all_exits_nonzero_when_promotion_blocked_on_high_risk(tmp_path, monkeypatch, capsys):
+    """回归 Fix 1 的核心诉求:--start-all 这条无人值守路径里,自动转正被
+    block_on_high 拦下时必须(a) 打出独立标签 (b) 以非零码退出——否则 cron 会把
+    "高危自动转正被拦"当成普通成功。
+    """
+    definitions = tmp_path / "definitions"
+    definitions.mkdir(parents=True)
+    candidates = definitions / "_candidates"
+    (candidates / "new-skill").mkdir(parents=True)
+    (candidates / "new-skill" / "SKILL.md").write_text(NEW_SKILL_CANDIDATE, encoding="utf-8")
+
+    db = Database(str(tmp_path / "t.db"))
+    db.init_schema()
+
+    fake_classify = _fake_classify_medium_then_high()
+    monkeypatch.setattr("app.scripts.skill_watchdog.classify_tree_risk", fake_classify)
+    monkeypatch.setattr("app.scripts.promote_skill.classify_tree_risk", fake_classify)
+    monkeypatch.setattr("app.agent.skills.gate.gate_candidate", _fake_gate_pass)
+
+    monkeypatch.setattr("app.scripts.skill_watchdog.DEFINITIONS_DIR", str(definitions))
+    monkeypatch.setattr("app.scripts.skill_watchdog.CANDIDATES_DIR", str(candidates))
+    monkeypatch.setattr("app.scripts.skill_watchdog.ARCHIVE_DIR", str(definitions / "_archive"))
+    monkeypatch.setattr("app.scripts.skill_watchdog._db", lambda: db)
+    monkeypatch.setattr(sys, "argv", ["skill_watchdog.py", "--start-all"])
+
+    from app.scripts.skill_watchdog import main
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code != 0
+    out = capsys.readouterr().out
+    assert "promote_blocked_risk_changed" in out
+    assert not (definitions / "new-skill").exists()

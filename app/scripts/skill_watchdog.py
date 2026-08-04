@@ -54,13 +54,48 @@ def _db():
     return get_db()
 
 
+def _promote_outcome_action(promoted: dict, success_action: str) -> str:
+    """把 `promote()` 的返回结果折算成看门狗要打的 action 标签。
+
+    `block_on_high=True` 拦下来的失败必须打独立的 `promote_blocked_risk_changed`,
+    不能和门禁/校验之类的普通失败混成一条谁都看不出该干什么的 `promote_failed`——
+    `start_for_candidate` 的 GATE_THEN_WATCH 分支与 `check_canaries` 的 A/B 转正
+    分支都是无人值守路径,经过 promote() 之后都要落到这一处,标签口径必须一致。
+    """
+    if promoted["promoted"]:
+        return success_action
+    risk_now = promoted.get("risk")
+    if (risk_now is not None
+            and risk_mod.promotion_policy(risk_now) == risk_mod.POLICY_MANUAL):
+        return "promote_blocked_risk_changed"
+    return "promote_failed"
+
+
+# --start/--start-all 与 --check 共用的"需要人工介入"判定:任一结果的 action
+# 落在这里面,说明本轮没能全自动收尾,main() 必须以非零码退出让 cron 能告警——
+# 不能只有 --check 会退出非零,--start-all 同样可能因为 block_on_high 被拦而
+# 需要人工,退出码却一直是 0 会让这类情况被 cron 当成普通成功。
+NEEDS_HUMAN_ACTIONS = ("rollback_failed_manual_required", "promote_blocked_risk_changed",
+                      "promote_blocked", "promote_failed")
+
+
+def _exit_if_needs_human(actions: list[str]) -> None:
+    """`--start`/`--start-all`/`--check` 共用的收尾检查,见 `NEEDS_HUMAN_ACTIONS`。"""
+    count = sum(1 for a in actions if a in NEEDS_HUMAN_ACTIONS)
+    if count:
+        print(f"\n⚠ {count} 项需人工处理(详情见上方各行),以非零码退出以便告警")
+        sys.exit(1)
+
+
 def start_for_candidate(skill_name: str, definitions_dir: str, candidates_dir: str,
                         archive_dir: str, db) -> dict:
     """按风险档决定该候选怎么放行。返回 {"risk","policy","action","detail"}。
 
     - high   → action="manual_required",不动任何东西;
     - low    → action="canary_started",登记 50% 灰度;
-    - medium → action="gated"(过门禁则顺带转正) / "gate_failed"。
+    - medium → action="gated"(过门禁则顺带转正) / "gate_failed"(门禁未过) /
+               "promote_blocked_risk_changed"(门禁用的判档与 promote() 真正装机前
+               对快照重新判档不一致,快照被判为高危,自动化转正拒绝放行,需人工)。
     """
     candidate = Path(candidates_dir) / skill_name / "SKILL.md"
     if not candidate.exists():
@@ -122,8 +157,12 @@ def start_for_candidate(skill_name: str, definitions_dir: str, candidates_dir: s
     if promoted["promoted"]:
         # percent=0:已转正进正式目录,不需替换正文,只登记以便 --check 做绝对值监控
         db.start_canary(skill_name, str(candidate), 0, risk, policy)
+    # 折算 action:被 block_on_high 拦下来的必须打独立的 promote_blocked_risk_changed,
+    # 不能和门禁/校验之类的普通失败混成一条 promote_failed——否则无人值守的
+    # --start-all 打出的这一行,和一次普通的"候选不达标"毫无区别,没人能看出
+    # 这里其实是"高危,必须人工"。
     return {"risk": promoted.get("risk") or risk, "policy": policy,
-            "action": "gated" if promoted["promoted"] else "promote_failed",
+            "action": _promote_outcome_action(promoted, "gated"),
             "detail": promoted["reason"]}
 
 
@@ -197,21 +236,17 @@ def check_canaries(definitions_dir: str, candidates_dir: str, archive_dir: str,
                                    timestamp=_now_stamp())
                 risk_now = promoted.get("risk")
                 entry["risk"] = risk_now
+                entry["detail"] = promoted["reason"]
+                # 折算 action(与 start_for_candidate 的 GATE_THEN_WATCH 分支共用同一份
+                # 口径,见 _promote_outcome_action):block_on_high 拦下来的必须显式
+                # 打成 promote_blocked_risk_changed——候选在灰度期间(或本轮判档与
+                # 安装之间那一瞬)变成了高危档,不能和"门禁/校验失败"之类的普通失败
+                # 混成一条谁都看不出该干什么的日志。
+                entry["action"] = _promote_outcome_action(promoted, "promoted")
                 if promoted["promoted"]:
-                    entry["action"] = "promoted"
-                    entry["detail"] = promoted["reason"]
                     db.finish_canary(skill_name, "promoted")
-                elif (risk_now is not None
-                      and risk_mod.promotion_policy(risk_now) == risk_mod.POLICY_MANUAL):
-                    # block_on_high 拦下来的:候选在灰度期间(或本轮判档与安装之间
-                    # 那一瞬)变成了高危档——必须显式升级为"需人工",不能和"门禁
-                    # /校验失败"之类的普通失败混成一条谁都看不出该干什么的日志。
-                    entry["action"] = "promote_blocked_risk_changed"
-                    entry["detail"] = promoted["reason"]
+                elif entry["action"] == "promote_blocked_risk_changed":
                     db.finish_canary(skill_name, "rolled_back")
-                else:
-                    entry["action"] = "promote_failed"
-                    entry["detail"] = promoted["reason"]
                 # 转正失败(非风险拦截)→ 灰度保持活跃,下轮再判(不留"已转正"的假记录)
             else:
                 entry["action"] = "watch_passed"   # 绝对值达标,结束监控
@@ -261,9 +296,15 @@ def main() -> None:
                  else [c["name"] for c in list_candidates(CANDIDATES_DIR, DEFINITIONS_DIR)])
         if not names:
             print("没有候选(先跑 python -m app.scripts.synthesize_skills)")
+        start_actions: list[str] = []
         for name in names:
             out = start_for_candidate(name, DEFINITIONS_DIR, CANDIDATES_DIR, ARCHIVE_DIR, db)
             print(f"[{out['risk'] or '-'}/{out['action']}] {name}: {out['detail']}")
+            start_actions.append(out["action"])
+        # --start/--start-all 是和 --check 一样的无人值守路径:一次自动转正被
+        # block_on_high 拦下,不能因为这一分支从没退出过非零码,就让 cron 把它当成
+        # 普通成功——升级逻辑必须和 --check 一致,见 NEEDS_HUMAN_ACTIONS。
+        _exit_if_needs_human(start_actions)
 
     if args.check:
         results = check_canaries(DEFINITIONS_DIR, CANDIDATES_DIR, ARCHIVE_DIR, db)
@@ -278,13 +319,7 @@ def main() -> None:
             if r.get("detail"):
                 print(f"    → {r['detail']}")
 
-        needs_human = [r for r in results
-                       if r["action"] in ("rollback_failed_manual_required",
-                                          "promote_blocked_risk_changed",
-                                          "promote_blocked", "promote_failed")]
-        if needs_human:
-            print(f"\n⚠ {len(needs_human)} 项需人工处理(见上方 → 指引),以非零码退出以便告警")
-            sys.exit(1)
+        _exit_if_needs_human([r["action"] for r in results])
 
     if not (args.start or args.start_all or args.check):
         parser.error("需要 --start / --start-all / --check 之一")
