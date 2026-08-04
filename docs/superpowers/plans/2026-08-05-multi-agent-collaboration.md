@@ -3187,7 +3187,6 @@ def handle_insight(event: dict) -> dict:
                              reason=diagnosis.get("conclusion", ""))
         if res.get("success"):
             # 把草稿挂到本条协作链上,时间线才串得起来
-            get_db().connect().close()
             _attach_correlation(int(res["draft_id"]), corr)
             drafted += 1
 
