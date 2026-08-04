@@ -80,6 +80,10 @@ class Settings(BaseSettings):
     skill_canary_enabled: bool = True   # 灰度路由总开关(关=永远只加载正式版本)
     skill_preload_enabled: bool = True   # 服务端确定性预加载匹配的 skill(模型不自发调 load_skill)
 
+    # ---- 多 Agent 协作(总线/参谋/营销);关=完全回到单客服 Agent 现状 ----
+    collab_enabled: bool = True
+    seller_console_enabled: bool = True     # B 端经营控制台入口
+
     # Evaluation 配置（第9期，离线评估工具，无聊天开关）
     eval_dataset_path: str = "app/evaluation/cases.json"
     eval_use_judge: bool = True  # 是否启用 LLM-as-judge（质量/幻觉/过程合理性）
