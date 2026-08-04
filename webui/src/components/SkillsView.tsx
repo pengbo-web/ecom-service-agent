@@ -32,7 +32,13 @@ export function SkillsView() {
   // 上传失败要单独展示在上传卡片里:复用顶部那个 err 会渲染成"读取失败",
   // 指向的是总览拉取失败,把人引到完全错误的方向。
   const [upErr, setUpErr] = useState("");
-  const [busy, setBusy] = useState(false);
+  // 上传与提炼各自一个 busy:共用一个会让"提炼中"把上传卡片也渲染成「上传中…」
+  // (反之亦然),操作者会以为自己触发了一个根本没发生的动作。
+  const [upBusy, setUpBusy] = useState(false);
+  const [dsBusy, setDsBusy] = useState(false);
+  // 刷新失败时下方仍是上一次成功拉取的旧数据。操作者正是靠这个面板判断某个
+  // high 风险候选要不要处理,所以必须显式标出"这是过期数据",不能默默照常渲染。
+  const [stale, setStale] = useState(false);
   const [doc, setDoc] = useState("");
   const [dsResult, setDsResult] = useState<SkillDistillResult | null>(null);
   // 蒸馏失败要单独展示在蒸馏卡片里:复用顶部那个 err 会渲染成"读取失败",
@@ -43,7 +49,7 @@ export function SkillsView() {
     if (!doc.trim()) return;
     // 这一步会真调大模型、花钱,必须先让人确认(与评估页同口径)
     if (!window.confirm("提炼会真调大模型、消耗 token。确认开始？")) return;
-    setBusy(true);
+    setDsBusy(true);
     setDsResult(null);
     setDsErr("");
     try {
@@ -53,7 +59,7 @@ export function SkillsView() {
     } catch (e) {
       setDsErr(`提炼请求失败（网络、鉴权或体积超限）：${String(e)}`);
     } finally {
-      setBusy(false);
+      setDsBusy(false);
     }
   }
 
@@ -64,7 +70,7 @@ export function SkillsView() {
 
   async function onPickBundle(file: File | null, input?: HTMLInputElement) {
     if (!file) return;
-    setBusy(true);
+    setUpBusy(true);
     setUpResult(null);
     setUpErr("");
     try {
@@ -75,28 +81,54 @@ export function SkillsView() {
       // 校验不通过走的是 200 + accepted:false,能进这里的是网络/鉴权/体积超限
       setUpErr(`上传请求失败（网络、鉴权或体积超限）：${String(e)}`);
     } finally {
-      setBusy(false);
+      setUpBusy(false);
       // 清空 input:否则改好文件后再选**同名**文件不会触发 onChange,界面像没反应
       if (input) input.value = "";
     }
   }
 
   async function load() {
-    try { setData(await getSkillsOverview()); setErr(""); }
-    catch (e) { setErr(String(e)); }
+    try { setData(await getSkillsOverview()); setErr(""); setStale(false); }
+    catch (e) { setErr(String(e)); setStale(true); }
   }
+
+  // 手动刷新要顺带清掉上一轮的上传/提炼结论:否则一条来自上次上传的红色
+  // 「未通过」会一直挂在那里,被误读成本次动作的结果。
+  function onRefresh() {
+    setUpResult(null);
+    setUpErr("");
+    setDsResult(null);
+    setDsErr("");
+    load();
+  }
+
   useEffect(() => { load(); }, []);
 
   return (
     <div className="h-full overflow-y-auto p-6">
       <div className="mx-auto flex max-w-4xl flex-col gap-6">
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Skill 管理</h2>
-          <Button variant="ghost" size="sm" onClick={load}>
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold">Skill 管理</h2>
+            {stale && data && (
+              <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px]
+                               text-amber-700 dark:text-amber-400">数据已过期</span>
+            )}
+          </div>
+          <Button variant="ghost" size="sm" onClick={onRefresh}>
             <RotateCcw className="h-3.5 w-3.5" /> 刷新
           </Button>
         </div>
         {err && <div className="text-sm text-destructive">读取失败：{err}</div>}
+        {/* 刷新失败但下方仍有旧数据:必须明说这是过期快照。操作者靠这个面板
+            决定高危候选要不要处理,拿旧数据当现状会直接做错决定。 */}
+        {stale && data && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2
+                          text-xs text-amber-700 dark:text-amber-400">
+            ⚠️ 以下内容是<b>上次成功刷新时的旧数据</b>（本次刷新失败，最新状态未知）。
+            请勿据此判断候选或灰度的当前状况，先排除上面的读取失败再操作。
+          </div>
+        )}
 
         {/* 现行技能 */}
         <section>
@@ -193,10 +225,10 @@ export function SkillsView() {
               所以用 <b>.zip</b> 上传；只有一份说明时也可直接选 <code>.md</code>。
               上传只会落到<b>待审候选</b>，并跑与自动生成候选相同的校验与风险分级，<b>不会直接上线</b>。
             </div>
-            <input type="file" accept=".zip,.md,.markdown,.txt" disabled={busy}
+            <input type="file" accept=".zip,.md,.markdown,.txt" disabled={upBusy}
               onChange={(e) => onPickBundle(e.target.files?.[0] || null, e.currentTarget)}
               className="text-xs" />
-            {busy && <div className="text-xs text-muted-foreground">上传中…</div>}
+            {upBusy && <div className="text-xs text-muted-foreground">上传中…</div>}
             {upErr && <div className="text-xs text-destructive">⚠️ {upErr}</div>}
             {upResult && (upResult.accepted ? (
               <div className="text-xs text-emerald-600 dark:text-emerald-400">
@@ -221,19 +253,19 @@ export function SkillsView() {
               把服务规则或产品说明贴进来（或选文件），由大模型提炼成步骤化技能。
               产物同样<b>只落待审候选</b>并带风险档；碰钱/承诺类会被判高危、强制人工确认。
             </div>
-            <input type="file" accept=".md,.markdown,.txt" disabled={busy}
+            <input type="file" accept=".md,.markdown,.txt" disabled={dsBusy}
               onChange={(e) => onPickDocFile(e.target.files?.[0] || null)}
               className="text-xs" />
-            <textarea value={doc} onChange={(e) => setDoc(e.target.value)} disabled={busy}
+            <textarea value={doc} onChange={(e) => setDoc(e.target.value)} disabled={dsBusy}
               rows={6} placeholder="粘贴客服 SOP 或产品资料正文…"
               className="w-full rounded-md border bg-background p-2 text-xs outline-none" />
             <div className="flex items-center gap-2">
-              <Button size="sm" onClick={onDistill} disabled={busy || !doc.trim()}>
+              <Button size="sm" onClick={onDistill} disabled={dsBusy || !doc.trim()}>
                 ▶ 提炼成候选技能
               </Button>
               <span className="text-[11px] text-destructive">⚠️ 会真调大模型、消耗 token</span>
             </div>
-            {busy && <div className="text-xs text-muted-foreground">提炼中…</div>}
+            {dsBusy && <div className="text-xs text-muted-foreground">提炼中…</div>}
             {dsErr && <div className="text-xs text-destructive">⚠️ {dsErr}</div>}
             {dsResult?.truncated && (
               <div className="text-xs text-amber-600 dark:text-amber-400">

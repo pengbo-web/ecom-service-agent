@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SkillsView } from "@/components/SkillsView";
 
 const OVERVIEW = {
@@ -97,5 +97,75 @@ describe("SkillsView 蒸馏截断提示", () => {
 
     expect(await screen.findByText(/提炼请求失败/)).toBeInTheDocument();
     expect(screen.queryByText(/读取失败/)).toBeNull();
+  });
+});
+
+describe("SkillsView 刷新失败与卡片独立状态", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+  });
+
+  it("刷新失败时旧数据必须被标成已过期(不能默默照常渲染)", async () => {
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1) return { ok: true, json: async () => OVERVIEW };
+      return { ok: false, status: 500, json: async () => ({}) };   // 刷新失败
+    }));
+
+    render(<SkillsView />);
+    await screen.findByText("process-return");
+
+    fireEvent.click(screen.getByText(/刷新/));
+
+    // 旧数据仍在(不清空是刻意的),但必须明确标出它已过期
+    expect(await screen.findByText("数据已过期")).toBeInTheDocument();
+    expect(await screen.findByText(/上次成功刷新时的旧数据/)).toBeInTheDocument();
+    expect(screen.getByText("process-return")).toBeInTheDocument();
+  });
+
+  it("提炼进行中不得把上传卡片也渲染成「上传中…」", async () => {
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1) return { ok: true, json: async () => OVERVIEW };
+      return new Promise(() => {});          // 蒸馏请求一直挂着
+    }));
+
+    render(<SkillsView />);
+    await screen.findByText(/上传客服 SOP/);
+    fireEvent.change(screen.getByPlaceholderText(/粘贴客服 SOP/), {
+      target: { value: "资料正文" },
+    });
+    fireEvent.click(screen.getByText(/提炼成候选技能/));
+
+    expect(await screen.findByText("提炼中…")).toBeInTheDocument();
+    expect(screen.queryByText("上传中…")).toBeNull();
+  });
+
+  it("刷新会清掉上一次的提炼结论(旧的红色「未通过」不该跨动作残留)", async () => {
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 2) return { ok: true, json: async () => ({
+        created: false, name: null, risk: null, policy: null,
+        errors: ["LLM 产物未通过校验(frontmatter 不全 / 工具名不实 / 名字非法)"],
+        truncated: false,
+      }) };
+      return { ok: true, json: async () => OVERVIEW };
+    }));
+
+    render(<SkillsView />);
+    await screen.findByText(/上传客服 SOP/);
+    fireEvent.change(screen.getByPlaceholderText(/粘贴客服 SOP/), {
+      target: { value: "资料正文" },
+    });
+    fireEvent.click(screen.getByText(/提炼成候选技能/));
+    expect(await screen.findByText(/LLM 产物未通过校验/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText(/刷新/));
+
+    await waitFor(() => expect(screen.queryByText(/LLM 产物未通过校验/)).toBeNull());
   });
 });
