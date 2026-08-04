@@ -1,0 +1,54 @@
+"""协作 worker CLI。
+
+  python -m app.scripts.agent_collab --scan              # 只跑异常扫描并发信号
+  python -m app.scripts.agent_collab --once              # 消费一轮
+  python -m app.scripts.agent_collab --loop --interval 60  # 常驻
+
+拉取式而非常驻监听:买家会话只负责发信号,分析与起草在这里异步跑,
+买家那一轮的延迟零增加。
+"""
+
+import argparse
+import sys
+import time
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="多 Agent 协作 worker")
+    parser.add_argument("--scan", action="store_true", help="跑一次异常扫描并发信号")
+    parser.add_argument("--once", action="store_true", help="消费一轮事件")
+    parser.add_argument("--loop", action="store_true", help="常驻循环")
+    parser.add_argument("--interval", type=int, default=60, help="循环间隔秒,默认 60")
+    parser.add_argument("--window", type=int, default=7, help="扫描窗口天数,默认 7")
+    args = parser.parse_args(argv)
+
+    from app.agent.tools.anomaly import scan_and_publish
+    from app.multi_agent.collab import run_once
+
+    if not (args.scan or args.once or args.loop):
+        parser.print_help()
+        return 2
+
+    def cycle() -> None:
+        if args.scan or args.loop:
+            s = scan_and_publish(window_days=args.window)
+            print(f"[scan] 异常 {s['anomalies']} 条,发布 {s['published']} 条 "
+                  f"corr={s['correlation_id']}", flush=True)
+        if args.once or args.loop:
+            stats = run_once()
+            print(f"[consume] analyst={stats['analyst']} growth={stats['growth']}", flush=True)
+
+    if args.loop:
+        while True:
+            try:
+                cycle()
+            except Exception as exc:  # noqa: BLE001 常驻循环不能被单次异常打断
+                print(f"[error] {exc}", flush=True)
+            time.sleep(max(5, args.interval))
+    else:
+        cycle()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
