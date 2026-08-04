@@ -148,6 +148,136 @@ pytest                                # 运行全部单元测试
 
 ---
 
+## 多 Agent 协同（客服 / 店铺参谋 / 营销增长）
+
+在原有「一个引擎 + 三副买家画像」之上，加了一层**经持久化总线协作**的 B 端能力：
+异常发现（客服侧埋点 + 确定性扫描）→ 店铺参谋归因 → 营销增长起草 → 人工审批发出，
+四段各自独立、互不阻塞，用 `correlation_id` 把一条协作链串起来，全程可回溯。
+
+### 分层架构
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Layer 1  用户交互层                                                       │
+│   C 端买家：商城 / 聊天 / 我的订单        B 端卖家：经营控制台             │
+└───────────────┬──────────────────────────────────┬───────────────────────┘
+                │ POST /api/chat                   │ POST /api/seller/chat
+                ▼                                  ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Layer 2  统一入口层（双轨路由）                                            │
+│   actor 分流（确定性，由端点决定，不靠 LLM 猜）                            │
+│     buyer  → 域路由(Router)      → presale | midsale | aftersale         │
+│     seller → 卖家域路由(SellerRouter) → analyst | growth                 │
+└─────────────────────────────────┬────────────────────────────────────────┘
+                                  ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Layer 3  多智能体协作层（核心）                                            │
+│  协作总线 AgentBus：持久化 append-only 事件表 agent_events                │
+│    publish / consume（幂等认领），correlation_id 串起一条协作链            │
+│  ┌──────────────┬──────────────────┬──────────────────┐                  │
+│  │ 👤 客服服务    │ 📊 店铺参谋       │ 📈 营销增长        │                  │
+│  │ (presale/     │ (analyst，只读)   │ (growth，草稿型)   │                  │
+│  │  midsale/     │ 消费 signal.*     │ 消费 insight.*     │                  │
+│  │  aftersale)   │ 产 insight.*      │ 产 action.drafts_  │                  │
+│  │ 产 signal.*   │                   │      ready         │                  │
+│  └──────────────┴──────────────────┴──────────────────┘                  │
+│  共享上下文池 SharedContext：key/value(JSON)/source_agent/correlation_id  │
+│  协作 Worker `app/scripts/agent_collab.py`：拉取式消费，不阻塞买家会话     │
+└─────────────────────────────────┬────────────────────────────────────────┘
+                                  ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│ Layer 4  Skill / 工具执行层：订单/物流/退款/商品/知识库/记忆（已有）        │
+│  + 经营分析(只读) · 商机发现 · 触达草稿(仅写 outreach_drafts)              │
+├──────────────────────────────────────────────────────────────────────────┤
+│ Layer 5  模型与数据层：OpenAI 兼容模型 / RAG 知识库 / SQLite / 会话归档     │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### 协作闭环时序（退款率跨线场景，端到端验收用例）
+
+```
+① 客服 Agent 正常服务，沉淀 skill_traces / orders / order_items
+                 │
+                 ▼
+② anomaly_scan（确定性阈值扫描，非 LLM 判定）
+   某商品退款率跨 refund_rate 告警线
+        publish signal.anomaly  target=analyst  corr=C1
+                 │
+                 ▼
+③ 店铺参谋 Agent（消费 signal.anomaly）
+   shop_overview / product_diagnostics 拉多维事实 → LLM 只做归因与建议
+   写 shared_context[diagnosis:P001] + publish insight.diagnosis target=growth corr=C1
+                 │
+                 ▼
+④ 营销增长 Agent（消费 insight.diagnosis）
+   find_opportunities(stale_pending_order) 命中受影响的滞留订单
+   draft_outreach(...) 逐个生成草稿 → 落 outreach_drafts(status=draft)
+   publish action.drafts_ready target=human corr=C1
+                 │
+                 ▼
+⑤ 人工闸（经营控制台「增长」子区）
+   审阅草稿 → 批准 → 复用既有人工回复通道发出 → publish result.outreach_sent
+   全链路按 corr 可在时间线端点回溯
+```
+
+### 三个 Agent 的职责与边界
+
+| Agent | 端点 | 面向 | 工具子集 | 能力边界 |
+|---|---|---|---|---|
+| 客服服务 Agent | `POST /api/chat` | C 端买家 | 订单/物流/退款/商品/知识库/记忆等既有工具 | 只服务单个买家；轮次结束旁路发布 `signal.*`，发布失败不影响本轮回复 |
+| 店铺参谋 Agent（`analyst`） | `POST /api/seller/chat` | B 端店主 | `shop_overview`、`product_diagnostics`、`service_quality`、`anomaly_scan` | **全只读**，工具子集里不含任何写库工具；异常判定用确定性阈值，LLM 只负责解释与建议 |
+| 营销增长 Agent（`growth`） | `POST /api/seller/chat` | B 端店主 | `find_opportunities`、`draft_outreach`、`list_outreach_drafts` | 只产出草稿，`draft_outreach` 是它唯一的写路径，写出的记录恒为 `status='draft'` |
+
+买家画像与卖家画像的工具子集完全不相交（见 `tests/test_collab_e2e.py::test_buyer_chat_never_exposes_seller_tools`），
+经营数据、商机名单、其他买家信息不会进入 C 端会话上下文。
+
+### 协作 Worker 的运行方式
+
+三种模式，均由 `app/scripts/agent_collab.py` 提供，拉取式而非常驻监听，
+买家会话只负责"发信号"，分析与起草在这里异步跑：
+
+```bash
+python -m app.scripts.agent_collab --scan               # 只跑一次异常扫描并发信号
+python -m app.scripts.agent_collab --once                # 消费一轮事件（跑完 signal→diagnosis→drafts 全链路）
+python -m app.scripts.agent_collab --loop --interval 60  # 常驻：每 60 秒跑一轮 scan + 消费
+```
+
+`run_once()` 在同一次调用里先消费参谋段、再消费刚发布的营销段——对一条新到的
+`signal.anomaly`，调一次就足以走完全链路，不需要连续调两次"分段推进"。
+
+### 可观测出口：协作时间线
+
+```
+GET /api/admin/collab/timeline?correlation_id=C-xxxx&limit=100
+```
+
+按 `X-Admin-Token` 鉴权，并复用经营控制台的功能开关（`seller_console_enabled`
+关闭时返回 404）。返回该协作链上的全部事件（`signal.anomaly` /
+`insight.diagnosis` / `action.drafts_ready` / `result.outreach_sent`）与写下的
+共享上下文（如 `diagnosis:P001`）。**这是"多 Agent 到底协作了什么"唯一可验证
+的出口**——没有它，协作就只是一句宣称；`tests/test_collab_e2e.py::test_full_
+collaboration_closes_the_loop` 用一次真实的扫描 + 归因 + 起草 + 审批，验证这
+条时间线能把同一个 `correlation_id` 下的全部四段串联起来读出。
+
+### 与"全自动营销"方案的刻意偏离
+
+**营销增长 Agent 只产出触达草稿，绝不自动发送，也绝不自动发券。** 发消息给真实
+买家是不可逆的对外动作，而草稿内容由 LLM 生成、生成所依据的商机数据里含用户可
+控文本——这条项目里的每一个不可逆动作（退款、改地址、外发消息…）都必须经过人工
+批准，营销侧同样不能例外。所以闭环的最后一跳做成了工作台审批：草稿入队 → 人工
+一键批准 → 复用既有的人工回复通道（`POST /api/admin/session/{id}/reply` 的落地
+路径）发出 → 结果回写总线。如果要做成全自动，那是一个独立的产品决策，需要单独
+的授权开关与审计，不在本项目当前范围内。
+
+### 功能开关
+
+| 开关 | 默认 | 作用 |
+|---|---|---|
+| `settings.collab_enabled` | `True` | 关闭后总线发布/消费直接空转（`claimed == 0`），买家链路零变化 |
+| `settings.seller_console_enabled` | `True` | 关闭后所有 `/api/seller/*`、`/api/admin/growth/*`、`/api/admin/collab/*` 端点返回 404 |
+
+---
+
 ## 项目背景
 
 本项目以**电商客服**为落地场景,从一个教学 demo 出发,二次开发成一个**真实可上线、可生产使用**的 Agent 系统——把"能跑的 demo"补齐成"敢上线的产品":真实数据、流式服务、安全护栏、可观测性、人机协作、生产加固与评估回归一应俱全。

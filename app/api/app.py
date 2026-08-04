@@ -1161,6 +1161,21 @@ def create_app(session_manager: Optional[SessionManager] = None,
         ok = db.review_outreach_draft(draft_id, "rejected", reviewed_by="admin")
         return {"success": True, "changed": ok}
 
+    @app.get("/api/admin/collab/timeline", dependencies=[Depends(admin_auth)])
+    def collab_timeline(correlation_id: str = "", limit: int = 100):
+        """一条协作链的完整时间线:事件 + 该链写下的共享上下文。
+
+        这是"多 Agent 到底协作了什么"唯一可验证的出口——没有它,协作就只是
+        一句宣称。复用 `_require_seller_console` 与其它 B 端只读接口同一条
+        开关判定,不再为这一个端点单开一份等价逻辑。
+        """
+        _require_seller_console()
+        db = get_db()
+        events = db.list_events(correlation_id=correlation_id or None, limit=limit)
+        shared = [s for s in db.list_shared_context(limit=limit)
+                  if not correlation_id or s.get("correlation_id") == correlation_id]
+        return {"success": True, "events": events, "shared": shared}
+
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():
         return hitl.queue.list_pending() if hitl else []
