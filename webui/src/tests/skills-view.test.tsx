@@ -30,7 +30,9 @@ describe("SkillsView", () => {
     expect(await screen.findByText("process-return")).toBeInTheDocument();
     // track-order 同时出现在"待审候选"与"活跃灰度"两段(候选正在灰度中,真实状态如此),
     // 用 findAllByText 而非 findByText,避免因多处命中而误判为渲染失败
-    expect((await screen.findAllByText("track-order")).length).toBeGreaterThan(0);
+    // 断言恰好 2 处:候选段一处 + 灰度段一处。用 >0 会让"候选完全不渲染"也通过
+    // (灰度那一处就够满足),等于这条断言失去可失败性。
+    expect(await screen.findAllByText("track-order")).toHaveLength(2);
   });
 
   it("高危候选标出需人工", async () => {
