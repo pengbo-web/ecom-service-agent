@@ -68,6 +68,40 @@ seller_sessions = SessionManager(agent_factory=_seller_factory,
                                  base_dir="app/sessions/seller")
 
 
+def _append_agent_reply(agent, text: str, intent: str = "human_agent") -> bool:
+    """给某个已取到的会话 agent 追加一条结构化 assistant 回复并落盘。
+
+    与 `POST /api/admin/session/{id}/reply` 共用的落地写法:reply 包一层与模型
+    正常输出同构的 JSON 信封——`reconstruct_bubbles` 只认 assistant+JSON+`reply`
+    字段,纯文本 assistant 消息会被当中间思考跳过,买家侧就看不到。调用方需
+    已持有该会话的 session_lock 再调用本函数。返回是否真的追加成功
+    (agent 没有 raw_messages 列表视为异常结构,返回 False,由调用方决定重试)。
+    """
+    msgs = getattr(agent, "raw_messages", None)
+    if not isinstance(msgs, list):
+        return False
+    msgs.append({"role": "assistant", "content": json.dumps({
+        "intent": intent, "confidence": 1.0, "reply": text,
+        "requires_human": False, "follow_up_question": None,
+    }, ensure_ascii=False)})
+    save = getattr(agent, "save", None)
+    if callable(save):
+        try:
+            save()
+        except Exception:  # noqa: BLE001 与既有 /reply 端点行为一致:落盘失败静默,
+            pass           # 内存里的消息已追加,不因落盘异常打断响应
+    return True
+
+
+def _deliver_outreach(draft: dict) -> bool:
+    """占位实现:真正的版本由 `create_app()` 按当前 app 实例重新绑定
+    (见其内部同名函数 + `global` 用法)。理论上不会被直接调用到——除非在
+    `create_app()` 执行前就有代码引用了它。"""
+    logger.error("_deliver_outreach 尚未绑定到任何 app 实例,投递失败 draft=%s",
+                (draft or {}).get("id"))
+    return False
+
+
 def _sse_frame(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
@@ -751,18 +785,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
             # 拿到锁后再转人工,避免抢锁失败(409)却已把会话切成人工态
             if hitl is not None and not hitl.manual_mode.is_manual(session_id):
                 hitl.manual_mode.toggle(session_id)
-            msgs = getattr(agent, "raw_messages", None)
-            if isinstance(msgs, list):
-                msgs.append({"role": "assistant", "content": json.dumps({
-                    "intent": "human_agent", "confidence": 1.0, "reply": text,
-                    "requires_human": False, "follow_up_question": None,
-                }, ensure_ascii=False)})
-                save = getattr(agent, "save", None)
-                if callable(save):
-                    try:
-                        save()
-                    except Exception:  # noqa: BLE001
-                        pass
+            _append_agent_reply(agent, text)
             bubbles = reconstruct_bubbles(getattr(agent, "raw_messages", []))
         get_db().touch_conversation(session_id)   # 人工回复也刷新活跃时间
         return {"status": "ok", "turns": bubbles}
@@ -1011,6 +1034,113 @@ def create_app(session_manager: Optional[SessionManager] = None,
             "products": product_diagnostics(window_days=window_days, top_n=5),
             "anomalies": anomaly_scan(window_days=window_days)["anomalies"],
         }
+
+    global _deliver_outreach   # 声明后本函数内的 def 直接改写模块级绑定,而非造出
+    # create_app() 的局部同名变量——这样 approve_draft 按裸名引用 _deliver_outreach
+    # 时,解析到的就是这里(而不是"函数定义时闭包住的那份"),测试才能靠
+    # monkeypatch.setattr(app 模块, "_deliver_outreach", ...) 整体打桩替换掉它。
+    # 每次 create_app() 都会把它重新绑定到"这个 app 实例"的 manager/session_lock。
+
+    def _deliver_outreach(draft: dict) -> bool:
+        """把一条已批准的触达草稿投递给买家。成功 True,失败 False(**绝不抛**,
+        交给调用方把草稿退回可重试)。
+
+        复用 `POST /api/admin/session/{id}/reply` 的落地路径:同一把
+        session_lock、同一个（本 app 实例的）session_manager 里取 agent、用
+        `_append_agent_reply` 追加同构的 assistant 回复并落盘——买家在自己的
+        聊天里看到这条消息,与坐席人工回复走同一条通道,不新造一套没人审的
+        消息出口。用 latest_conversation 找该买家的规范会话;找不到会话或抢不到
+        锁都视为失败,由 approve 端点退回 draft 状态,可重试。
+        """
+        try:
+            db = get_db()
+            user_id = draft.get("user_id", "")
+            conv = db.latest_conversation(user_id)
+            if not conv:
+                return False
+            sid = conv["conversation_id"]
+            with session_lock.guard(sid) as got:
+                if not got:
+                    return False   # 抢不到锁:上层退回待审,可重试
+                agent = manager.get_or_create(sid, user_id)
+                if not _append_agent_reply(agent, draft.get("content", ""),
+                                            intent="growth_outreach"):
+                    return False
+            db.touch_conversation(sid)
+            return True
+        except Exception:  # noqa: BLE001 投递失败要能被上层退回重试,不能炸成 500
+            logger.exception("触达投递失败 draft=%s", draft.get("id"))
+            return False
+
+    @app.get("/api/admin/growth/drafts", dependencies=[Depends(admin_auth)])
+    def growth_drafts(status: str = "draft", limit: int = 50):
+        """列触达草稿(默认只看待审的)。供人工审批控制台使用。"""
+        _require_seller_console()
+        return {"success": True,
+                "drafts": get_db().list_outreach_drafts(status=status or None, limit=limit)}
+
+    @app.get("/api/admin/growth/opportunities", dependencies=[Depends(admin_auth)])
+    def growth_opportunities(kind: str = "stale_pending_order", window_days: int = 14):
+        """只读地找一批增长商机(不落草稿),供人工/营销 Agent 参考。"""
+        _require_seller_console()
+        from app.agent.tools.growth import find_opportunities
+        out = find_opportunities(kind=kind, window_days=window_days)
+        if not out.get("success"):
+            raise HTTPException(status_code=400, detail=out.get("error", "参数错误"))
+        return out
+
+    @app.post("/api/admin/growth/drafts/{draft_id}/approve",
+              dependencies=[Depends(admin_auth)])
+    def approve_draft(draft_id: int):
+        """批准并投递触达草稿。**幂等**:并发/连点只有第一次真的发送。
+
+        这是人工闸的核心:批准这个动作本身不可撤销地把消息送到真实买家面前,
+        所以谁按下批准、按了几次都不能改变"最终只送一次"的结果——条件更新
+        (review_outreach_draft 只对 draft 状态生效)负责认领这一次机会,发送
+        失败时把草稿退回 draft 而不是停在 approved,保证坏消息也能重试而不是
+        悬空丢失。
+        """
+        _require_seller_console()
+        from app.multi_agent import bus
+
+        db = get_db()
+        draft = db.get_outreach_draft(draft_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail="草稿不存在")
+
+        # 条件更新认领:只有把 draft→approved 改成功的那一次才继续投递
+        if not db.review_outreach_draft(draft_id, "approved", reviewed_by="admin"):
+            return {"success": True, "sent": False, "reason": "该草稿已被处理过"}
+
+        if not _deliver_outreach(draft):
+            # 退回 draft,让店主可以重试;绝不停在"已批准但没发"的悬空态
+            conn = db.connect()
+            try:
+                conn.execute("UPDATE outreach_drafts SET status = 'draft', "
+                             "reviewed_by = NULL, reviewed_at = NULL WHERE id = ?",
+                             (draft_id,))
+                conn.commit()
+            finally:
+                conn.close()
+            return {"success": False, "sent": False, "reason": "投递失败,已退回待审,可重试"}
+
+        db.mark_outreach_sent(draft_id)
+        bus.publish(bus.EV_OUTREACH_SENT,
+                    {"draft_id": draft_id, "user_id": draft.get("user_id")},
+                    bus.AGENT_HUMAN, bus.AGENT_ANALYST,
+                    correlation_id=draft.get("correlation_id") or None)
+        return {"success": True, "sent": True, "reason": ""}
+
+    @app.post("/api/admin/growth/drafts/{draft_id}/reject",
+              dependencies=[Depends(admin_auth)])
+    def reject_draft(draft_id: int):
+        """驳回草稿:只改状态,绝不投递——与 approve 是两条互斥的出口。"""
+        _require_seller_console()
+        db = get_db()
+        if db.get_outreach_draft(draft_id) is None:
+            raise HTTPException(status_code=404, detail="草稿不存在")
+        ok = db.review_outreach_draft(draft_id, "rejected", reviewed_by="admin")
+        return {"success": True, "changed": ok}
 
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():
