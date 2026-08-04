@@ -3,6 +3,8 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from app.multi_agent.agents import SELLER_AGENT_CONFIGS
+
 
 @pytest.fixture()
 def client(tmp_path, monkeypatch):
@@ -37,10 +39,15 @@ def test_seller_overview_returns_metrics_and_anomalies(client):
 
 
 def test_seller_chat_returns_agent_key(client, monkeypatch):
+    """本轮由哪个画像作答,必须**读编排器的真实结果**,不能是端点兜底猜的。
+
+    这里刻意用 growth 而不是 analyst:analyst 恰好是端点取不到属性时的兜底值,
+    用它做断言就分不清"真读到了"还是"兜底成了同一个值"——测试会失去可失败性。
+    """
     from app.api import app as appmod
 
     class FakeOrch:
-        last_agent_key = "analyst"
+        last_agent_key = "growth"
         def chat(self, text):
             return {"reply": f"收到:{text}", "requires_human": False}
         def save(self):
@@ -49,11 +56,21 @@ def test_seller_chat_returns_agent_key(client, monkeypatch):
     monkeypatch.setattr(appmod.seller_sessions, "get_or_create",
                         lambda sid, user_id=None: FakeOrch())
     r = client.post("/api/seller/chat",
-                    json={"session_id": "s1", "message": "近7天退款率"}, headers=AUTH)
+                    json={"session_id": "s1", "message": "有哪些下单没推进的?"}, headers=AUTH)
     assert r.status_code == 200
     body = r.json()
-    assert body["agent_key"] == "analyst"
+    assert body["agent_key"] == "growth"
+    assert body["agent"] == SELLER_AGENT_CONFIGS["growth"]["name"]
     assert "收到" in body["reply"]
+
+
+def test_seller_chat_404_when_console_disabled(client, monkeypatch):
+    """控制台关掉时聊天端点也必须是 404(此前只测了 overview 那一半)。"""
+    from app.config import settings as st
+    monkeypatch.setattr(st.settings, "seller_console_enabled", False)
+    r = client.post("/api/seller/chat",
+                    json={"session_id": "s1", "message": "x"}, headers=AUTH)
+    assert r.status_code == 404
 
 
 def test_seller_sessions_are_isolated_from_buyer_sessions(client):
