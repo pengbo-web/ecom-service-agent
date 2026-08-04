@@ -463,12 +463,12 @@ TOOL_DEFINITIONS.extend([
         "type": "function",
         "function": {
             "name": "find_opportunities",
-            "description": "【营销增长专用】按类型查找被漏掉的成交机会。kind: unpaid_order(已下单未付款) / stalled_bargain(议价未成交) / consulted_no_order(咨询过没下单)。只读。",
+            "description": "【营销增长专用】按类型查找被漏掉的成交机会。kind: stale_pending_order(下单后久未推进) / stalled_bargain(议价未成交) / consulted_no_order(咨询过没下单)。只读。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "kind": {"type": "string",
-                             "enum": ["unpaid_order", "stalled_bargain", "consulted_no_order"],
+                             "enum": ["stale_pending_order", "stalled_bargain", "consulted_no_order"],
                              "description": "商机类型"},
                     "window_days": {"type": "integer", "description": "回看天数，默认 14"},
                     "limit": {"type": "integer", "description": "最多返回条数，默认 20"},
@@ -488,7 +488,7 @@ TOOL_DEFINITIONS.extend([
                     "user_id": {"type": "string", "description": "目标买家的 user_id"},
                     "content": {"type": "string", "description": "触达话术正文，简短口语，3 句以内"},
                     "kind": {"type": "string",
-                             "enum": ["unpaid_order", "stalled_bargain", "consulted_no_order"]},
+                             "enum": ["stale_pending_order", "stalled_bargain", "consulted_no_order"]},
                     "order_id": {"type": "string", "description": "相关订单号（如有）"},
                     "reason": {"type": "string", "description": "为什么触达这个人（给店主看的理由）"},
                     "offer_note": {"type": "string", "description": "建议的优惠说明（不是承诺，需店主确认）"},
