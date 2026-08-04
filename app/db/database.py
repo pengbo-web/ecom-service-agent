@@ -1043,3 +1043,23 @@ class Database:
             return cur.rowcount > 0
         finally:
             conn.close()
+
+    def revert_outreach_to_pending(self, draft_id: int) -> bool:
+        """投递失败时把草稿从 approved 退回 draft,清空审批痕迹,可重新批准。
+
+        **只对 approved 状态生效**(与 review_outreach_draft / mark_outreach_sent
+        同款条件更新):调用方在拿到这次投递失败之前,刚把这条草稿从 draft
+        条件更新为 approved 并认领了"本次处理权",所以这里预期的前置状态必是
+        approved——用条件更新而不是无条件 UPDATE,是为了让"退回没有真的生效"
+        这件事本身可判定(rowcount==0),不装作退回一定成功。
+        """
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE outreach_drafts SET status = 'draft', reviewed_by = NULL, "
+                "reviewed_at = NULL WHERE id = ? AND status = 'approved'",
+                (draft_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()

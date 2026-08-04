@@ -93,15 +93,6 @@ def _append_agent_reply(agent, text: str, intent: str = "human_agent") -> bool:
     return True
 
 
-def _deliver_outreach(draft: dict) -> bool:
-    """占位实现:真正的版本由 `create_app()` 按当前 app 实例重新绑定
-    (见其内部同名函数 + `global` 用法)。理论上不会被直接调用到——除非在
-    `create_app()` 执行前就有代码引用了它。"""
-    logger.error("_deliver_outreach 尚未绑定到任何 app 实例,投递失败 draft=%s",
-                (draft or {}).get("id"))
-    return False
-
-
 def _sse_frame(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
@@ -1035,12 +1026,6 @@ def create_app(session_manager: Optional[SessionManager] = None,
             "anomalies": anomaly_scan(window_days=window_days)["anomalies"],
         }
 
-    global _deliver_outreach   # 声明后本函数内的 def 直接改写模块级绑定,而非造出
-    # create_app() 的局部同名变量——这样 approve_draft 按裸名引用 _deliver_outreach
-    # 时,解析到的就是这里(而不是"函数定义时闭包住的那份"),测试才能靠
-    # monkeypatch.setattr(app 模块, "_deliver_outreach", ...) 整体打桩替换掉它。
-    # 每次 create_app() 都会把它重新绑定到"这个 app 实例"的 manager/session_lock。
-
     def _deliver_outreach(draft: dict) -> bool:
         """把一条已批准的触达草稿投递给买家。成功 True,失败 False(**绝不抛**,
         交给调用方把草稿退回可重试)。
@@ -1072,6 +1057,14 @@ def create_app(session_manager: Optional[SessionManager] = None,
             logger.exception("触达投递失败 draft=%s", draft.get("id"))
             return False
 
+    # 挂到 app.state,而不是靠 `global` 改写模块级名字:这里闭包住的是**这个**
+    # app 实例的 manager/session_lock,与买家侧 session_manager 同样挂
+    # app.state 是同一个理由(见上面 app.state.session_manager 处的注释)——
+    # 同进程里先后建出的多个 app 实例,各自的 app.state.deliver_outreach 互不
+    # 覆盖;approve_draft 通过闭包住的 `app` 变量按实例取用,测试改为
+    # monkeypatch.setattr(client.app.state, "deliver_outreach", ...) 打桩。
+    app.state.deliver_outreach = _deliver_outreach
+
     @app.get("/api/admin/growth/drafts", dependencies=[Depends(admin_auth)])
     def growth_drafts(status: str = "draft", limit: int = 50):
         """列触达草稿(默认只看待审的)。供人工审批控制台使用。"""
@@ -1098,7 +1091,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
         所以谁按下批准、按了几次都不能改变"最终只送一次"的结果——条件更新
         (review_outreach_draft 只对 draft 状态生效)负责认领这一次机会,发送
         失败时把草稿退回 draft 而不是停在 approved,保证坏消息也能重试而不是
-        悬空丢失。
+        悬空丢失。退回本身也可能失败(数据库异常)——那种情况同样不能悄悄
+        冒泡成裸 500,必须如实告知操作者草稿可能悬停在 approved,需人工核查。
         """
         _require_seller_console()
         from app.multi_agent import bus
@@ -1112,23 +1106,48 @@ def create_app(session_manager: Optional[SessionManager] = None,
         if not db.review_outreach_draft(draft_id, "approved", reviewed_by="admin"):
             return {"success": True, "sent": False, "reason": "该草稿已被处理过"}
 
-        if not _deliver_outreach(draft):
-            # 退回 draft,让店主可以重试;绝不停在"已批准但没发"的悬空态
-            conn = db.connect()
+        if not app.state.deliver_outreach(draft):
+            # 退回 draft,让店主可以重试;绝不停在"已批准但没发"的悬空态。
+            # 这一步本身也要能失败(revert_outreach_to_pending 是条件更新,
+            # rowcount 可能为 0),而且它可能直接抛异常(比如数据库这时刚好
+            # 打不开)——两种情况都不能让操作者收到一个没有任何线索的裸 500,
+            # 那正是这条退回路径本应堵住的"悬空 approved"以另一种方式重现。
             try:
-                conn.execute("UPDATE outreach_drafts SET status = 'draft', "
-                             "reviewed_by = NULL, reviewed_at = NULL WHERE id = ?",
-                             (draft_id,))
-                conn.commit()
-            finally:
-                conn.close()
+                reverted = db.revert_outreach_to_pending(draft_id)
+            except Exception:  # noqa: BLE001 退回出错也要报给操作者,不能吞掉
+                logger.exception(
+                    "投递失败后退回待审状态出错 draft_id=%s,该草稿可能悬停在 "
+                    "approved(已批准但未发送),需人工核查", draft_id)
+                return {"success": False, "sent": False,
+                        "reason": f"投递失败,且退回待审状态时发生错误;草稿 {draft_id} "
+                                  "可能停留在已批准但未发送的状态,请人工核查并处理"}
+            if not reverted:
+                # 此刻状态理应必是 approved(本请求刚认领的),正常不会走到这里;
+                # 但 review_outreach_draft / mark_outreach_sent 的返回值都被认真
+                # 对待,这里也不该假装退回一定成功。
+                logger.error("投递失败后退回待审状态未生效(草稿状态异常) draft_id=%s",
+                            draft_id)
+                return {"success": False, "sent": False,
+                        "reason": f"投递失败,且退回待审状态未生效;草稿 {draft_id} "
+                                  "状态异常,请人工核查并处理"}
             return {"success": False, "sent": False, "reason": "投递失败,已退回待审,可重试"}
 
-        db.mark_outreach_sent(draft_id)
+        # 消息已经真实投递给买家(不可撤销)。下游(如营销 Analyst)据此了解
+        # 触达已发生,不因"标记已发送"这一步的成败而改变——那只是本地账本。
+        marked = db.mark_outreach_sent(draft_id)
         bus.publish(bus.EV_OUTREACH_SENT,
                     {"draft_id": draft_id, "user_id": draft.get("user_id")},
                     bus.AGENT_HUMAN, bus.AGENT_ANALYST,
                     correlation_id=draft.get("correlation_id") or None)
+        if not marked:
+            # 已发送不代表账本也一致:mark_outreach_sent 只对 approved 生效,
+            # 若这里返回 False(今天的状态机下不可达,但不能因此就不检查它的
+            # 返回值),就不能谎报一次"干净的成功",必须如实告知需要人工核查。
+            logger.error("投递成功但标记已发送失败(状态非 approved?) draft_id=%s",
+                        draft_id)
+            return {"success": False, "sent": True,
+                    "reason": f"消息已投递给买家,但标记为已发送时失败;请人工核查草稿 "
+                              f"{draft_id} 的状态"}
         return {"success": True, "sent": True, "reason": ""}
 
     @app.post("/api/admin/growth/drafts/{draft_id}/reject",
