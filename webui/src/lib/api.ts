@@ -278,3 +278,44 @@ export async function sellerChat(sessionId: string, message: string): Promise<Se
   if (!r.ok) throw new Error(`参谋暂时不可用 (${r.status})`);
   return r.json();
 }
+
+// ---- 增长子区(商机与草稿审批):后端主动生成的触达草稿,批准即真实发给买家 ----
+export type OutreachDraft = {
+  id: number; opportunity_type: string; user_id: string; order_id: string;
+  content: string; offer: Record<string, unknown>; reason: string;
+  correlation_id: string; status: string; needs_review_reason: string;
+  created_by: string; reviewed_by: string | null; created_at: string;
+};
+
+export async function getGrowthDrafts(status = "draft"): Promise<{ drafts: OutreachDraft[] }> {
+  const r = await adminFetch(`/api/admin/growth/drafts?status=${encodeURIComponent(status)}`);
+  if (!r.ok) throw new Error(`加载草稿失败 (${r.status})`);
+  return r.json();
+}
+
+export async function approveDraft(id: number): Promise<{ success: boolean; sent: boolean; reason: string }> {
+  const r = await adminFetch(`/api/admin/growth/drafts/${id}/approve`, { method: "POST" });
+  if (!r.ok) throw new Error(`批准失败 (${r.status})`);
+  return r.json();
+}
+
+export async function rejectDraft(id: number): Promise<{ success: boolean; changed: boolean }> {
+  const r = await adminFetch(`/api/admin/growth/drafts/${id}/reject`, { method: "POST" });
+  if (!r.ok) throw new Error(`驳回失败 (${r.status})`);
+  return r.json();
+}
+
+export type GrowthOpportunity = Record<string, unknown>;
+export type GrowthOpportunityList = {
+  success: boolean; kind: string; kind_label: string; window_days: number;
+  count: number; opportunities: GrowthOpportunity[];
+};
+
+export async function getOpportunities(
+  kind = "stale_pending_order", windowDays = 14
+): Promise<GrowthOpportunityList> {
+  const r = await adminFetch(
+    `/api/admin/growth/opportunities?kind=${encodeURIComponent(kind)}&window_days=${windowDays}`);
+  if (!r.ok) throw new Error(`加载商机失败 (${r.status})`);
+  return r.json();
+}

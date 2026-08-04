@@ -4,6 +4,7 @@ import { getSellerOverview, sellerChat,
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RotateCcw, Send } from "lucide-react";
+import { GrowthPanel } from "@/components/operations/GrowthPanel";
 
 // 模块级缓存(不是 state):App.tsx 按 view 条件渲染各 Tab,离开"经营"页会把
 // OperationsView 整个卸载,切回来是全新挂载,组件内 state 会清零。若只靠
@@ -50,6 +51,11 @@ export function OperationsView() {
   const [draft, setDraft] = useState("");
   // 会话内复用同一个 session_id,不用每轮重生成(参谋侧要能看到"这轮"之前的上下文)。
   const sessionIdRef = useRef(`seller-${Date.now()}`);
+
+  // 「经营诊断」是原有的只读总览+参谋对话;「商机与触达」是 M14 新增的
+  // 草稿审批子区,两者拉的数据/操作完全不相关,分 tab 避免把批准/驳回这类
+  // 会真实触达买家的按钮和纯只读的经营看板混在同一屏,增加误触风险。
+  const [tab, setTab] = useState<"diag" | "growth">("diag");
 
   async function load(days: number) {
     setBusy(true);
@@ -112,26 +118,54 @@ export function OperationsView() {
                                text-amber-700 dark:text-amber-400">数据已过期</span>
             )}
           </div>
-          <div className="flex items-center gap-2">
-            {WINDOW_OPTIONS.map((d) => (
-              <button
-                key={d}
-                onClick={() => setWindowDays(d)}
-                className={`rounded px-2 py-1 text-xs transition-colors ${
-                  d === windowDays
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-secondary text-muted-foreground hover:bg-muted"
-                }`}
-              >
-                {d} 天
-              </button>
-            ))}
-            <Button variant="ghost" size="sm" onClick={() => load(windowDays)}>
-              <RotateCcw className="h-3.5 w-3.5" /> 刷新
-            </Button>
-          </div>
+          {tab === "diag" && (
+            <div className="flex items-center gap-2">
+              {WINDOW_OPTIONS.map((d) => (
+                <button
+                  key={d}
+                  onClick={() => setWindowDays(d)}
+                  className={`rounded px-2 py-1 text-xs transition-colors ${
+                    d === windowDays
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-secondary text-muted-foreground hover:bg-muted"
+                  }`}
+                >
+                  {d} 天
+                </button>
+              ))}
+              <Button variant="ghost" size="sm" onClick={() => load(windowDays)}>
+                <RotateCcw className="h-3.5 w-3.5" /> 刷新
+              </Button>
+            </div>
+          )}
         </div>
 
+        {/* 子页签:「经营诊断」是原有的只读看板+参谋对话,「商机与触达」是
+            M14 新增的草稿审批区——后者的批准按钮会真实触达买家,分开成两页
+            避免和纯只读的诊断面板混在一屏、增加误触到批准按钮的概率。 */}
+        <div className="flex items-center gap-2 border-b pb-2">
+          {([
+            { key: "diag" as const, label: "经营诊断" },
+            { key: "growth" as const, label: "商机与触达" },
+          ]).map((t) => (
+            <button
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`rounded px-3 py-1.5 text-sm transition-colors ${
+                tab === t.key
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-secondary text-muted-foreground hover:bg-muted"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {tab === "growth" && <GrowthPanel />}
+
+        {tab === "diag" && (
+        <>
         {err && <div className="text-sm text-destructive">读取失败：{err}</div>}
         {/* 刷新失败但下方仍有旧数据:必须明说这是过期快照。店主靠这个面板决定
             某个异常要不要处理,拿旧数据当现状会直接做错决定。 */}
@@ -229,6 +263,8 @@ export function OperationsView() {
             {chatErr && <div className="text-xs text-destructive">⚠️ {chatErr}</div>}
           </Card>
         </section>
+        </>
+        )}
       </div>
     </div>
   );
