@@ -170,3 +170,89 @@ class MultiAgentOrchestrator:
         self.engine.close()
         for p in self.profiles.values():
             p["tool_manager"].close()
+
+
+class SellerOrchestrator:
+    """**卖家侧总控**:与 MultiAgentOrchestrator 同构,但服务对象是店主。
+
+    actor 分流是确定性的——由端点决定走哪个编排器,不让 LLM 猜"这是买家还是店主"。
+    只有 actor 内部的域路由(analyst/growth)才用 LLM。
+
+    刻意复用同一个硬化引擎 EcomAgent:空回复降级、落盘指针、事件流、持久化
+    全部照旧;卖家侧的差异只在 prompt + 工具子集 + 注入的共享上下文。
+    """
+
+    def __init__(self, session_path: Optional[str] = None, user_id: Optional[str] = None):
+        from app.agent.chat import EcomAgent
+        from app.multi_agent.agents import SELLER_AGENT_CONFIGS
+        from app.multi_agent.seller_router import SELLER_DEFAULT, SellerRouter
+
+        sid = Path(session_path).stem if session_path else None
+        self.engine = EcomAgent(session_path=session_path, session_id=sid, user_id=user_id)
+        self.router = SellerRouter(self.engine.client, self.engine.model)
+        self._last_key: str | None = None
+        self.last_agent_key: str = SELLER_DEFAULT
+
+        self.profiles: dict[str, dict] = {}
+        for key, cfg in SELLER_AGENT_CONFIGS.items():
+            self.profiles[key] = {
+                "name": cfg["name"],
+                "prompt": cfg["prompt"],
+                "tool_manager": ToolManager(
+                    use_mcp=settings.mcp_enabled,
+                    mcp_server_url=settings.mcp_server_url,
+                    allowed_tools=cfg["tools"],
+                ),
+            }
+        self._default_tm = self.engine.tool_manager
+        self.event_sink = None
+        self.client = self.engine.client
+
+    def chat(self, user_input: str):
+        from app.multi_agent.seller_router import SELLER_DEFAULT
+
+        key = self.router.route(user_input, self.engine.raw_messages) or self._last_key \
+            or SELLER_DEFAULT
+        self._last_key = key
+        self.last_agent_key = key
+        profile = self.profiles.get(key) or next(iter(self.profiles.values()))
+        if self.event_sink:
+            self.event_sink({"type": "route", "agent": profile["name"], "key": key,
+                             "actor": "seller"})
+        self.engine.system_prompt = profile["prompt"]
+        self.engine.tool_manager = profile["tool_manager"]
+        self.engine.event_sink = self.event_sink
+        self.engine.client = self.client
+        return self.engine.chat(user_input)
+
+    @property
+    def raw_messages(self) -> list:
+        return self.engine.raw_messages
+
+    @property
+    def session_id(self):
+        return self.engine.session_id
+
+    @property
+    def user_id(self):
+        return self.engine.user_id
+
+    @property
+    def _pending(self):
+        return self.engine._pending
+
+    @_pending.setter
+    def _pending(self, value):
+        self.engine._pending = value
+
+    def reset(self):
+        self.engine.reset()
+
+    def save(self):
+        self.engine.save()
+
+    def close(self):
+        self.engine.tool_manager = self._default_tm
+        self.engine.close()
+        for p in self.profiles.values():
+            p["tool_manager"].close()
