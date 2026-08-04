@@ -15,6 +15,9 @@ from pathlib import Path
 
 import yaml
 
+# 单个附带文件注入上下文的字符上限(防一份大文档把上下文顶爆)
+MAX_SKILL_FILE_CHARS = 20000
+
 
 @dataclass
 class SkillMeta:
@@ -137,6 +140,63 @@ class SkillManager:
 
         return "\n".join(lines)
 
+    def list_skill_files(self, skill_name: str) -> list[str]:
+        """该技能目录下除 SKILL.md 外的附带文件(相对路径,已排序)。
+
+        Agent Skills 标准里一个技能是**目录**,可带参考资料;这里只做列举,
+        内容由模型经 read_skill_file 按需读取(渐进式披露,不一次性灌进上下文)。
+        未知技能/目录读不了 → []。
+        """
+        skill = self._skills.get(skill_name)
+        if skill is None:
+            return []
+        root = skill.path.parent
+        try:
+            return sorted(
+                p.relative_to(root).as_posix()
+                for p in root.rglob("*")
+                if p.is_file() and p.name != "SKILL.md"
+            )
+        except OSError:
+            return []
+
+    def read_skill_file(self, skill_name: str, rel_path: str) -> dict:
+        """读取该技能目录下的一个附带文件(供 read_skill_file 工具调用)。
+
+        安全:rel_path 来自**模型输出**,故必须防目录穿越——解析后必须仍在该技能
+        目录内,且拒绝绝对路径。只按文本读取,**绝不执行**任何内容。
+        SKILL.md 不走这里(它由 load_skill 提供,避免重复灌上下文)。
+        """
+        skill = self._skills.get(skill_name)
+        if skill is None:
+            return {"success": False, "error": f"未找到技能「{skill_name}」"}
+
+        rel = (rel_path or "").strip()
+        if not rel:
+            return {"success": False, "error": "文件路径为空"}
+        if Path(rel).is_absolute():
+            return {"success": False, "error": "只接受技能目录内的相对路径"}
+        if Path(rel).name == "SKILL.md":
+            return {"success": False, "error": "SKILL.md 已随技能加载,无需再读"}
+
+        root = skill.path.parent.resolve()
+        try:
+            target = (root / rel).resolve()
+            target.relative_to(root)          # 逃出技能目录 → ValueError
+        except (OSError, ValueError):
+            return {"success": False, "error": "路径越出技能目录,已拒绝"}
+        if not target.is_file():
+            return {"success": False, "error": f"文件不存在: {rel}"}
+
+        try:
+            raw = target.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return {"success": False, "error": f"读取失败: {exc}"}
+
+        truncated = len(raw) > MAX_SKILL_FILE_CHARS
+        return {"success": True, "skill_name": skill_name, "file": rel,
+                "content": raw[:MAX_SKILL_FILE_CHARS], "truncated": truncated}
+
     def get_workflow(self, skill_name: str) -> dict:
         """该 skill 的工作流声明(无声明/未知 skill → {},即无约束)。
 
@@ -212,9 +272,20 @@ class SkillManager:
         # 也就是说:声明变更的效果不会被灰度验证到,转正后才首次生效。
         from app.agent.skills.workflow import render_constraints
 
+        # 渐进式披露:只告知有哪些附带资料可读,不把内容灌进来(要用时模型自己调工具取)
+        files = self.list_skill_files(skill_name)
+        files_block = ""
+        if files:
+            files_block = (
+                "\n\n## 本技能附带的参考资料(按需读取,不必全读)\n"
+                + "\n".join(f"- {f}" for f in files)
+                + f"\n需要某份资料时调用 `read_skill_file(skill_name=\"{skill.name}\", "
+                  "file=\"上面的相对路径\")` 取内容。\n"
+            )
+
         return {
             "success": True,
             "skill_name": skill.name,
-            "instructions": body + render_constraints(skill.workflow),
+            "instructions": body + render_constraints(skill.workflow) + files_block,
             "variant": variant,
         }

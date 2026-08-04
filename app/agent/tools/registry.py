@@ -10,7 +10,7 @@ from app.agent.tools.refund import apply_refund
 from app.agent.tools.knowledge import search_knowledge
 from app.agent.tools.user_orders import list_user_orders
 from app.agent.tools.memory_tool import recall_user_memory, save_user_memory
-from app.agent.tools.skill_tool import load_skill
+from app.agent.tools.skill_tool import load_skill, read_skill_file
 from app.config.settings import settings
 from app.agent.tools.bargain import negotiate_price
 from app.agent.tools.read_result import read_tool_result
@@ -28,6 +28,7 @@ _TOOL_MAP: dict[str, Callable] = {
     "recall_user_memory": recall_user_memory,
     "save_user_memory": save_user_memory,
     "load_skill": load_skill,
+    "read_skill_file": read_skill_file,
     "read_tool_result": read_tool_result,
     "change_address": change_address,
     "cancel_order": cancel_order,
@@ -360,6 +361,27 @@ TOOL_DEFINITIONS.append({
                 "length": {"type": "integer", "description": "读取字符数,默认 4000", "default": 4000},
             },
             "required": ["ref"],
+        },
+    },
+})
+
+TOOL_DEFINITIONS.append({
+    "type": "function",
+    "function": {
+        "name": "read_skill_file",
+        "description": (
+            "读取某个技能附带的参考资料(如 references/xxx.md)。"
+            "load_skill 的返回里若列出了「附带的参考资料」,需要哪份就用本工具取哪份——"
+            "不要一次把所有资料都读进来。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill_name": {"type": "string", "description": "技能名,如 process-return"},
+                "file": {"type": "string",
+                         "description": "技能目录内的相对路径,取自 load_skill 列出的清单"},
+            },
+            "required": ["skill_name", "file"],
         },
     },
 })

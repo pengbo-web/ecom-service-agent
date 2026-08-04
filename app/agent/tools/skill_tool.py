@@ -25,3 +25,10 @@ def load_skill(skill_name: str) -> dict:
     if _skill_manager is None:
         return {"success": False, "error": "技能系统未启用"}
     return _skill_manager.load_skill(skill_name)
+
+
+def read_skill_file(skill_name: str, file: str) -> dict:
+    """读取某技能目录下的附带参考资料(渐进式披露:按需取,不一次性灌上下文)。"""
+    if _skill_manager is None:
+        return {"success": False, "error": "技能系统未启用"}
+    return _skill_manager.read_skill_file(skill_name, file)
