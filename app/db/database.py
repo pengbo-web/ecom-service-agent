@@ -135,6 +135,48 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_skill_canaries_active
                     ON skill_canaries(skill_name, status);
+                CREATE TABLE IF NOT EXISTS agent_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    payload TEXT,
+                    source_agent TEXT,
+                    target_agent TEXT NOT NULL,
+                    correlation_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at TEXT NOT NULL,
+                    consumed_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_events_target
+                    ON agent_events(target_agent, status, id);
+                CREATE INDEX IF NOT EXISTS idx_agent_events_corr
+                    ON agent_events(correlation_id, id);
+                CREATE TABLE IF NOT EXISTS shared_context (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    source_agent TEXT,
+                    correlation_id TEXT,
+                    updated_at TEXT NOT NULL,
+                    expires_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS outreach_drafts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    opportunity_type TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    order_id TEXT,
+                    content TEXT NOT NULL,
+                    offer TEXT,
+                    reason TEXT,
+                    correlation_id TEXT,
+                    status TEXT NOT NULL DEFAULT 'draft',
+                    needs_review_reason TEXT,
+                    created_by TEXT,
+                    reviewed_by TEXT,
+                    created_at TEXT NOT NULL,
+                    reviewed_at TEXT,
+                    sent_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_outreach_status
+                    ON outreach_drafts(status, id);
                 """
             )
             # 兼容旧库：products 补 floor_price 列
@@ -721,5 +763,244 @@ class Database:
         try:
             conn.execute("DELETE FROM session_snapshots WHERE session_id = ?", (session_id,))
             conn.commit()
+        finally:
+            conn.close()
+
+    # ---------- 多 Agent 协作总线(持久化 append-only 事件) ----------
+    def publish_event(self, event_type: str, payload: dict, source_agent: str,
+                      target_agent: str, correlation_id: str) -> int:
+        """发布一条协作事件,返回自增 id。
+
+        总线是**持久化**的:进程重启不丢事件,且 correlation_id 把一条协作链
+        (信号→洞察→草稿→发送)串起来,全链可回溯审计。
+        """
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "INSERT INTO agent_events (event_type, payload, source_agent, "
+                "target_agent, correlation_id, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+                (event_type, json.dumps(payload or {}, ensure_ascii=False),
+                 source_agent, target_agent, correlation_id, self._now()))
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+    def claim_events(self, target_agent: str, limit: int = 20) -> list[dict]:
+        """**原子认领**该 Agent 的待处理事件:pending → processing,并返回认领到的行。
+
+        幂等的关键:UPDATE 带 `status='pending'` 条件,两个 worker 并发时只有一个
+        能把某行改成 processing,另一个的 rowcount 为 0 拿不到它。绝不能改成
+        "先 SELECT 再 UPDATE"——那样同一条异常会产出两份洞察/两份草稿。
+
+        坏 JSON 的 payload 行跳过(与 list_skill_traces 同口径),单条脏数据不拖垮
+        整个消费循环;但它已被置为 processing,不会反复卡住队列。
+        """
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT id FROM agent_events WHERE target_agent = ? AND status = 'pending' "
+                "ORDER BY id ASC LIMIT ?", (target_agent, limit)).fetchall()
+            claimed: list[dict] = []
+            for row in rows:
+                cur = conn.execute(
+                    "UPDATE agent_events SET status = 'processing', consumed_at = ? "
+                    "WHERE id = ? AND status = 'pending'", (self._now(), row["id"]))
+                if cur.rowcount == 0:
+                    continue          # 已被别的 worker 认领
+                full = conn.execute(
+                    "SELECT * FROM agent_events WHERE id = ?", (row["id"],)).fetchone()
+                item = dict(full)
+                try:
+                    item["payload"] = json.loads(item["payload"]) if item["payload"] else {}
+                except (json.JSONDecodeError, TypeError):
+                    continue          # 脏行已置 processing,不会反复卡队列
+                claimed.append(item)
+            conn.commit()
+            return claimed
+        finally:
+            conn.close()
+
+    def finish_event(self, event_id: int, status: str) -> bool:
+        """结束一条事件(status: done / failed)。只对 processing 的行生效。"""
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE agent_events SET status = ? WHERE id = ? AND status = 'processing'",
+                (status, event_id))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def list_events(self, correlation_id: Optional[str] = None,
+                    limit: int = 100) -> list[dict]:
+        """按 id DESC 列事件(可按协作链过滤),供时间线可视化与审计。"""
+        sql = "SELECT * FROM agent_events"
+        params: list = []
+        if correlation_id:
+            sql += " WHERE correlation_id = ?"
+            params.append(correlation_id)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        conn = self.connect()
+        try:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+            results = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["payload"] = json.loads(item["payload"]) if item["payload"] else {}
+                except (json.JSONDecodeError, TypeError):
+                    item["payload"] = {}
+                results.append(item)
+            return results
+        finally:
+            conn.close()
+
+    # ---------- 共享上下文池(跨 Agent 可读写,带来源与 TTL) ----------
+    def set_shared_context(self, key: str, value: dict, source_agent: str,
+                           correlation_id: str, ttl_seconds: int = 86400) -> None:
+        """写入共享上下文。必带 source_agent:读到的一方要知道这条是谁写的。"""
+        from datetime import datetime, timedelta
+        expires = (datetime.now() + timedelta(seconds=ttl_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+        conn = self.connect()
+        try:
+            conn.execute(
+                "INSERT INTO shared_context (key, value, source_agent, correlation_id, "
+                "updated_at, expires_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                "source_agent = excluded.source_agent, "
+                "correlation_id = excluded.correlation_id, "
+                "updated_at = excluded.updated_at, expires_at = excluded.expires_at",
+                (key, json.dumps(value or {}, ensure_ascii=False), source_agent,
+                 correlation_id, self._now(), expires))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_shared_context(self, key: str) -> Optional[dict]:
+        """读共享上下文。已过期或坏 JSON 一律返回 None(读侧不能拿到半截数据)。"""
+        conn = self.connect()
+        try:
+            row = conn.execute("SELECT * FROM shared_context WHERE key = ?", (key,)).fetchone()
+            if row is None:
+                return None
+            item = dict(row)
+            if item.get("expires_at") and item["expires_at"] <= self._now():
+                return None
+            try:
+                item["value"] = json.loads(item["value"]) if item["value"] else {}
+            except (json.JSONDecodeError, TypeError):
+                return None
+            return item
+        finally:
+            conn.close()
+
+    def list_shared_context(self, prefix: str = "", limit: int = 50) -> list[dict]:
+        """按 key 前缀列未过期的共享上下文(供控制台展示"当前共享了什么")。"""
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM shared_context WHERE key LIKE ? AND "
+                "(expires_at IS NULL OR expires_at > ?) ORDER BY updated_at DESC LIMIT ?",
+                (f"{prefix}%", self._now(), limit)).fetchall()
+            results = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["value"] = json.loads(item["value"]) if item["value"] else {}
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                results.append(item)
+            return results
+        finally:
+            conn.close()
+
+    # ---------- 触达草稿(营销 Agent 只产草稿,发送必须人工批准) ----------
+    def create_outreach_draft(self, opportunity_type: str, user_id: str,
+                              order_id: str, content: str, offer: dict,
+                              reason: str, correlation_id: str, created_by: str,
+                              needs_review_reason: str = "") -> int:
+        """落一条触达草稿(status 恒为 draft)。
+
+        **本方法是营销 Agent 唯一的写路径**:它永远只能产 draft,发送发生在
+        审批端点里。needs_review_reason 非空表示命中了承诺类敏感词,人工要重点看。
+        """
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "INSERT INTO outreach_drafts (opportunity_type, user_id, order_id, "
+                "content, offer, reason, correlation_id, status, needs_review_reason, "
+                "created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)",
+                (opportunity_type, user_id, order_id, content,
+                 json.dumps(offer or {}, ensure_ascii=False), reason, correlation_id,
+                 needs_review_reason, created_by, self._now()))
+            conn.commit()
+            return int(cur.lastrowid)
+        finally:
+            conn.close()
+
+    def _draft_from_row(self, row) -> Optional[dict]:
+        item = dict(row)
+        try:
+            item["offer"] = json.loads(item["offer"]) if item["offer"] else {}
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return item
+
+    def list_outreach_drafts(self, status: Optional[str] = None,
+                             limit: int = 50) -> list[dict]:
+        sql = "SELECT * FROM outreach_drafts"
+        params: list = []
+        if status:
+            sql += " WHERE status = ?"
+            params.append(status)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        conn = self.connect()
+        try:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+            return [d for d in (self._draft_from_row(r) for r in rows) if d]
+        finally:
+            conn.close()
+
+    def get_outreach_draft(self, draft_id: int) -> Optional[dict]:
+        conn = self.connect()
+        try:
+            row = conn.execute("SELECT * FROM outreach_drafts WHERE id = ?",
+                               (draft_id,)).fetchone()
+            return self._draft_from_row(row) if row else None
+        finally:
+            conn.close()
+
+    def review_outreach_draft(self, draft_id: int, status: str,
+                              reviewed_by: str) -> bool:
+        """审批草稿(status: approved / rejected)。**只对 draft 状态生效**。
+
+        条件更新是防重发的关键:两次点"批准"只有第一次拿到 True,发送端点据此
+        判断本次是否真的该发,不会给同一个买家发两遍。
+        """
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE outreach_drafts SET status = ?, reviewed_by = ?, reviewed_at = ? "
+                "WHERE id = ? AND status = 'draft'",
+                (status, reviewed_by, self._now(), draft_id))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def mark_outreach_sent(self, draft_id: int) -> bool:
+        """标记已发送。只对 approved 生效,保证"批准过"才可能"已发送"。"""
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE outreach_drafts SET status = 'sent', sent_at = ? "
+                "WHERE id = ? AND status = 'approved'", (self._now(), draft_id))
+            conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
