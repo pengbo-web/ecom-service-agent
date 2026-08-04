@@ -9,6 +9,11 @@
 
 from __future__ import annotations
 
+from app.agent.skills.execution_trace import (
+    OUTCOME_HANDOFF,
+    OUTCOME_SUCCESS,
+    OUTCOME_TOOL_ERROR,
+)
 from app.db import get_db
 
 
@@ -63,6 +68,12 @@ def product_diagnostics(window_days: int = 7, top_n: int = 5) -> dict:
     """按商品的诊断:下单量 / 销售额 / 退款率 / 退款原因 top3 / 当前库存。
 
     按"退款单数 DESC, 下单量 DESC"排序——参谋要先看最疼的商品,不是卖最好的。
+
+    近似口径(重要,读结果的人和 LLM 都要知道):退款记录在**订单**级别,
+    但这里按 `order_items ⋈ orders` 以 sku 分组统计。一笔订单只要退款,
+    就会把这笔退款计入该订单**每一个** SKU 名下。因此对多商品订单,
+    单个商品的 `refund_rate` 是被高估的上界(upper bound),不是精确的
+    "这个商品自己导致退款"的比例——多件合并下单越常见,偏差越大。
     """
     conn = get_db().connect()
     try:
@@ -109,26 +120,45 @@ def service_quality(window_days: int = 7) -> dict:
     """服务质量:按 skill 的执行成功率 / 工具失败率 / 转人工率。
 
     数据来自 skill_traces(自进化体系已在记的执行轨迹),不额外埋点。
+
+    三个分桶的字面量不在 SQL 里写死——绑定为查询参数,直接取自
+    `app.agent.skills.execution_trace` 里 `SkillTurn.outcome()` 实际写出的
+    OUTCOME_* 常量,防止两边字面量各写各的、慢慢漂移出一个永远不命中的分支
+    (曾经的教训:`human_rate` 用字面量 `'requires_human'`,但落库写的是
+    `OUTCOME_HANDOFF = 'handoff'`,导致转人工率永远汇报成 0.0)。
+
+    `other`:outcome 不属于以上三种已知取值的行数(如历史脏数据、未来新增
+    的 outcome 取值)。这些行仍计入 `total`,但不落进任何一个 rate 的分子,
+    所以三个 rate 不保证求和为 1——这里选择显式给出 `other` 计数,而不是只
+    在文档里提一句,因为这个模块的下游是"按阈值判异常"的告警:如果只在
+    文档里说明,未来新增/拼错的 outcome 会悄悄从三个 rate 里消失、不体现
+    在任何数字上,和"这个 skill 一直很健康"长得一模一样,等于把异常藏起来
+    了;`other` 让这种情况在返回值里可见,便于告警侧决定要不要单独关注。
     """
     conn = get_db().connect()
     try:
         w = _window_clause(window_days)
         rows = conn.execute(
             f"SELECT skill_name, COUNT(*) AS total, "
-            f"  SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS ok, "
-            f"  SUM(CASE WHEN outcome = 'tool_error' THEN 1 ELSE 0 END) AS tool_error, "
-            f"  SUM(CASE WHEN outcome = 'requires_human' THEN 1 ELSE 0 END) AS human "
+            f"  SUM(CASE WHEN outcome = ? THEN 1 ELSE 0 END) AS ok, "
+            f"  SUM(CASE WHEN outcome = ? THEN 1 ELSE 0 END) AS tool_error, "
+            f"  SUM(CASE WHEN outcome = ? THEN 1 ELSE 0 END) AS human "
             f"FROM skill_traces WHERE created_at >= {w} "
-            f"GROUP BY skill_name ORDER BY total DESC").fetchall()
+            f"GROUP BY skill_name ORDER BY total DESC",
+            (OUTCOME_SUCCESS, OUTCOME_TOOL_ERROR, OUTCOME_HANDOFF)).fetchall()
         skills = []
         for r in rows:
             total = int(r["total"] or 0)
+            ok = int(r["ok"] or 0)
+            tool_error = int(r["tool_error"] or 0)
+            human = int(r["human"] or 0)
             skills.append({
                 "skill_name": r["skill_name"],
                 "total": total,
-                "success_rate": _rate(int(r["ok"] or 0), total),
-                "tool_error_rate": _rate(int(r["tool_error"] or 0), total),
-                "human_rate": _rate(int(r["human"] or 0), total),
+                "success_rate": _rate(ok, total),
+                "tool_error_rate": _rate(tool_error, total),
+                "human_rate": _rate(human, total),
+                "other": total - ok - tool_error - human,
             })
         return {"success": True, "window_days": int(window_days), "skills": skills}
     finally:
