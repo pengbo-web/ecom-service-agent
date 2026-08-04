@@ -220,3 +220,18 @@ export async function uploadSkillBundle(file: File): Promise<SkillUploadResult> 
   if (!r.ok) throw new Error("HTTP " + r.status);
   return r.json();
 }
+
+export type SkillDistillResult = {
+  created: boolean; name: string | null;
+  risk: string | null; policy: string | null; errors: string[];
+};
+
+/** 上传客服 SOP/产品资料,让后端 LLM 提炼成候选技能(会花钱,调用方需先确认)。 */
+export async function distillSkillFromDoc(docText: string): Promise<SkillDistillResult> {
+  const r = await adminFetch("/api/admin/skills/distill", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ doc_text: docText }),
+  });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}

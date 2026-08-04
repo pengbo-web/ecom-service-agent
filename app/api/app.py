@@ -11,7 +11,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.conversations import ensure_active, open_or_reuse
 from app.api.schemas import (AgentReplyRequest, ChatRequest, CreateOrderRequest, CreateUserRequest,
-                              LoginRequest, OpenConversationRequest, ResetRequest)
+                              LoginRequest, OpenConversationRequest, ResetRequest,
+                              SkillDistillRequest)
 from app.api.session_manager import SessionManager
 from app.api.streaming import run_agent_streaming
 from app.auth.token import sign_token, verify_token
@@ -797,6 +798,43 @@ def create_app(session_manager: Optional[SessionManager] = None,
         finally:
             if tmp_root.exists():
                 shutil.rmtree(tmp_root, ignore_errors=True)
+
+    @app.post("/api/admin/skills/distill", dependencies=[Depends(admin_auth)])
+    def admin_distill_skill(req: SkillDistillRequest):
+        """上传客服 SOP / 产品资料,让 LLM 提炼成**候选**技能(不直接上线)。
+
+        会真调一次 LLM(花钱),前端须二次确认。资料是不可信外部输入,故:
+        prompt 给正文加围栏 + 产物过 validate_candidate + 只落 _candidates/ 且带
+        风险档 —— 即便资料里藏了注入,产出也进不了正式目录。
+        """
+        from openai import OpenAI
+
+        from app.agent.skills import doc_distill as dd
+        from app.agent.skills.risk import classify_risk, promotion_policy
+        from app.scripts import promote_skill as ps
+
+        doc = (req.doc_text or "").strip()
+        if not doc:
+            return {"created": False, "name": None, "risk": None, "policy": None,
+                    "errors": ["资料正文为空"]}
+        if len(doc) > dd.MAX_DOC_CHARS * 4:
+            raise HTTPException(413, f"资料过大(建议先精简到 {dd.MAX_DOC_CHARS} 字符以内)")
+
+        try:
+            client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+            out = dd.distill_from_doc(client, settings.model_name, doc, ps.CANDIDATES_DIR)
+        except Exception as exc:  # noqa: BLE001 LLM/网络失败如实回传,不 500
+            return {"created": False, "name": None, "risk": None, "policy": None,
+                    "errors": [f"蒸馏失败: {type(exc).__name__}: {exc}"]}
+
+        if out is None:
+            return {"created": False, "name": None, "risk": None, "policy": None,
+                    "errors": ["LLM 产物未通过校验(frontmatter 不全 / 工具名不实 / 名字非法)"]}
+
+        is_new = not (Path(ps.DEFINITIONS_DIR) / out["name"] / "SKILL.md").exists()
+        risk = classify_risk(out["content"], is_new_skill=is_new)
+        return {"created": True, "name": out["name"], "risk": risk,
+                "policy": promotion_policy(risk), "errors": []}
 
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():

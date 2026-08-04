@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { getSkillsOverview, uploadSkillBundle,
-  type SkillUploadResult, type SkillsOverview } from "@/lib/api";
+import { distillSkillFromDoc, getSkillsOverview, uploadSkillBundle,
+  type SkillDistillResult, type SkillUploadResult, type SkillsOverview } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RotateCcw } from "lucide-react";
@@ -33,6 +33,30 @@ export function SkillsView() {
   // 指向的是总览拉取失败,把人引到完全错误的方向。
   const [upErr, setUpErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [doc, setDoc] = useState("");
+  const [dsResult, setDsResult] = useState<SkillDistillResult | null>(null);
+
+  async function onDistill() {
+    if (!doc.trim()) return;
+    // 这一步会真调大模型、花钱,必须先让人确认(与评估页同口径)
+    if (!window.confirm("提炼会真调大模型、消耗 token。确认开始？")) return;
+    setBusy(true);
+    setDsResult(null);
+    try {
+      const result = await distillSkillFromDoc(doc);
+      setDsResult(result);
+      if (result.created) await load();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onPickDocFile(file: File | null) {
+    if (!file) return;
+    setDoc(await file.text());
+  }
 
   async function onPickBundle(file: File | null, input?: HTMLInputElement) {
     if (!file) return;
@@ -181,6 +205,37 @@ export function SkillsView() {
               <div className="text-xs text-destructive">
                 ❌ 未通过：{upResult.errors.join("；")}
               </div>
+            ))}
+          </Card>
+        </section>
+
+        {/* 上传 SOP/资料 → 提炼技能 */}
+        <section>
+          <h3 className="mb-2 text-sm font-semibold">上传客服 SOP / 产品资料 → 提炼技能</h3>
+          <Card className="flex flex-col gap-2 p-4 text-sm">
+            <div className="text-muted-foreground">
+              把服务规则或产品说明贴进来（或选文件），由大模型提炼成步骤化技能。
+              产物同样<b>只落待审候选</b>并带风险档；碰钱/承诺类会被判高危、强制人工确认。
+            </div>
+            <input type="file" accept=".md,.markdown,.txt" disabled={busy}
+              onChange={(e) => onPickDocFile(e.target.files?.[0] || null)}
+              className="text-xs" />
+            <textarea value={doc} onChange={(e) => setDoc(e.target.value)} disabled={busy}
+              rows={6} placeholder="粘贴客服 SOP 或产品资料正文…"
+              className="w-full rounded-md border bg-background p-2 text-xs outline-none" />
+            <div className="flex items-center gap-2">
+              <Button size="sm" onClick={onDistill} disabled={busy || !doc.trim()}>
+                ▶ 提炼成候选技能
+              </Button>
+              <span className="text-[11px] text-destructive">⚠️ 会真调大模型、消耗 token</span>
+            </div>
+            {busy && <div className="text-xs text-muted-foreground">提炼中…</div>}
+            {dsResult && (dsResult.created ? (
+              <div className="text-xs text-emerald-600 dark:text-emerald-400">
+                ✅ 已提炼出候选 <b>{dsResult.name}</b> · 风险 {dsResult.risk} · 放行 {dsResult.policy}
+              </div>
+            ) : (
+              <div className="text-xs text-destructive">❌ {dsResult.errors.join("；")}</div>
             ))}
           </Card>
         </section>

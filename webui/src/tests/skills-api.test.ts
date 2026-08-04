@@ -77,3 +77,31 @@ describe("upload skill bundle api", () => {
     expect(r.errors[0]).toContain("order_list");
   });
 });
+
+describe("distill skill api", () => {
+  beforeEach(() => { localStorage.clear(); });
+
+  it("蒸馏成功返回候选名与风险档", async () => {
+    const { distillSkillFromDoc } = await import("@/lib/api");
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ created: true, name: "sop-return", risk: "high",
+                           policy: "manual", errors: [] }),
+    })));
+    const r = await distillSkillFromDoc("退货 SOP 正文");
+    expect(r.created).toBe(true);
+    expect(r.policy).toBe("manual");
+  });
+
+  it("失败时把原因带回前端", async () => {
+    const { distillSkillFromDoc } = await import("@/lib/api");
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ created: false, name: null, risk: null, policy: null,
+                           errors: ["LLM 产物未通过校验"] }),
+    })));
+    const r = await distillSkillFromDoc("x");
+    expect(r.created).toBe(false);
+    expect(r.errors[0]).toContain("校验");
+  });
+});
