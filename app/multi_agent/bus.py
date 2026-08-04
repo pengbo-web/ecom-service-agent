@@ -53,16 +53,56 @@ def publish(event_type: str, payload: dict, source: str, target: str,
         get_db().publish_event(event_type, payload or {}, source, target, corr)
         return corr
     except Exception as exc:  # noqa: BLE001 旁路埋点,绝不影响主链路
-        logger.warning("协作事件发布失败(已忽略): %s %s", event_type, exc)
+        logger.warning("协作事件发布失败(已忽略) corr=%s: %s %s", corr, event_type, exc)
         return None
 
 
+def _finish_and_count(db, event_id: int, intended_status: str, stats: dict) -> None:
+    """收尾一条事件并按**实际落库结果**计数,而不是按"处理器跑完了"计数。
+
+    finish_event 只在事件仍是 processing 时才生效,有两类"没真正落库"的
+    情况,都不能被当成 done/failed 计入统计,否则统计会撒谎:
+
+    - 抛异常:锁表、磁盘满、连接断开等持久化层故障,原地兜住不外泄,
+      记 warning(带 event id 与意图状态)方便定位;
+    - 返回 False:该行已不在 processing(比如被并发的
+      reclaim_stale_events 抢先收回成 pending),同样不能算数。
+
+    这两种情况统一计入 stats["persist_failed"](按需惰性创建这个 key,
+    正常路径下 stats 仍只有 claimed/done/failed 三个 key,不影响既有调用方
+    和测试的字典等值断言)。不重试——这条事件是否要重来,交给
+    reclaim_stale_events 或人工决定,consume 本身不做二次尝试。
+    """
+    try:
+        persisted = db.finish_event(event_id, intended_status)
+    except Exception as exc:  # noqa: BLE001 落库失败不能拖垮整批,也不能外泄
+        logger.exception(
+            "协作事件收尾落库异常 id=%s intended_status=%s: %s",
+            event_id, intended_status, exc)
+        persisted = False
+    else:
+        if not persisted:
+            logger.warning(
+                "协作事件收尾未生效(该行已不在 processing,大概率被并发的 "
+                "reclaim_stale_events 抢先收回)id=%s intended_status=%s",
+                event_id, intended_status)
+
+    if persisted:
+        stats[intended_status] += 1
+    else:
+        stats["persist_failed"] = stats.get("persist_failed", 0) + 1
+
+
 def consume(target: str, handler: Callable[[dict], None], limit: int = 20) -> dict:
-    """认领并处理该 Agent 的待处理事件,返回 {claimed, done, failed}。
+    """认领并处理该 Agent 的待处理事件,返回 {claimed, done, failed[, persist_failed]}。
 
     单个处理器抛异常只把**那一条**置 failed,不影响同批其它事件——一个坏事件
     不能卡死整条流水线。failed 的事件不会被自动重试(避免坏事件无限循环),
     留在表里供人工在时间线上看到并决定。
+
+    收尾(finish_event)本身也可能失败(见 _finish_and_count):这同样只能
+    算作那一条事件的问题,不能让异常逃出 consume() 摁停整个 worker 循环、
+    抛下同批其它已认领的事件晾在 processing 里不管。
     """
     from app.config.settings import settings
 
@@ -83,9 +123,7 @@ def consume(target: str, handler: Callable[[dict], None], limit: int = 20) -> di
         except Exception as exc:  # noqa: BLE001 单条失败不拖垮整批
             logger.exception("协作事件处理失败 id=%s type=%s: %s",
                              ev.get("id"), ev.get("event_type"), exc)
-            db.finish_event(int(ev["id"]), "failed")
-            stats["failed"] += 1
+            _finish_and_count(db, int(ev["id"]), "failed", stats)
             continue
-        db.finish_event(int(ev["id"]), "done")
-        stats["done"] += 1
+        _finish_and_count(db, int(ev["id"]), "done", stats)
     return stats
