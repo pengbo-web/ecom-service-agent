@@ -35,6 +35,9 @@ export function SkillsView() {
   const [busy, setBusy] = useState(false);
   const [doc, setDoc] = useState("");
   const [dsResult, setDsResult] = useState<SkillDistillResult | null>(null);
+  // 蒸馏失败要单独展示在蒸馏卡片里:复用顶部那个 err 会渲染成"读取失败",
+  // 指向的是总览拉取失败,把人引到完全错误的方向(与上传卡片的 upErr 同一道理)。
+  const [dsErr, setDsErr] = useState("");
 
   async function onDistill() {
     if (!doc.trim()) return;
@@ -42,12 +45,13 @@ export function SkillsView() {
     if (!window.confirm("提炼会真调大模型、消耗 token。确认开始？")) return;
     setBusy(true);
     setDsResult(null);
+    setDsErr("");
     try {
       const result = await distillSkillFromDoc(doc);
       setDsResult(result);
       if (result.created) await load();
     } catch (e) {
-      setErr(String(e));
+      setDsErr(`提炼请求失败（网络、鉴权或体积超限）：${String(e)}`);
     } finally {
       setBusy(false);
     }
@@ -230,6 +234,12 @@ export function SkillsView() {
               <span className="text-[11px] text-destructive">⚠️ 会真调大模型、消耗 token</span>
             </div>
             {busy && <div className="text-xs text-muted-foreground">提炼中…</div>}
+            {dsErr && <div className="text-xs text-destructive">⚠️ {dsErr}</div>}
+            {dsResult?.truncated && (
+              <div className="text-xs text-amber-600 dark:text-amber-400">
+                ⚠️ 资料超过 12000 字，仅前 12000 字参与了蒸馏，建议拆分后分次蒸馏
+              </div>
+            )}
             {dsResult && (dsResult.created ? (
               <div className="text-xs text-emerald-600 dark:text-emerald-400">
                 ✅ 已提炼出候选 <b>{dsResult.name}</b> · 风险 {dsResult.risk} · 放行 {dsResult.policy}

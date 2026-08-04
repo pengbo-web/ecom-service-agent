@@ -46,8 +46,17 @@ def test_prompt_fences_document_body():
 
 
 def test_prompt_truncates_long_document():
-    p = build_doc_prompt("超长" * MAX_DOC_CHARS)
-    assert len(p) < MAX_DOC_CHARS * 2 + 500
+    """构造"头标记 + 超量填充 + 尾标记":截断存在则只留头、丢尾;
+    截断被删掉则头尾都在,断言必然失败——不像旧版无论截不截断都通不过。"""
+    head = "HEAD_MARK_9f3c2a"
+    tail = "TAIL_MARK_7b21d4"
+    filler = "填" * (MAX_DOC_CHARS + 500)
+    doc = head + filler + tail
+
+    p = build_doc_prompt(doc)
+
+    assert head in p
+    assert tail not in p
 
 
 def test_distill_writes_candidate(tmp_path):
@@ -137,3 +146,40 @@ def test_endpoint_reports_risk_and_only_writes_candidates(tmp_path, monkeypatch)
     assert d["name"] == "sop-return"
     assert d["risk"] in ("low", "medium", "high")
     assert list(defs.iterdir()) == []
+
+
+def test_endpoint_reports_truncated_true_for_over_cap_doc(tmp_path, monkeypatch):
+    """资料超过 MAX_DOC_CHARS 时,端点必须如实告知"尾部没真正参与蒸馏",
+    否则一份 30000 字的 SOP 悄悄丢了尾部、操作者毫无察觉。"""
+    cand = tmp_path / "_candidates"
+    defs = tmp_path / "definitions"
+    defs.mkdir()
+    monkeypatch.setattr("app.scripts.promote_skill.CANDIDATES_DIR", str(cand))
+    monkeypatch.setattr("app.scripts.promote_skill.DEFINITIONS_DIR", str(defs))
+    monkeypatch.setattr("app.agent.skills.doc_distill.distill_from_doc",
+                        lambda *a, **k: {"name": "sop-return",
+                                         "path": str(cand / "sop-return" / "SKILL.md"),
+                                         "content": GOOD_SKILL})
+
+    long_doc = "长" * (MAX_DOC_CHARS + 1)
+    d = _client().post("/api/admin/skills/distill", json={"doc_text": long_doc},
+                       headers=_headers()).json()
+
+    assert d["truncated"] is True
+
+
+def test_endpoint_reports_truncated_false_for_short_doc(tmp_path, monkeypatch):
+    cand = tmp_path / "_candidates"
+    defs = tmp_path / "definitions"
+    defs.mkdir()
+    monkeypatch.setattr("app.scripts.promote_skill.CANDIDATES_DIR", str(cand))
+    monkeypatch.setattr("app.scripts.promote_skill.DEFINITIONS_DIR", str(defs))
+    monkeypatch.setattr("app.agent.skills.doc_distill.distill_from_doc",
+                        lambda *a, **k: {"name": "sop-return",
+                                         "path": str(cand / "sop-return" / "SKILL.md"),
+                                         "content": GOOD_SKILL})
+
+    d = _client().post("/api/admin/skills/distill", json={"doc_text": DOC},
+                       headers=_headers()).json()
+
+    assert d["truncated"] is False

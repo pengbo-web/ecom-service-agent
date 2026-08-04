@@ -224,6 +224,8 @@ export async function uploadSkillBundle(file: File): Promise<SkillUploadResult> 
 export type SkillDistillResult = {
   created: boolean; name: string | null;
   risk: string | null; policy: string | null; errors: string[];
+  // 资料超过 MAX_DOC_CHARS(12000)时为 true:尾部没有真正参与蒸馏,前端须提示操作者
+  truncated: boolean;
 };
 
 /** 上传客服 SOP/产品资料,让后端 LLM 提炼成候选技能(会花钱,调用方需先确认)。 */

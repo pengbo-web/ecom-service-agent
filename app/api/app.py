@@ -1,6 +1,7 @@
 """FastAPI 应用工厂：SSE 流式对话 + 会话重置 + 静态前端 + 可观测性看板。"""
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Optional
@@ -33,6 +34,8 @@ from app.hitl.manual_mode import ManualMode
 from app.hitl.queue import HandoffQueue
 from app.observability import TraceStore, Tracer
 from app.observability.metrics import compute_metrics
+
+logger = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parents[2]
 
@@ -816,25 +819,33 @@ def create_app(session_manager: Optional[SessionManager] = None,
         doc = (req.doc_text or "").strip()
         if not doc:
             return {"created": False, "name": None, "risk": None, "policy": None,
-                    "errors": ["资料正文为空"]}
+                    "errors": ["资料正文为空"], "truncated": False}
         if len(doc) > dd.MAX_DOC_CHARS * 4:
             raise HTTPException(413, f"资料过大(建议先精简到 {dd.MAX_DOC_CHARS} 字符以内)")
+
+        # 只截断参与蒸馏的正文,不改变上面 4 倍上限的拒绝口径;操作者必须被如实告知
+        # "贴的内容有一截没真正喂给模型",否则一份 30000 字的 SOP 悄悄丢了尾部
+        truncated = dd.is_doc_truncated(doc)
 
         try:
             client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
             out = dd.distill_from_doc(client, settings.model_name, doc, ps.CANDIDATES_DIR)
         except Exception as exc:  # noqa: BLE001 LLM/网络失败如实回传,不 500
+            # 完整异常(可能带 base_url/代理等细节)只落服务端日志,回给客户端的只有类型名
+            logger.exception("skills/distill 调用 LLM 失败")
             return {"created": False, "name": None, "risk": None, "policy": None,
-                    "errors": [f"蒸馏失败: {type(exc).__name__}: {exc}"]}
+                    "errors": [f"蒸馏失败，请稍后重试或联系管理员（{type(exc).__name__}）"],
+                    "truncated": truncated}
 
         if out is None:
             return {"created": False, "name": None, "risk": None, "policy": None,
-                    "errors": ["LLM 产物未通过校验(frontmatter 不全 / 工具名不实 / 名字非法)"]}
+                    "errors": ["LLM 产物未通过校验(frontmatter 不全 / 工具名不实 / 名字非法)"],
+                    "truncated": truncated}
 
         is_new = not (Path(ps.DEFINITIONS_DIR) / out["name"] / "SKILL.md").exists()
         risk = classify_risk(out["content"], is_new_skill=is_new)
         return {"created": True, "name": out["name"], "risk": risk,
-                "policy": promotion_policy(risk), "errors": []}
+                "policy": promotion_policy(risk), "errors": [], "truncated": truncated}
 
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():

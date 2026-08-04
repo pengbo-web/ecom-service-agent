@@ -61,6 +61,15 @@ def build_doc_prompt(doc_text: str) -> str:
     )
 
 
+def is_doc_truncated(doc_text: str) -> bool:
+    """资料正文是否超过 MAX_DOC_CHARS(即尾部会被 build_doc_prompt 截掉、不参与蒸馏)。
+
+    截断本身不算失败(仍会正常蒸馏出候选),但操作者应当被如实告知"贴的内容有一部分
+    没有真正喂给模型",否则一份 30000 字的 SOP 悄悄只用了前 12000 字,自己完全不知情。
+    """
+    return len((doc_text or "").strip()) > MAX_DOC_CHARS
+
+
 def distill_from_doc(client, model: str, doc_text: str, out_dir: str,
                      known_tools: set[str] | None = None) -> dict | None:
     """从资料正文蒸馏一个候选技能,写入 out_dir/<name>/SKILL.md。

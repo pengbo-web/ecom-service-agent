@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { SkillsView } from "@/components/SkillsView";
 
 const OVERVIEW = {
@@ -49,5 +49,53 @@ describe("SkillsView", () => {
     render(<SkillsView />);
     expect(await screen.findByText(/50%/)).toBeInTheDocument();
     expect(await screen.findByText(/非全时段/)).toBeInTheDocument();
+  });
+});
+
+describe("SkillsView 蒸馏截断提示", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+  });
+
+  it("后端标记 truncated 时展示截断警告(资料尾部没真正参与蒸馏)", async () => {
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      // call 1: 初始总览拉取; call 2: 蒸馏请求; call 3: created 后 load() 再次拉取总览
+      if (call === 2) return { ok: true, json: async () => ({
+        created: true, name: "sop-return", risk: "low", policy: "canary_ab",
+        errors: [], truncated: true,
+      }) };
+      return { ok: true, json: async () => OVERVIEW };
+    }));
+
+    render(<SkillsView />);
+    await screen.findByText(/上传客服 SOP/);
+    fireEvent.change(screen.getByPlaceholderText(/粘贴客服 SOP/), {
+      target: { value: "超长资料正文…" },
+    });
+    fireEvent.click(screen.getByText(/提炼成候选技能/));
+
+    expect(await screen.findByText(/仅前 12000 字参与了蒸馏/)).toBeInTheDocument();
+  });
+
+  it("蒸馏请求失败展示在蒸馏卡片里,不是顶部的「读取失败」", async () => {
+    let call = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      call += 1;
+      if (call === 1) return { ok: true, json: async () => OVERVIEW };
+      return { ok: false, status: 500, json: async () => ({}) };
+    }));
+
+    render(<SkillsView />);
+    await screen.findByText(/上传客服 SOP/);
+    fireEvent.change(screen.getByPlaceholderText(/粘贴客服 SOP/), {
+      target: { value: "资料正文" },
+    });
+    fireEvent.click(screen.getByText(/提炼成候选技能/));
+
+    expect(await screen.findByText(/提炼请求失败/)).toBeInTheDocument();
+    expect(screen.queryByText(/读取失败/)).toBeNull();
   });
 });
