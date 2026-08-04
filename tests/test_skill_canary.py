@@ -187,6 +187,90 @@ def test_load_skill_falls_back_when_db_raises(tmp_path, monkeypatch):
     assert result["variant"] == VARIANT_LIVE
 
 
+# ---------- 灰度期附带资料必须跟着候选走(否则 A/B 在测一条错接线) ----------
+
+def _canary_env(tmp_path, monkeypatch, live_files=None, cand_files=None):
+    """搭一套"线上版与候选版各带不同附件"的环境,并把灰度开到 100%。"""
+    from app.config.settings import settings
+
+    definitions = _definitions(tmp_path)
+    for rel, content in (live_files or {}).items():
+        p = definitions / "process-return" / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+
+    candidate = _candidate(tmp_path)
+    for rel, content in (cand_files or {}).items():
+        p = candidate.parent / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+
+    db = _db(tmp_path)
+    db.start_canary("process-return", str(candidate), 100, "low", "canary_ab")
+    monkeypatch.setattr("app.db.get_db", lambda: db)
+    monkeypatch.setattr(settings, "skill_canary_enabled", True)
+    monkeypatch.setattr("app.agent.tools.bargain.get_current_session", lambda: "sess-1")
+    return SkillManager(skills_dir=str(definitions), enabled=True)
+
+
+def test_canary_session_sees_candidate_attachments(tmp_path, monkeypatch):
+    """灰度会话拿到的是候选正文,文件清单就必须也来自候选目录。
+
+    否则模型看到线上的清单、读到线上的文件,候选新增的附件一读就是「文件不存在」:
+    候选的 A/B 成绩被这条接线人为压低,看门狗于是把一个好候选回滚掉。
+    """
+    mgr = _canary_env(tmp_path, monkeypatch,
+                      live_files={"references/live.md": "现行参考"},
+                      cand_files={"references/cand.md": "候选参考"})
+
+    result = mgr.load_skill("process-return")
+
+    assert result["variant"] == VARIANT_CANARY
+    assert "references/cand.md" in result["instructions"]
+    assert "references/live.md" not in result["instructions"]
+    assert mgr.list_skill_files("process-return") == ["references/cand.md"]
+
+
+def test_canary_session_reads_candidate_attachment_content(tmp_path, monkeypatch):
+    mgr = _canary_env(tmp_path, monkeypatch,
+                      live_files={"references/policy.md": "现行政策"},
+                      cand_files={"references/policy.md": "候选政策"})
+
+    r = mgr.read_skill_file("process-return", "references/policy.md")
+
+    assert r["success"] is True
+    assert r["content"] == "候选政策"
+
+
+def test_canary_root_still_rejects_traversal(tmp_path, monkeypatch):
+    """换了根目录也不能松掉穿越防护:rel_path 依旧来自模型输出。"""
+    (tmp_path / "candidates" ).mkdir(exist_ok=True)
+    mgr = _canary_env(tmp_path, monkeypatch, cand_files={"references/cand.md": "候选参考"})
+    secret = tmp_path / "candidates" / "secret.md"
+    secret.write_text("机密", encoding="utf-8")
+
+    for bad in ("../secret.md", "references/../../secret.md", "./../secret.md"):
+        r = mgr.read_skill_file("process-return", bad)
+        assert r["success"] is False, bad
+        assert "机密" not in str(r), bad
+
+
+def test_canary_falls_back_to_live_when_candidate_dir_gone(tmp_path, monkeypatch):
+    """候选目录整个没了 → 正文与清单一起退回正式版,不能半灰半正。"""
+    import shutil
+
+    mgr = _canary_env(tmp_path, monkeypatch,
+                      live_files={"references/live.md": "现行参考"},
+                      cand_files={"references/cand.md": "候选参考"})
+    shutil.rmtree(tmp_path / "candidates" / "process-return")
+
+    result = mgr.load_skill("process-return")
+
+    assert result["variant"] == VARIANT_LIVE
+    assert "现行正文" in result["instructions"]
+    assert "references/live.md" in result["instructions"]
+
+
 # ---------- SkillTurn 记住 variant ----------
 
 def test_skill_turn_captures_variant_from_load_result():

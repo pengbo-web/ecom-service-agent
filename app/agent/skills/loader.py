@@ -140,21 +140,26 @@ class SkillManager:
 
         return "\n".join(lines)
 
-    def list_skill_files(self, skill_name: str) -> list[str]:
+    def list_skill_files(self, skill_name: str, root: Path | None = None) -> list[str]:
         """该技能目录下除自身 SKILL.md 外的附带文件(相对路径,已排序)。
 
         Agent Skills 标准里一个技能是**目录**,可带参考资料;这里只做列举,
         内容由模型经 read_skill_file 按需读取(渐进式披露,不一次性灌进上下文)。
         未知技能/目录读不了 → []。
 
-        安全:rglob 会跟进**符号链接目录**,故必须逐个确认解析后仍在技能目录内。
+        `root` 不传时由 `_resolve_root` 决定用**候选目录还是正式目录**:灰度期
+        必须与 load_skill 拿到的正文同源,否则模型会拿到候选的指令 + 线上的文件
+        清单(候选新增的附件一读就是「文件不存在」)。load_skill 会把自己已解析
+        出的 root 传进来,保证同一次加载内三处解析结果完全一致。
+
+        安全:rglob 会跟进**符号链接目录**,故必须逐个确认解析后仍在该根目录内。
         否则技能目录里放一个指向别处的符链,就能把外部文件名列进模型上下文——
         内容虽有 read_skill_file 的独立拦截,但文件名本身已是信息泄露。
         """
-        skill = self._skills.get(skill_name)
-        if skill is None:
+        if root is None:
+            root, _ = self._resolve_root(skill_name)
+        if root is None:
             return []
-        root = skill.path.parent
         try:
             root_resolved = root.resolve()
             found: list[str] = []
@@ -174,15 +179,19 @@ class SkillManager:
         except OSError:
             return []
 
-    def read_skill_file(self, skill_name: str, rel_path: str) -> dict:
+    def read_skill_file(self, skill_name: str, rel_path: str,
+                        root: Path | None = None) -> dict:
         """读取该技能目录下的一个附带文件(供 read_skill_file 工具调用)。
 
-        安全:rel_path 来自**模型输出**,故必须防目录穿越——解析后必须仍在该技能
-        目录内,且拒绝绝对路径。只按文本读取,**绝不执行**任何内容。
+        安全:rel_path 来自**模型输出**,故必须防目录穿越——解析后必须仍在**解析
+        出的那个根目录**内(灰度期是候选目录,平时是正式目录),且拒绝绝对路径。
+        只按文本读取,**绝不执行**任何内容。
         SKILL.md 不走这里(它由 load_skill 提供,避免重复灌上下文)。
+
+        根目录跟随 `_resolve_root`,与 load_skill / list_skill_files 同源:模型看到
+        的清单来自哪个版本,读到的内容就必须来自同一个版本。
         """
-        skill = self._skills.get(skill_name)
-        if skill is None:
+        if skill_name not in self._skills:
             return {"success": False, "error": f"未找到技能「{skill_name}」"}
 
         rel = (rel_path or "").strip()
@@ -193,8 +202,12 @@ class SkillManager:
         if Path(rel).name == "SKILL.md":
             return {"success": False, "error": "SKILL.md 已随技能加载,无需再读"}
 
-        root = skill.path.parent.resolve()
+        if root is None:
+            root, _ = self._resolve_root(skill_name)
+        if root is None:
+            return {"success": False, "error": f"未找到技能「{skill_name}」"}
         try:
+            root = root.resolve()
             target = (root / rel).resolve()
             target.relative_to(root)          # 逃出技能目录 → ValueError
         except (OSError, ValueError):
@@ -221,11 +234,15 @@ class SkillManager:
         skill = self._skills.get(skill_name)
         return copy.deepcopy(skill.workflow) if skill else {}
 
-    def _canary_body(self, skill_name: str) -> str | None:
-        """灰度路由:该 skill 有活跃候选且当前会话落桶 → 返回候选正文,否则 None。
+    def _canary_dir(self, skill_name: str) -> Path | None:
+        """灰度路由:该 skill 有活跃候选且当前会话落桶 → 返回**候选目录**,否则 None。
 
-        fail-soft:开关关闭、取不到会话、DB 异常、候选文件缺失都返回 None(退回
-        正式版)。灰度是增强,绝不能因为它让 load_skill 失败。
+        返回目录而不是正文:技能是**目录**,正文与附带资料必须同源切换。只换正文
+        会让灰度会话拿到候选的指令 + 线上的文件清单,候选新增的附件一读就是
+        「文件不存在」—— A/B 成绩被这条接线人为压低,看门狗于是把一个好候选回滚掉。
+
+        fail-soft:开关关闭、取不到会话、DB 异常、候选目录/文件缺失都返回 None
+        (退回正式版)。灰度是增强,绝不能因为它让 load_skill 失败。
         """
         from app.config.settings import settings
 
@@ -244,12 +261,29 @@ class SkillManager:
                 return None
             if not in_canary_bucket(skill_name, session_id, int(canary["percent"])):
                 return None
-            path = Path(canary["candidate_path"])
-            if not path.exists():
+            path = Path(canary["candidate_path"])       # 库里记的是候选 SKILL.md
+            if not path.is_file():
                 return None
-            return _parse_body(path.read_text(encoding="utf-8"))
+            return path.parent
         except Exception:  # noqa: BLE001 灰度任何异常都退回正式版
             return None
+
+    def _resolve_root(self, skill_name: str) -> tuple[Path | None, str]:
+        """本次调用该用哪个技能根目录 + 对应 variant。未知技能 → (None, live)。
+
+        load_skill / list_skill_files / read_skill_file **必须**都经这里取根目录:
+        分桶是按 session 哈希的确定性函数,同一会话三处解析结果一致,模型看到的
+        指令、文件清单与文件内容因而永远来自同一个版本。
+        """
+        from app.agent.skills.canary import VARIANT_CANARY, VARIANT_LIVE
+
+        skill = self._skills.get(skill_name)
+        if skill is None:
+            return None, VARIANT_LIVE
+        candidate_dir = self._canary_dir(skill_name)
+        if candidate_dir is not None:
+            return candidate_dir, VARIANT_CANARY
+        return skill.path.parent, VARIANT_LIVE
 
     def load_skill(self, skill_name: str) -> dict:
         """加载指定 skill 的完整指令。供 load_skill 工具调用。
@@ -270,12 +304,17 @@ class SkillManager:
 
         from app.agent.skills.canary import VARIANT_CANARY, VARIANT_LIVE
 
-        body = skill.load_body()
-        variant = VARIANT_LIVE
-        canary_body = self._canary_body(skill_name)
-        if canary_body is not None:
-            body = canary_body
-            variant = VARIANT_CANARY
+        # 灰度期整目录切换:正文、附带文件清单、按需读取三者都以 root 为准
+        root, variant = self._resolve_root(skill_name)
+        body: str | None = None
+        if variant == VARIANT_CANARY and root is not None:
+            try:
+                body = _parse_body((root / "SKILL.md").read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                # fail-soft:候选正文这一刻读不出来就整体退回正式版,不能半灰半正
+                root, variant, body = skill.path.parent, VARIANT_LIVE, None
+        if body is None:
+            body = skill.load_body()
 
         # G1:把硬约束附在指令后,让模型事先知道(而不是被拦回才发现),省一轮往返
         # 灰度期约束声明恒用 LIVE skill 的 workflow(而非候选的):候选只替换指令
@@ -287,7 +326,8 @@ class SkillManager:
         from app.agent.skills.workflow import render_constraints
 
         # 渐进式披露:只告知有哪些附带资料可读,不把内容灌进来(要用时模型自己调工具取)
-        files = self.list_skill_files(skill_name)
+        # 传 root:清单必须与上面那份正文出自同一个版本(灰度期即候选目录)
+        files = self.list_skill_files(skill_name, root=root)
         files_block = ""
         if files:
             files_block = (

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -54,6 +55,105 @@ _UPLOAD_CHUNK_BYTES = 65536   # 分块读上传体的块大小(配合上限,避�
 
 def _sse_frame(event: dict) -> str:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+def _skill_canary_block(skill_name: str) -> str | None:
+    """该 skill 正在灰度中 → 返回给操作者看的中文拒绝理由;不在灰度 → None。
+
+    为什么两个写候选的端点都必须先问这一句:灰度期 `loader._canary_dir` 是**每次
+    load_skill 都从磁盘重读候选目录**的,所以覆盖 `_candidates/<name>/` 等于把
+    未经审核的内容**立刻**推给正在被分流的真实顾客会话(默认 50%)。响应里那句
+    「风险=high,需人工」是在那份文本已经上线之后才写出来的,拦不住任何东西。
+    铁律是"转正是唯一的上线路径",上传/蒸馏都不能从侧面绕开它。
+
+    DB 读不出来时按**有灰度**处理(fail-closed):判不了就别写。
+    """
+    try:
+        canary = get_db().get_active_canary(skill_name)
+    except Exception:  # noqa: BLE001 判不了就拒写,不能默认放行
+        return (f"无法确认技能「{skill_name}」当前是否正在灰度(数据库读取失败),"
+                "出于安全考虑已拒绝写入候选目录。请稍后重试或联系管理员。")
+    if not canary:
+        return None
+    return (f"技能「{skill_name}」正在灰度中(分流 {canary.get('percent')}%,候选正文"
+            "正在为一部分真实顾客会话服务)。此时覆盖候选目录会让未经审核的内容"
+            "**立刻**进入线上对话,故已拒绝写入。请先结束这轮灰度再上传:"
+            "`python -m app.scripts.skill_watchdog --check` 收口,或 "
+            f"`python -m app.scripts.promote_skill {skill_name} --rollback` 回滚。")
+
+
+def _process_skill_upload(raw: bytes, filename: str) -> dict:
+    """上传技能包的**阻塞段**:解压 → 整树校验 → 判档 → 换目录。由线程池调用。
+
+    单独拆出来的原因见 admin_upload_skill 的 docstring(事件循环不能被这段占住)。
+    返回值就是端点的响应体。
+    """
+    import shutil
+    import tempfile
+
+    from app.agent.skills.bundle import BundleError, extract_skill_bundle
+    from app.agent.skills.risk import promotion_policy
+    from app.agent.skills.tree_text import classify_tree_risk, validate_skill_tree
+    from app.scripts import promote_skill as ps
+
+    def _reject(errors: list[str], unknown: list[str] | None = None) -> dict:
+        return {"accepted": False, "name": "", "replaced": False, "risk": None,
+                "policy": None, "files": [], "errors": errors,
+                "unknown_tools": unknown or []}
+
+    lower = (filename or "").lower()
+    tmp_root = Path(tempfile.mkdtemp(prefix="skill_upload_"))
+    try:
+        if lower.endswith(".zip"):
+            try:
+                info = extract_skill_bundle(raw, str(tmp_root))
+            except BundleError as exc:
+                return _reject([str(exc)])
+            files = info["files"]
+        else:
+            # 单个 SKILL.md:视作只含一份说明的技能包
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return _reject(["文件不是 UTF-8 文本(技能包请打成 .zip)"])
+            (tmp_root / "SKILL.md").write_text(text, encoding="utf-8")
+            files = []
+
+        # 校验**整棵技能树**:附带资料会随转正一起进正式目录,并由 read_skill_file
+        # 整段灌进模型上下文 —— 只审根 SKILL.md 等于给"正文人畜无害、附件里写着
+        # 直接全额退款"留一条没人看的暗道。
+        report = validate_skill_tree(tmp_root)
+        tree = report["tree"]
+        if "SKILL.md" in tree["unreadable"]:
+            # 中文操作者在 Windows 上把 SKILL.md 存成 GBK 是最常见的坏上传,
+            # 它属于"校验不通过",按 docstring 走 200 + accepted=false,不是 500
+            return _reject(["SKILL.md 不是 UTF-8 文本或无法读取(Windows 上请另存为 "
+                            "UTF-8,不要用 GBK/ANSI 编码),已拒收。"])
+        if not report["valid"]:
+            return _reject(report["errors"], report["unknown_tools"])
+
+        name = report["name"]
+        blocked = _skill_canary_block(name)
+        if blocked:
+            return _reject([blocked])
+
+        dest = Path(ps.CANDIDATES_DIR) / name
+        replaced = (dest / "SKILL.md").exists()
+
+        is_new = not (Path(ps.DEFINITIONS_DIR) / name / "SKILL.md").exists()
+        risk = classify_tree_risk(tmp_root, is_new_skill=is_new, tree=tree)
+
+        # 复用转正链路那套"同卷 _swap + 两次 rename"的换目录:临时目录在系统盘,
+        # 直接 shutil.move 会退化成跨卷复制,期间 _candidates/<name>/ 可能是空的或
+        # 只写了一半 —— 而 admin_skills 与 promote_skill(--list/promote)正并发读它。
+        ps._replace_tree(tmp_root, dest)
+
+        return {"accepted": True, "name": name, "replaced": replaced,
+                "risk": risk, "policy": promotion_policy(risk),
+                "files": files, "errors": [], "unknown_tools": []}
+    finally:
+        if tmp_root.exists():
+            shutil.rmtree(tmp_root, ignore_errors=True)
 
 
 def create_app(session_manager: Optional[SessionManager] = None,
@@ -675,7 +775,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
         from pathlib import Path as _Path
 
         from app.agent.skills.loader import SkillManager
-        from app.agent.skills.risk import classify_risk, promotion_policy
+        from app.agent.skills.risk import promotion_policy
+        from app.agent.skills.tree_text import classify_tree_risk, read_skill_tree
         from app.scripts.promote_skill import CANDIDATES_DIR, DEFINITIONS_DIR, list_candidates
 
         live = SkillManager(skills_dir=settings.skills_dir, enabled=True).get_catalog()
@@ -686,8 +787,17 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 # 逐项容错:某一条候选的文件读不出/判不了风险,不该拖累整份列表——
                 # 该候选仍要出现在响应里,只是 risk/policy 降级为 None。
                 try:
-                    content = _Path(item["path"]).read_text(encoding="utf-8")
-                    item["risk"] = classify_risk(content, is_new_skill=not item["is_improvement"])
+                    # 判档看**整棵候选目录**(含附带资料):面板上那枚风险徽标是操作者
+                    # 决定"要不要人工介入"的依据,它必须覆盖会真正上线的全部文本。
+                    tree = read_skill_tree(_Path(item["path"]).parent)
+                    if tree["unreadable"] or tree["over_cap"]:
+                        # 这里是只读面板,故不像 promote/watchdog 那样把"审不了"折成
+                        # high(那会谎报"检出了动钱内容"),而是如实降级为 None ——
+                        # 前端把 None 渲染成「未判定 · 需人工复核」,同样不会被自动放行。
+                        raise ValueError("候选目录存在无法审核的文件")
+                    item["risk"] = classify_tree_risk(
+                        _Path(item["path"]).parent,
+                        is_new_skill=not item["is_improvement"], tree=tree)
                     item["policy"] = promotion_policy(item["risk"])
                 except Exception:  # noqa: BLE001
                     # None 在这里表示"判不了",不是"低危/可自动上线"——
@@ -734,15 +844,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
         流程:先解压到临时目录并校验,全部通过才整目录移进 _candidates/<name>/。
         校验不通过返回 200 + accepted=false + 错误列表(前端统一渲染);
         4xx 只留给鉴权与体积超限。
+
+        该 skill **正在灰度中就一律拒收**:灰度是每次 load_skill 从磁盘重读候选
+        目录的,覆盖它等于把未审内容直接推给线上会话(详见 _skill_canary_block)。
+
+        并发:本端点只有"读 multipart"必须 await,解压(最多 10 MB zlib 解压)、
+        逐文件写盘、跨卷 copytree 全是同步阻塞活。本服务的主业是 SSE 流式客服
+        对话,把这些放在事件循环上跑,一次 5 MB 上传就会冻住所有在途的流,
+        所以阻塞段整段丢进线程池(run_in_threadpool),端点本身仍是 async。
         """
-        import shutil
-        import tempfile
-
-        from app.agent.skills.bundle import BundleError, extract_skill_bundle
-        from app.agent.skills.risk import classify_risk, promotion_policy
-        from app.agent.skills.validator import validate_candidate
-        from app.scripts import promote_skill as ps
-
         # 分块读并随读随判:一次性 file.read() 会先把整个请求体读进内存,
         # 那样体积上限根本约束不到内存占用(本栈其它地方也没有请求体大小限制)。
         buf = bytearray()
@@ -753,54 +863,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
             buf.extend(chunk)
             if len(buf) > _MAX_UPLOAD_BYTES:
                 raise HTTPException(413, f"上传过大(上限 {_MAX_UPLOAD_BYTES} 字节)")
-        raw = bytes(buf)
 
-        def _reject(errors: list[str], unknown: list[str] | None = None) -> dict:
-            return {"accepted": False, "name": "", "replaced": False, "risk": None,
-                    "policy": None, "files": [], "errors": errors,
-                    "unknown_tools": unknown or []}
-
-        filename = (file.filename or "").lower()
-        tmp_root = Path(tempfile.mkdtemp(prefix="skill_upload_"))
-        try:
-            if filename.endswith(".zip"):
-                try:
-                    info = extract_skill_bundle(raw, str(tmp_root))
-                except BundleError as exc:
-                    return _reject([str(exc)])
-                files = info["files"]
-            else:
-                # 单个 SKILL.md:视作只含一份说明的技能包
-                try:
-                    text = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    return _reject(["文件不是 UTF-8 文本(技能包请打成 .zip)"])
-                (tmp_root / "SKILL.md").write_text(text, encoding="utf-8")
-                files = []
-
-            content = (tmp_root / "SKILL.md").read_text(encoding="utf-8")
-            report = validate_candidate(content)
-            if not report["valid"]:
-                return _reject(report["errors"], report["unknown_tools"])
-
-            name = report["name"]
-            dest = Path(ps.CANDIDATES_DIR) / name
-            replaced = (dest / "SKILL.md").exists()
-
-            is_new = not (Path(ps.DEFINITIONS_DIR) / name / "SKILL.md").exists()
-            risk = classify_risk(content, is_new_skill=is_new)
-
-            # 复用转正链路那套"同卷 _swap + 两次 rename"的换目录:临时目录在系统盘,
-            # 直接 shutil.move 会退化成跨卷复制,期间 _candidates/<name>/ 可能是空的或
-            # 只写了一半 —— 而 admin_skills 与 promote_skill(--list/promote)正并发读它。
-            ps._replace_tree(tmp_root, dest)
-
-            return {"accepted": True, "name": name, "replaced": replaced,
-                    "risk": risk, "policy": promotion_policy(risk),
-                    "files": files, "errors": [], "unknown_tools": []}
-        finally:
-            if tmp_root.exists():
-                shutil.rmtree(tmp_root, ignore_errors=True)
+        return await run_in_threadpool(_process_skill_upload, bytes(buf), file.filename or "")
 
     @app.post("/api/admin/skills/distill", dependencies=[Depends(admin_auth)])
     def admin_distill_skill(req: SkillDistillRequest):
@@ -809,11 +873,20 @@ def create_app(session_manager: Optional[SessionManager] = None,
         会真调一次 LLM(花钱),前端须二次确认。资料是不可信外部输入,故:
         prompt 给正文加围栏 + 产物过 validate_candidate + 只落 _candidates/ 且带
         风险档 —— 即便资料里藏了注入,产出也进不了正式目录。
+
+        写盘分两步:先蒸馏到**临时暂存目录**,确认该技能名没有活跃灰度后,才整目录
+        换进 `_candidates/<name>/`。技能名要等 LLM 产出并过校验才知道,所以灰度
+        检查只能排在调用之后、写入之前 —— 但"写入候选目录"这一步一定在检查之后
+        (灰度期覆盖候选 = 未审内容直接上线,见 _skill_canary_block)。
         """
+        import shutil
+        import tempfile
+
         from openai import OpenAI
 
         from app.agent.skills import doc_distill as dd
-        from app.agent.skills.risk import classify_risk, promotion_policy
+        from app.agent.skills.risk import promotion_policy
+        from app.agent.skills.tree_text import classify_tree_risk
         from app.scripts import promote_skill as ps
 
         doc = (req.doc_text or "").strip()
@@ -827,25 +900,39 @@ def create_app(session_manager: Optional[SessionManager] = None,
         # "贴的内容有一截没真正喂给模型",否则一份 30000 字的 SOP 悄悄丢了尾部
         truncated = dd.is_doc_truncated(doc)
 
+        staging = Path(tempfile.mkdtemp(prefix="skill_distill_"))
         try:
-            client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
-            out = dd.distill_from_doc(client, settings.model_name, doc, ps.CANDIDATES_DIR)
-        except Exception as exc:  # noqa: BLE001 LLM/网络失败如实回传,不 500
-            # 完整异常(可能带 base_url/代理等细节)只落服务端日志,回给客户端的只有类型名
-            logger.exception("skills/distill 调用 LLM 失败")
-            return {"created": False, "name": None, "risk": None, "policy": None,
-                    "errors": [f"蒸馏失败，请稍后重试或联系管理员（{type(exc).__name__}）"],
-                    "truncated": truncated}
+            try:
+                client = OpenAI(api_key=settings.openai_api_key,
+                                base_url=settings.openai_base_url)
+                out = dd.distill_from_doc(client, settings.model_name, doc, str(staging))
+            except Exception as exc:  # noqa: BLE001 LLM/网络失败如实回传,不 500
+                # 完整异常(可能带 base_url/代理等细节)只落服务端日志,回给客户端的只有类型名
+                logger.exception("skills/distill 调用 LLM 失败")
+                return {"created": False, "name": None, "risk": None, "policy": None,
+                        "errors": [f"蒸馏失败，请稍后重试或联系管理员（{type(exc).__name__}）"],
+                        "truncated": truncated}
 
-        if out is None:
-            return {"created": False, "name": None, "risk": None, "policy": None,
-                    "errors": ["LLM 产物未通过校验(frontmatter 不全 / 工具名不实 / 名字非法)"],
-                    "truncated": truncated}
+            if out is None:
+                return {"created": False, "name": None, "risk": None, "policy": None,
+                        "errors": ["LLM 产物未通过校验(frontmatter 不全 / 工具名不实 / 名字非法)"],
+                        "truncated": truncated}
 
-        is_new = not (Path(ps.DEFINITIONS_DIR) / out["name"] / "SKILL.md").exists()
-        risk = classify_risk(out["content"], is_new_skill=is_new)
-        return {"created": True, "name": out["name"], "risk": risk,
-                "policy": promotion_policy(risk), "errors": [], "truncated": truncated}
+            name = out["name"]
+            blocked = _skill_canary_block(name)
+            if blocked:
+                return {"created": False, "name": name, "risk": None, "policy": None,
+                        "errors": [blocked], "truncated": truncated}
+
+            is_new = not (Path(ps.DEFINITIONS_DIR) / name / "SKILL.md").exists()
+            # 判档看整棵树(与上传端点同口径;蒸馏产物眼下没有附件,但口径不该有两套)
+            risk = classify_tree_risk(staging / name, is_new_skill=is_new)
+
+            ps._replace_tree(staging / name, Path(ps.CANDIDATES_DIR) / name)
+            return {"created": True, "name": name, "risk": risk,
+                    "policy": promotion_policy(risk), "errors": [], "truncated": truncated}
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():

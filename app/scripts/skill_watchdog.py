@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.agent.skills import risk as risk_mod  # noqa: E402
-from app.agent.skills.validator import validate_candidate  # noqa: E402
+from app.agent.skills.tree_text import classify_tree_risk, validate_skill_tree  # noqa: E402
 from app.agent.skills.watchdog import (  # noqa: E402
     DECISION_PROMOTE,
     DECISION_ROLLBACK,
@@ -67,14 +67,16 @@ def start_for_candidate(skill_name: str, definitions_dir: str, candidates_dir: s
         return {"risk": None, "policy": None, "action": "missing",
                 "detail": f"候选不存在: {candidate}"}
 
-    content = candidate.read_text(encoding="utf-8")
-    report = validate_candidate(content)
+    # 校验与判档都按**整棵技能树**:候选带的 references/*.md 会随转正一起上线,
+    # 并由 read_skill_file 灌进模型上下文 —— 只看根 SKILL.md 会让"人畜无害的正文
+    # + 附件里写着直接全额退款"这种候选被判低危、走完全自动的灰度转正。
+    report = validate_skill_tree(candidate.parent)
     if not report["valid"]:
         return {"risk": None, "policy": None, "action": "invalid",
                 "detail": "; ".join(report["errors"])}
 
     is_new = not (Path(definitions_dir) / skill_name / "SKILL.md").exists()
-    risk = risk_mod.classify_risk(content, is_new_skill=is_new)
+    risk = classify_tree_risk(candidate.parent, is_new_skill=is_new, tree=report["tree"])
     policy = risk_mod.promotion_policy(risk)
 
     if policy == risk_mod.POLICY_MANUAL:
@@ -171,16 +173,17 @@ def check_canaries(definitions_dir: str, candidates_dir: str, archive_dir: str,
             if is_ab:
                 # 转正前**重新判档**:开灰度后候选文件可能被 improve_skill 原地覆盖,
                 # 变成动钱内容。只在开灰度时判过一次是 TOCTOU,必须在真正上线前再判。
-                cand_file = Path(candidates_dir) / skill_name / "SKILL.md"
+                cand_dir = Path(candidates_dir) / skill_name
                 try:
-                    now_content = cand_file.read_text(encoding="utf-8")
-                except OSError as exc:
+                    cand_dir.joinpath("SKILL.md").read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError) as exc:
                     entry["action"] = "promote_blocked"
                     entry["detail"] = f"转正前读不到候选文件,拒绝上线: {exc}"
                     results.append(entry)
                     continue
                 now_is_new = not (Path(definitions_dir) / skill_name / "SKILL.md").exists()
-                now_risk = risk_mod.classify_risk(now_content, is_new_skill=now_is_new)
+                # 整棵树重判:灰度期间被塞进来的不只是新正文,也可能是一份新附件
+                now_risk = classify_tree_risk(cand_dir, is_new_skill=now_is_new)
                 if risk_mod.promotion_policy(now_risk) == risk_mod.POLICY_MANUAL:
                     entry["action"] = "promote_blocked_risk_changed"
                     entry["detail"] = (

@@ -38,7 +38,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app.agent.skills.gate import is_safe_skill_name  # noqa: E402
-from app.agent.skills.validator import validate_candidate  # noqa: E402
+from app.agent.skills.tree_text import classify_tree_risk, validate_skill_tree  # noqa: E402
 from app.utils.console import enable_utf8_stdout  # noqa: E402
 
 DEFINITIONS_DIR = "app/agent/skills/definitions"
@@ -63,6 +63,17 @@ def _replace_tree(src: Path, dest: Path) -> None:
     的目录当技能,而中转副本在 `_swap/<name>.staging/SKILL.md`,深了一层,扫不到
     (_discover 并没有按 `_` 前缀过滤)。另一处消费方 build_shadow_dir 则是按 `_`
     前缀排除辅助目录 —— 两处靠的性质不同,改任一处前先确认另一处仍成立。
+
+    **本函数有两个调用方,`dest.parent` 不同,因而落出两个不同的 `_swap`**:
+      - 转正/回滚:`dest.parent == definitions/`  → `definitions/_swap/`,靠上面
+        那条"深度"性质对 _discover 隐身;
+      - 上传端点:`dest.parent == definitions/_candidates/` → `_candidates/_swap/`,
+        它对 _discover 本来就不可见(隔了两层),真正要防的是被 **list_candidates**
+        当成一个候选列出来/被转正。它靠的是第三条性质:list_candidates 既要求
+        `<dir>/SKILL.md` 在深度 1(而中转副本在 `_swap/<name>.staging/SKILL.md`),
+        **又**用 is_safe_skill_name 拒掉 `_` 前缀的目录名。
+    调用方的不变式合起来是:`dest.parent` 下的目录发现规则,必须同时拒绝
+    "带 `_` 前缀的目录"与"SKILL.md 不在深度 1 的目录"。新增调用方前先确认这一点。
 
     换上用**两次 rename**:旧目录先改名让位,新目录立刻顶上,最后才慢慢删旧。
     这样"目标目录不存在"的窗口只有两次 rename 之间的一瞬,而不是整个 rmtree 的
@@ -114,8 +125,10 @@ def list_candidates(candidates_dir: str, definitions_dir: str) -> list[dict]:
         if not is_safe_skill_name(skill_dir.name):
             continue   # 目录名不合法(不可能是我们写出的候选),跳过
         # 逐项容错:单个候选文件读不出/解不开不该让整份清单崩掉,标为不合法继续列。
+        # 校验的是**整棵技能树**:附带资料同样会随转正进入线上、被模型读进上下文,
+        # 只审根 SKILL.md 等于放一条谁都不看的暗道。
         try:
-            report = validate_candidate(skill_file.read_text(encoding="utf-8"))
+            report = validate_skill_tree(skill_dir)
         except Exception as exc:  # noqa: BLE001
             report = {"valid": False, "unknown_tools": [],
                       "errors": [f"读取候选失败: {type(exc).__name__}: {exc}"]}
@@ -161,48 +174,90 @@ def backup_current(definitions_dir: str, skill_name: str, archive_dir: str,
     return dest_dir / "SKILL.md"
 
 
+def _snapshot_candidate(candidate_dir: Path, definitions_dir: str, skill_name: str) -> Path:
+    """把候选目录整棵树快照到 `<definitions>/_swap/<name>.snapshot/`,返回快照路径。
+
+    放在 `_swap` 下而不是临时目录:与正式目录同卷,后续 `_replace_tree` 的 copytree
+    才不会退化成跨卷复制;而 `_swap` 对 _discover / list_candidates 的隐身性质见
+    `_replace_tree` 的 docstring(`.snapshot` 与 `.staging`/`.retired` 三者不重名)。
+    """
+    swap = Path(definitions_dir) / "_swap"
+    swap.mkdir(parents=True, exist_ok=True)
+    snapshot = swap / (skill_name + ".snapshot")
+    if snapshot.exists():
+        shutil.rmtree(snapshot)
+    shutil.copytree(candidate_dir, snapshot)
+    return snapshot
+
+
 def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_dir: str,
             gate_result: dict | None, force: bool, timestamp: str) -> dict:
-    """把候选转正:校验 → 门禁 → 备份 → 写正式目录。
+    """把候选转正:快照 → 校验 → 门禁 → 备份 → 写正式目录。
 
-    返回 `{"promoted": bool, "reason": str, "backup": str | None}`。
+    返回 `{"promoted", "reason", "backup", "risk"}`。
     任一关卡不过都不写正式目录(force 只放行门禁,不放行校验)。
+
+    **为什么先快照**:原来是"读候选 SKILL.md 文本 → 校验 → backup_current 整树
+    copytree(耗时) → _replace_tree 再从磁盘重读候选目录"。校验过的字节与最终装上
+    线的字节之间隔着一整段可写窗口 —— 而 `POST /api/admin/skills/upload` 现在能从
+    网页并发替换那个候选目录。先把候选整棵树快照下来,**校验、判档、安装全部只认
+    这一份快照**,TOCTOU 就在构造上消失了。快照在所有退出路径上都会被清掉。
+
+    `risk` 按快照的**整棵树**判档(含附带资料)并原样返回,不在此处拦截:高危档的
+    含义是"必须由人来放行",而人跑 `promote_skill <name>` 正是那个放行动作;拦住
+    自动化的地方在 skill_watchdog(它转正前会自己再判一次档)。
     """
     if not is_safe_skill_name(skill_name):
         return {"promoted": False, "reason": f"非法 skill 名,拒绝操作: {skill_name!r}",
-                "backup": None}
+                "backup": None, "risk": None}
 
     candidate = Path(candidates_dir) / skill_name / "SKILL.md"
     if not candidate.exists():
-        return {"promoted": False, "reason": f"候选不存在: {candidate}", "backup": None}
+        return {"promoted": False, "reason": f"候选不存在: {candidate}",
+                "backup": None, "risk": None}
 
-    content = candidate.read_text(encoding="utf-8")
-    report = validate_candidate(content)
-    if not report["valid"]:
-        return {"promoted": False,
-                "reason": "校验未通过: " + "; ".join(report["errors"]), "backup": None}
+    try:
+        snapshot = _snapshot_candidate(candidate.parent, definitions_dir, skill_name)
+    except OSError as exc:
+        return {"promoted": False, "reason": f"候选快照失败,拒绝转正: {exc}",
+                "backup": None, "risk": None}
 
-    if report["name"] != skill_name:
-        return {"promoted": False,
-                "reason": f"frontmatter name {report['name']!r} 与目标 skill 名 {skill_name!r} 不一致,"
-                          "拒绝转正(会让线上目录注册成另一个名字,真 skill 从目录中消失)",
-                "backup": None}
-
-    if not force:
-        if gate_result is None:
-            return {"promoted": False, "reason": "缺少门禁结果,拒绝转正", "backup": None}
-        if not gate_result.get("promote"):
+    try:
+        report = validate_skill_tree(snapshot)
+        if not report["valid"]:
             return {"promoted": False,
-                    "reason": f"门禁未通过: {gate_result.get('reason', '')}", "backup": None}
+                    "reason": "校验未通过: " + "; ".join(report["errors"]),
+                    "backup": None, "risk": None}
 
-    backup = backup_current(definitions_dir, skill_name, archive_dir, timestamp)
+        if report["name"] != skill_name:
+            return {"promoted": False,
+                    "reason": f"frontmatter name {report['name']!r} 与目标 skill 名 {skill_name!r} 不一致,"
+                              "拒绝转正(会让线上目录注册成另一个名字,真 skill 从目录中消失)",
+                    "backup": None, "risk": None}
 
-    # 整目录替换:候选可能带 references 等附带资料,只写 SKILL.md 会让它指向不存在的文件
-    _replace_tree(candidate.parent, Path(definitions_dir) / skill_name)
+        if not force:
+            if gate_result is None:
+                return {"promoted": False, "reason": "缺少门禁结果,拒绝转正",
+                        "backup": None, "risk": None}
+            if not gate_result.get("promote"):
+                return {"promoted": False,
+                        "reason": f"门禁未通过: {gate_result.get('reason', '')}",
+                        "backup": None, "risk": None}
 
-    return {"promoted": True,
-            "reason": "已转正" + ("(--force 跳过门禁)" if force else ""),
-            "backup": str(backup) if backup else None}
+        is_new = not (Path(definitions_dir) / skill_name / "SKILL.md").exists()
+        risk = classify_tree_risk(snapshot, is_new_skill=is_new, tree=report["tree"])
+
+        backup = backup_current(definitions_dir, skill_name, archive_dir, timestamp)
+
+        # 整目录替换,且**装的就是刚校验过的那份快照**(候选可能带 references 等
+        # 附带资料;直接从 _candidates 重读会重新打开那扇 TOCTOU 窗口)
+        _replace_tree(snapshot, Path(definitions_dir) / skill_name)
+
+        return {"promoted": True,
+                "reason": "已转正" + ("(--force 跳过门禁)" if force else ""),
+                "backup": str(backup) if backup else None, "risk": risk}
+    finally:
+        shutil.rmtree(snapshot, ignore_errors=True)
 
 
 def rollback(skill_name: str, definitions_dir: str, archive_dir: str) -> dict:
@@ -248,9 +303,11 @@ def main() -> None:
             tier = ""
             if item["valid"]:
                 try:
-                    from app.agent.skills.risk import classify_risk, promotion_policy
-                    _risk = classify_risk(Path(item["path"]).read_text(encoding="utf-8"),
-                                          is_new_skill=not item["is_improvement"])
+                    from app.agent.skills.risk import promotion_policy
+
+                    # 判档看**整棵技能树**:附带资料里的动钱指令同样会随转正上线
+                    _risk = classify_tree_risk(Path(item["path"]).parent,
+                                               is_new_skill=not item["is_improvement"])
                     tier = f" | 风险={_risk} 放行={promotion_policy(_risk)}"
                 except Exception:  # noqa: BLE001 判档失败不影响列表可用
                     tier = " | 风险=未知(判档失败)"

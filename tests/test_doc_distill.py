@@ -114,6 +114,44 @@ def _headers():
     return {"X-Admin-Token": settings.admin_token} if settings.admin_token else {}
 
 
+def _fake_distill(client, model, doc_text, out_dir, **kwargs):
+    """替身:**真的把候选写进 out_dir**,只跳过 LLM 调用。
+
+    早先的替身直接返回一个字典、一个字节都不落盘,于是"只写候选目录、不碰正式
+    目录"那条断言是空转的——什么都没写,当然哪儿都干净。要让它有可失败性,替身
+    必须走真实的写盘路径,断言才真正盯着"写到了哪里"。
+    """
+    skill_dir = Path(out_dir) / "sop-return"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(GOOD_SKILL, encoding="utf-8")
+    return {"name": "sop-return", "path": str(skill_dir / "SKILL.md"),
+            "content": GOOD_SKILL}
+
+
+class _NoCanaryDB:
+    """写候选前的"有没有活跃灰度"查询用的替身:恒定没有。
+
+    必须显式注入而不是用全局 get_db():`app.db` 的 `_DB` 是模块级单例,
+    别的测试(如 test_db_schema.test_get_set_db_singleton)会把它 set 成一个
+    tmp_path 里的库且不还原,那个目录被清掉之后本用例就会撞上 sqlite 报错、
+    走进 fail-closed 分支 —— 与被测行为毫无关系的串扰。
+    """
+
+    def get_active_canary(self, name):
+        return None
+
+
+def _endpoint_dirs(tmp_path, monkeypatch):
+    cand = tmp_path / "_candidates"
+    defs = tmp_path / "definitions"
+    defs.mkdir()
+    monkeypatch.setattr("app.scripts.promote_skill.CANDIDATES_DIR", str(cand))
+    monkeypatch.setattr("app.scripts.promote_skill.DEFINITIONS_DIR", str(defs))
+    monkeypatch.setattr("app.agent.skills.doc_distill.distill_from_doc", _fake_distill)
+    monkeypatch.setattr("app.api.app.get_db", lambda: _NoCanaryDB())
+    return cand, defs
+
+
 def test_endpoint_empty_doc_no_llm():
     resp = _client().post("/api/admin/skills/distill", json={"doc_text": "   "},
                           headers=_headers())
@@ -129,15 +167,8 @@ def test_endpoint_oversize_rejected():
 
 
 def test_endpoint_reports_risk_and_only_writes_candidates(tmp_path, monkeypatch):
-    cand = tmp_path / "_candidates"
-    defs = tmp_path / "definitions"
-    defs.mkdir()
-    monkeypatch.setattr("app.scripts.promote_skill.CANDIDATES_DIR", str(cand))
-    monkeypatch.setattr("app.scripts.promote_skill.DEFINITIONS_DIR", str(defs))
-    monkeypatch.setattr("app.agent.skills.doc_distill.distill_from_doc",
-                        lambda *a, **k: {"name": "sop-return",
-                                         "path": str(cand / "sop-return" / "SKILL.md"),
-                                         "content": GOOD_SKILL})
+    """替身会真的写盘,所以"候选落在 _candidates、正式目录一点没碰"是真被验到的。"""
+    cand, defs = _endpoint_dirs(tmp_path, monkeypatch)
 
     d = _client().post("/api/admin/skills/distill", json={"doc_text": DOC},
                        headers=_headers()).json()
@@ -145,21 +176,16 @@ def test_endpoint_reports_risk_and_only_writes_candidates(tmp_path, monkeypatch)
     assert d["created"] is True
     assert d["name"] == "sop-return"
     assert d["risk"] in ("low", "medium", "high")
+    # 产物确实落进候选目录
+    assert (cand / "sop-return" / "SKILL.md").read_text(encoding="utf-8") == GOOD_SKILL
+    # 正式目录一个条目都不许多出来
     assert list(defs.iterdir()) == []
 
 
 def test_endpoint_reports_truncated_true_for_over_cap_doc(tmp_path, monkeypatch):
     """资料超过 MAX_DOC_CHARS 时,端点必须如实告知"尾部没真正参与蒸馏",
     否则一份 30000 字的 SOP 悄悄丢了尾部、操作者毫无察觉。"""
-    cand = tmp_path / "_candidates"
-    defs = tmp_path / "definitions"
-    defs.mkdir()
-    monkeypatch.setattr("app.scripts.promote_skill.CANDIDATES_DIR", str(cand))
-    monkeypatch.setattr("app.scripts.promote_skill.DEFINITIONS_DIR", str(defs))
-    monkeypatch.setattr("app.agent.skills.doc_distill.distill_from_doc",
-                        lambda *a, **k: {"name": "sop-return",
-                                         "path": str(cand / "sop-return" / "SKILL.md"),
-                                         "content": GOOD_SKILL})
+    _endpoint_dirs(tmp_path, monkeypatch)
 
     long_doc = "长" * (MAX_DOC_CHARS + 1)
     d = _client().post("/api/admin/skills/distill", json={"doc_text": long_doc},
@@ -168,16 +194,30 @@ def test_endpoint_reports_truncated_true_for_over_cap_doc(tmp_path, monkeypatch)
     assert d["truncated"] is True
 
 
+def test_endpoint_refused_while_skill_has_active_canary(tmp_path, monkeypatch):
+    """技能名要等 LLM 产出才知道,故蒸馏产物先落**临时暂存区**;发现该技能正在
+    灰度就整个丢弃,绝不覆盖 _candidates/<name>/ —— 灰度期覆盖候选等于把未经
+    审核的内容立刻推给正在被分流的真实顾客会话。"""
+    cand, _ = _endpoint_dirs(tmp_path, monkeypatch)
+
+    class _DB:
+        def get_active_canary(self, name):
+            return ({"skill_name": name, "candidate_path": "p", "percent": 50,
+                     "risk": "low", "policy": "canary_ab", "status": "active"}
+                    if name == "sop-return" else None)
+
+    monkeypatch.setattr("app.api.app.get_db", lambda: _DB())
+
+    d = _client().post("/api/admin/skills/distill", json={"doc_text": DOC},
+                       headers=_headers()).json()
+
+    assert d["created"] is False
+    assert any("灰度" in e for e in d["errors"])
+    assert not (cand / "sop-return").exists()      # 候选目录一个字节都没被写
+
+
 def test_endpoint_reports_truncated_false_for_short_doc(tmp_path, monkeypatch):
-    cand = tmp_path / "_candidates"
-    defs = tmp_path / "definitions"
-    defs.mkdir()
-    monkeypatch.setattr("app.scripts.promote_skill.CANDIDATES_DIR", str(cand))
-    monkeypatch.setattr("app.scripts.promote_skill.DEFINITIONS_DIR", str(defs))
-    monkeypatch.setattr("app.agent.skills.doc_distill.distill_from_doc",
-                        lambda *a, **k: {"name": "sop-return",
-                                         "path": str(cand / "sop-return" / "SKILL.md"),
-                                         "content": GOOD_SKILL})
+    _endpoint_dirs(tmp_path, monkeypatch)
 
     d = _client().post("/api/admin/skills/distill", json={"doc_text": DOC},
                        headers=_headers()).json()
