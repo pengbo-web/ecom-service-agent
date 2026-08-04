@@ -114,13 +114,35 @@ def test_traversal_name_rejected(tmp_path, monkeypatch):
 
 
 def test_zip_slip_entry_rejected(tmp_path, monkeypatch):
-    cand, _ = _dirs(tmp_path, monkeypatch)
+    """条目路径越出目标目录必须被拒,且候选区不得留下任何东西。"""
+    cand, defs = _dirs(tmp_path, monkeypatch)
     data = _zip({"SKILL.md": GOOD_MD, "../evil.md": "坏"})
 
     d = _upload("skill.zip", data).json()
 
     assert d["accepted"] is False
-    assert not (tmp_path / "evil.md").exists()
+    # 候选区不得出现任何目录,正式目录也不得被碰
+    assert not cand.exists() or list(cand.iterdir()) == []
+    assert list(defs.iterdir()) == []
+
+
+def test_successful_upload_leaves_complete_candidate(tmp_path, monkeypatch):
+    """换目录必须是"要么旧的、要么完整的新的":落地后附件与 SKILL.md 都在。"""
+    cand, _ = _dirs(tmp_path, monkeypatch)
+    data = _zip({"upload-demo/SKILL.md": GOOD_MD,
+                 "upload-demo/references/policy.md": "政策正文",
+                 "upload-demo/references/faq.md": "常见问题"})
+
+    d = _upload("skill.zip", data).json()
+
+    assert d["accepted"] is True
+    staged = cand / "upload-demo"
+    assert (staged / "SKILL.md").read_text(encoding="utf-8") == GOOD_MD
+    assert (staged / "references" / "policy.md").read_text(encoding="utf-8") == "政策正文"
+    assert (staged / "references" / "faq.md").read_text(encoding="utf-8") == "常见问题"
+    assert sorted(d["files"]) == ["references/faq.md", "references/policy.md"]
+    # 换目录用的中转副本不得残留在候选区里被当成候选
+    assert not (cand / "_swap").exists() or list((cand / "_swap").iterdir()) == []
 
 
 def test_zip_without_skill_md_rejected(tmp_path, monkeypatch):

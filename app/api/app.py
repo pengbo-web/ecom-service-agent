@@ -45,6 +45,7 @@ _TRACE_WINDOW = 500
 
 # 上传技能包的体积上限(压缩包本身,解压后另有 bundle 模块的三重上限)
 _MAX_UPLOAD_BYTES = 5_000_000
+_UPLOAD_CHUNK_BYTES = 65536   # 分块读上传体的块大小(配合上限,避免整包先进内存)
 
 
 def _sse_frame(event: dict) -> str:
@@ -738,9 +739,17 @@ def create_app(session_manager: Optional[SessionManager] = None,
         from app.agent.skills.validator import validate_candidate
         from app.scripts import promote_skill as ps
 
-        raw = await file.read()
-        if len(raw) > _MAX_UPLOAD_BYTES:
-            raise HTTPException(413, f"上传过大(上限 {_MAX_UPLOAD_BYTES} 字节)")
+        # 分块读并随读随判:一次性 file.read() 会先把整个请求体读进内存,
+        # 那样体积上限根本约束不到内存占用(本栈其它地方也没有请求体大小限制)。
+        buf = bytearray()
+        while True:
+            chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if len(buf) > _MAX_UPLOAD_BYTES:
+                raise HTTPException(413, f"上传过大(上限 {_MAX_UPLOAD_BYTES} 字节)")
+        raw = bytes(buf)
 
         def _reject(errors: list[str], unknown: list[str] | None = None) -> dict:
             return {"accepted": False, "name": "", "replaced": False, "risk": None,
@@ -773,13 +782,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
             name = report["name"]
             dest = Path(ps.CANDIDATES_DIR) / name
             replaced = (dest / "SKILL.md").exists()
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            if dest.exists():
-                shutil.rmtree(dest)
-            shutil.move(str(tmp_root), str(dest))
 
             is_new = not (Path(ps.DEFINITIONS_DIR) / name / "SKILL.md").exists()
             risk = classify_risk(content, is_new_skill=is_new)
+
+            # 复用转正链路那套"同卷 _swap + 两次 rename"的换目录:临时目录在系统盘,
+            # 直接 shutil.move 会退化成跨卷复制,期间 _candidates/<name>/ 可能是空的或
+            # 只写了一半 —— 而 admin_skills 与 promote_skill(--list/promote)正并发读它。
+            ps._replace_tree(tmp_root, dest)
+
             return {"accepted": True, "name": name, "replaced": replaced,
                     "risk": risk, "policy": promotion_policy(risk),
                     "files": files, "errors": [], "unknown_tools": []}
