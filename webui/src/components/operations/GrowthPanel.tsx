@@ -11,17 +11,26 @@ const OPPORTUNITY_KINDS: { kind: string; label: string }[] = [
   { kind: "consulted_no_order", label: "咨询过但没下单" },
 ];
 
+type SentWarning = { id: number; user_id: string; reason: string };
+
 export function GrowthPanel() {
   const [drafts, setDrafts] = useState<OutreachDraft[] | null>(null);
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  // 每行独立 busy:一条草稿在批准中,不能连带把整份列表都锁死——店主要能
-  // 同时继续处理别的草稿(见任务约束:防连点只锁当前这一行)。
-  const [busyId, setBusyId] = useState<number | null>(null);
+  // 每行独立 busy:用 Set 记录正在处理中的 draft id 集合,而不是单个标量。
+  // 单一标量在同时批准两行时会互相覆盖——后完成的那次把标量清空,会连带
+  // 把还没完成的那一行按钮重新点亮,等于放行了一次仍在途中的批准请求
+  // (见任务约束:防连点必须按行隔离,不能相互覆盖)。
+  const [busyIds, setBusyIds] = useState<Set<number>>(new Set());
   // 批准/驳回失败的原因按 draft id 记:失败的草稿会退回列表继续显示,原因
   // 只属于这一条,绝不能冒泡成页面级错误条,把其它正常草稿也吓成"出错了"
   // (与 OperationsView 的 err/chatErr 分离同一道理)。
   const [rowErr, setRowErr] = useState<Record<number, string>>({});
+  // 投递成功但账本(标记已发送)失败的情况:消息已经真实发到买家手上,
+  // 草稿必须从待审队列摘掉(不可能再退回去重新批准一次),但绝不能让它
+  // 看起来像一次干净的成功——后端把 reason 写成明确要求人工核查,这条
+  // 警示必须常驻显示,不能随草稿一起从界面上消失,也不能跟普通成功撞脸。
+  const [sentWarnings, setSentWarnings] = useState<SentWarning[]>([]);
 
   // 商机概览是独立的只读小节,拉取失败不该连累草稿列表的展示与操作。
   const [oppCounts, setOppCounts] = useState<Record<string, number | undefined> | null>(null);
@@ -58,31 +67,50 @@ export function GrowthPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  function setRowBusy(id: number, isBusy: boolean) {
+    setBusyIds((prev) => {
+      const next = new Set(prev);
+      if (isBusy) next.add(id); else next.delete(id);
+      return next;
+    });
+  }
+
   // 批准会真的把消息发给一个真实买家,而且发出后无法撤回——点错一下就是
   // 一条骚扰/误导信息落到买家手机上。这是任务里唯一强制要求二次确认的动作。
   async function onApprove(d: OutreachDraft) {
     if (!window.confirm(`确认把这条消息发给买家 ${d.user_id}？发出后无法撤回。`)) return;
-    setBusyId(d.id);
+    setRowBusy(d.id, true);
     setRowErr((m) => { const n = { ...m }; delete n[d.id]; return n; });
     try {
       const r = await approveDraft(d.id);
       if (r.sent) {
-        // 只有真正投递成功才从待审列表摘掉;后端对失败的草稿会原样退回
-        // draft 状态,前端必须保留它、把原因亮出来,而不是乐观移除。
+        // 消息已经真实投递给买家,不管账本(success)记没记成功,这条草稿
+        // 都不再处于"待审"——它不可能被撤回,也不该被重新批准一次。
         setDrafts((list) => (list || []).filter((x) => x.id !== d.id));
+        if (!r.success) {
+          // 投递成功但账本(标记已发送)失败:后端 reason 明确要求人工
+          // 核查,这不是一次普通成功,必须留下一条显眼、不随草稿消失的警示。
+          setSentWarnings((list) => [...list, { id: d.id, user_id: d.user_id, reason: r.reason }]);
+        }
       } else {
+        // 没有真正投递(不论 success 是 true 还是 false,例如"已被处理过"
+        // 或"投递失败已退回待审"):草稿留在待审队列里,把原因亮出来,
+        // 而不是乐观移除。
         setRowErr((m) => ({ ...m, [d.id]: r.reason }));
       }
     } catch (e) {
       setRowErr((m) => ({ ...m, [d.id]: String(e) }));
     } finally {
-      setBusyId(null);
+      setRowBusy(d.id, false);
     }
   }
 
+  // 驳回不会给买家发送任何东西,后果也不是不可逆的——顶多是少发一条本该
+  // 发的消息,店主可以再让增长 agent 重新生成一条草稿去补救。这与批准
+  // "发出去就收不回"的性质完全不同,所以驳回不再要求二次确认,只有批准
+  // 需要。
   async function onReject(d: OutreachDraft) {
-    if (!window.confirm("确认驳回这条草稿？驳回后不会发送给买家。")) return;
-    setBusyId(d.id);
+    setRowBusy(d.id, true);
     setRowErr((m) => { const n = { ...m }; delete n[d.id]; return n; });
     try {
       await rejectDraft(d.id);
@@ -90,7 +118,7 @@ export function GrowthPanel() {
     } catch (e) {
       setRowErr((m) => ({ ...m, [d.id]: String(e) }));
     } finally {
-      setBusyId(null);
+      setRowBusy(d.id, false);
     }
   }
 
@@ -120,6 +148,22 @@ export function GrowthPanel() {
           </Button>
         </div>
         {err && <div className="mb-2 text-sm text-destructive">读取失败：{err}</div>}
+
+        {sentWarnings.length > 0 && (
+          <div className="mb-3 flex flex-col gap-2">
+            {sentWarnings.map((w) => (
+              <div
+                key={w.id}
+                role="alert"
+                className="rounded-md border-2 border-destructive bg-destructive/10
+                          p-3 text-sm font-semibold text-destructive"
+              >
+                ⚠ 消息已发给买家 {w.user_id}，但{w.reason}
+              </div>
+            ))}
+          </div>
+        )}
+
         {!drafts && busy && <div className="text-sm text-muted-foreground">加载中…</div>}
         <div className="flex flex-col gap-3">
           {(drafts || []).map((d) => {
@@ -127,10 +171,11 @@ export function GrowthPanel() {
             // 补发优惠券…),生成侧故意不改写或丢弃这类措辞,把"agent 原本想说
             // 什么"如实留下——所以这里必须是全链路最后一道、不可能被忽略的可见性。
             const flagged = !!d.needs_review_reason;
-            const rowBusy = busyId === d.id;
+            const rowBusy = busyIds.has(d.id);
             return (
               <Card
                 key={d.id}
+                data-testid={`draft-${d.id}`}
                 className={`p-4 text-sm ${flagged ? "border-2 border-destructive" : ""}`}
               >
                 <div className="flex flex-wrap items-center gap-2">
@@ -160,10 +205,21 @@ export function GrowthPanel() {
                 )}
 
                 <div className="mt-3 flex items-center gap-2">
-                  <Button size="sm" disabled={rowBusy} onClick={() => onApprove(d)}>
+                  <Button
+                    size="sm"
+                    disabled={rowBusy}
+                    onClick={() => onApprove(d)}
+                    data-testid={`approve-${d.id}`}
+                  >
                     {rowBusy ? "处理中…" : "批准并发送"}
                   </Button>
-                  <Button size="sm" variant="outline" disabled={rowBusy} onClick={() => onReject(d)}>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={rowBusy}
+                    onClick={() => onReject(d)}
+                    data-testid={`reject-${d.id}`}
+                  >
                     驳回
                   </Button>
                 </div>
