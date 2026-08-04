@@ -70,6 +70,90 @@ def test_bad_payload_row_is_skipped_not_fatal(db):
     assert [c["payload"] for c in claimed] == [{"ok": 1}]
 
 
+def test_reclaim_stale_events_returns_to_pending_and_is_reclaimable(db):
+    """崩溃的 worker 不该让事件永久卡在 processing——过阈值后应能放回 pending
+    并被重新认领。"""
+    eid = db.publish_event("signal.anomaly", {"x": 1}, "service", "analyst", "C1")
+    claimed = db.claim_events("analyst")
+    assert len(claimed) == 1
+    # 模拟“认领后 worker 崩溃”:把 consumed_at 拨到很久以前。
+    conn = db.connect()
+    try:
+        conn.execute(
+            "UPDATE agent_events SET consumed_at = '2000-01-01 00:00:00' WHERE id = ?",
+            (eid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    reclaimed = db.reclaim_stale_events(older_than_seconds=300)
+    assert reclaimed == 1
+
+    row = db.list_events(correlation_id="C1")[0]
+    assert row["status"] == "pending"
+
+    reclaim_again = db.claim_events("analyst")
+    assert len(reclaim_again) == 1
+    assert reclaim_again[0]["id"] == eid
+    assert reclaim_again[0]["status"] == "processing"
+
+
+def test_reclaim_stale_events_never_touches_done_or_failed(db):
+    eid_done = db.publish_event("signal.anomaly", {}, "service", "analyst", "C1")
+    eid_failed = db.publish_event("signal.anomaly", {}, "service", "analyst", "C2")
+    db.claim_events("analyst")
+    db.finish_event(eid_done, "done")
+    db.finish_event(eid_failed, "failed")
+
+    conn = db.connect()
+    try:
+        conn.execute(
+            "UPDATE agent_events SET consumed_at = '2000-01-01 00:00:00' "
+            "WHERE id IN (?, ?)", (eid_done, eid_failed))
+        conn.commit()
+    finally:
+        conn.close()
+
+    reclaimed = db.reclaim_stale_events(older_than_seconds=300)
+    assert reclaimed == 0
+
+    statuses = {r["id"]: r["status"] for r in db.list_events(limit=10)}
+    assert statuses[eid_done] == "done"
+    assert statuses[eid_failed] == "failed"
+
+
+def test_reclaim_stale_events_leaves_fresh_processing_row_alone(db):
+    """刚认领、还在阈值内的 processing 行不该被误回收——worker 可能仍在正常处理。"""
+    eid = db.publish_event("signal.anomaly", {}, "service", "analyst", "C1")
+    db.claim_events("analyst")
+
+    reclaimed = db.reclaim_stale_events(older_than_seconds=300)
+    assert reclaimed == 0
+
+    row = db.list_events(correlation_id="C1")[0]
+    assert row["id"] == eid
+    assert row["status"] == "processing"
+
+
+def test_bad_payload_row_logs_a_warning(db, caplog):
+    """脏 JSON 行被跳过时不能悄悄消失——必须留下可查的日志。"""
+    conn = db.connect()
+    try:
+        conn.execute("INSERT INTO agent_events (event_type, payload, source_agent, "
+                     "target_agent, correlation_id, status, created_at) "
+                     "VALUES ('x', '{bad', 's', 'analyst', 'C1', 'pending', '2026-01-01 00:00:00')")
+        conn.commit()
+    finally:
+        conn.close()
+
+    with caplog.at_level("WARNING"):
+        claimed = db.claim_events("analyst")
+
+    assert claimed == []
+    assert any("agent_events" in r.message or "payload" in r.message
+              for r in caplog.records)
+
+
 def test_shared_context_roundtrip(db):
     db.set_shared_context("diagnosis:P001", {"cause": "尺码不准"},
                           source_agent="analyst", correlation_id="C1")
@@ -110,3 +194,32 @@ def test_review_only_applies_to_draft_state(db):
     did = db.create_outreach_draft("unpaid_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
     assert db.review_outreach_draft(did, "approved", "admin") is True
     assert db.review_outreach_draft(did, "rejected", "admin2") is False
+
+
+def test_mark_outreach_sent_transitions_approved_to_sent(db):
+    did = db.create_outreach_draft("unpaid_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
+    db.review_outreach_draft(did, "approved", "admin")
+    assert db.mark_outreach_sent(did) is True
+    assert db.get_outreach_draft(did)["status"] == "sent"
+
+
+def test_mark_outreach_sent_is_not_idempotent_twice(db):
+    """这是拦住"同一条消息发给真实买家两遍"的最后一道闸——必须只成功一次。"""
+    did = db.create_outreach_draft("unpaid_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
+    db.review_outreach_draft(did, "approved", "admin")
+    assert db.mark_outreach_sent(did) is True
+    assert db.mark_outreach_sent(did) is False
+
+
+def test_mark_outreach_sent_rejects_draft_state(db):
+    """草稿没经过批准,不能直接跳到已发送。"""
+    did = db.create_outreach_draft("unpaid_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
+    assert db.mark_outreach_sent(did) is False
+    assert db.get_outreach_draft(did)["status"] == "draft"
+
+
+def test_mark_outreach_sent_rejects_rejected_state(db):
+    did = db.create_outreach_draft("unpaid_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
+    db.review_outreach_draft(did, "rejected", "admin")
+    assert db.mark_outreach_sent(did) is False
+    assert db.get_outreach_draft(did)["status"] == "rejected"

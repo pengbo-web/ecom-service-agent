@@ -1,12 +1,15 @@
 """真实数据层：SQLite 连接、建表与读写。"""
 
 import json
+import logging
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from app.config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 class Database:
@@ -815,7 +818,15 @@ class Database:
                 try:
                     item["payload"] = json.loads(item["payload"]) if item["payload"] else {}
                 except (json.JSONDecodeError, TypeError):
-                    continue          # 脏行已置 processing,不会反复卡队列
+                    # 脏行已置 processing,不会反复卡队列;但不能悄悄消失——
+                    # 这是一次真实的数据损坏,必须留痕供排查。
+                    logger.warning(
+                        "claim_events: agent_events id=%s target_agent=%s "
+                        "correlation_id=%s payload 无法解析为 JSON,已置 processing "
+                        "但跳过返回(不会再被 claim_events 捞到,需人工核查)",
+                        item.get("id"), item.get("target_agent"),
+                        item.get("correlation_id"))
+                    continue
                 claimed.append(item)
             conn.commit()
             return claimed
@@ -831,6 +842,34 @@ class Database:
                 (status, event_id))
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def reclaim_stale_events(self, older_than_seconds: int = 300) -> int:
+        """回收滞留在 processing 超过阈值的事件:processing → pending。
+
+        worker 认领(claim_events)后若在 finish_event 之前崩溃,该行会永久卡在
+        processing——没有超时/恢复机制的话,重启的 worker 再也捞不到它。本方法
+        按 consumed_at 与阈值比较,把过期的 processing 行放回 pending,下一次
+        claim_events 即可重新认领。
+
+        条件 UPDATE(status = 'processing' AND consumed_at <= 阈值)与
+        claim_events/finish_event 同一套幂等纪律:只改状态仍是 processing 且确实
+        过期的行,并发调用互不冲突;done/failed 行的 status 不是 processing,
+        永远不会被本方法触碰。返回被回收的行数。
+        """
+        from datetime import timedelta
+        threshold = (datetime.now() - timedelta(seconds=older_than_seconds)).strftime(
+            "%Y-%m-%d %H:%M:%S")
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE agent_events SET status = 'pending', consumed_at = NULL "
+                "WHERE status = 'processing' AND consumed_at IS NOT NULL "
+                "AND consumed_at <= ?",
+                (threshold,))
+            conn.commit()
+            return cur.rowcount
         finally:
             conn.close()
 
