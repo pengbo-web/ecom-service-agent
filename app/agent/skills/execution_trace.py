@@ -91,6 +91,19 @@ class SkillTurn:
         self.tool_calls.append({"name": name, "ok": ok, "error": error,
                                 "args": dict(args or {})})
 
+    def note_preloaded(self, skill_name: str, variant: str = "live") -> None:
+        """记录服务端**确定性预加载**的 skill(非模型调用,故不产生 tool_call 条目)。
+
+        必须记进来:守卫按 loaded_skills 逐个判定、轨迹按 skill_name 归因——
+        少了这一步,预加载等于白做。
+        """
+        if not skill_name:
+            return
+        self.skill_name = skill_name
+        if skill_name not in self.loaded_skills:
+            self.loaded_skills.append(skill_name)
+        self.variant = variant or "live"
+
     def note_blocked(self, name: str, args: dict | None, reason: str) -> None:
         """记录一次被工作流守卫拦下的调用(未执行)。
 

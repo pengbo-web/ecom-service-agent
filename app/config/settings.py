@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     skill_trace_enabled: bool = True   # G2:记录每轮 skill 执行轨迹(旁路埋点,异常不影响回复)
     skill_gate_tolerance: float = 0.05  # G4:候选灰度评测允许的最大掉点,超过即拒绝转正
     skill_canary_enabled: bool = True   # 灰度路由总开关(关=永远只加载正式版本)
+    skill_preload_enabled: bool = True   # 服务端确定性预加载匹配的 skill(模型不自发调 load_skill)
 
     # Evaluation 配置（第9期，离线评估工具，无聊天开关）
     eval_dataset_path: str = "app/evaluation/cases.json"

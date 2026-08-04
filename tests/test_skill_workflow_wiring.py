@@ -194,3 +194,43 @@ def test_second_load_skill_does_not_disable_first_guard():
         "apply_refund", {"order_id": "ORD-20240115-001", "reason": "尺码不合适"})
     assert denial is not None                                  # 守卫未被顶掉
     assert "query_order" in denial
+
+
+# ---------- 服务端确定性预加载 → 守卫真的被点亮 ----------
+
+class _CatalogSkillManager(_FakeSkillManager):
+    """在守卫用的 _FakeSkillManager 基础上补上预加载需要的 get_catalog/load_skill。"""
+
+    def get_catalog(self):
+        return [{"name": "process-return",
+                 "description": "适用关键词：退货、退款。"}]
+
+    def load_skill(self, name):
+        return {"success": True, "skill_name": "process-return",
+                "instructions": "流程...", "variant": "live"}
+
+
+def test_preload_activates_guard_for_refund_without_query_order():
+    """预加载是"服务端确定性判定 + 程序化加载",不是模型自己调 load_skill——
+    这条测试证明预加载之后守卫真的被点亮了:紧接着不带前置 query_order 就
+    直接退款,必须仍被拦住,不能因为 skill 是程序加载的就绕过守卫。
+    """
+    agent = _agent(WORKFLOW, skill_name="")
+    agent._skill_turn = SkillTurn()   # 全新轨迹,不预置 skill_name/loaded_skills
+    agent.skill_manager = _CatalogSkillManager(WORKFLOW)
+
+    agent._preload_skill("我要退货,尺码不合适")
+
+    assert agent._skill_turn.skill_name == "process-return"
+    assert agent._skill_turn.loaded_skills == ["process-return"]
+    assert agent._skill_turn.tool_calls == []   # 预加载不产生假的 tool_calls 条目
+
+    result = agent._execute_tool_call(
+        "tc-1", "apply_refund",
+        {"order_id": "ORD-20240115-001", "reason": "尺码不合适"})
+
+    data = json.loads(result)
+    assert data["success"] is False
+    assert data["workflow_guard"] is True
+    assert "query_order" in data["error"]
+    assert agent.tool_manager.executed == []   # 真实退款工具没被执行

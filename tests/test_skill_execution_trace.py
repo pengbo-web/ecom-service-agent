@@ -188,3 +188,42 @@ def test_real_tool_failure_still_counts():
     turn.note_tool_call("query_order", json.dumps({"success": False, "error": "订单不存在"},
                                                   ensure_ascii=False))
     assert turn.outcome(requires_human=False) == OUTCOME_TOOL_ERROR
+
+
+# ---------- 服务端确定性预加载:note_preloaded ----------
+
+def test_note_preloaded_registers_skill_name_and_loaded_skills():
+    turn = SkillTurn()
+    turn.note_preloaded("process-return")
+    assert turn.skill_name == "process-return"
+    assert turn.loaded_skills == ["process-return"]
+    assert turn.has_skill is True
+
+
+def test_note_preloaded_sets_variant():
+    turn = SkillTurn()
+    turn.note_preloaded("process-return", variant="canary")
+    assert turn.variant == "canary"
+
+
+def test_note_preloaded_does_not_create_tool_call_entry():
+    """程序化预加载不是模型的工具调用,不能往 tool_calls 里塞假条目
+    (守卫按 tool_calls 判定前置调用是否成功,伪造条目会污染判定)。"""
+    turn = SkillTurn()
+    turn.note_preloaded("process-return")
+    assert turn.tool_calls == []
+
+
+def test_note_preloaded_idempotent_for_same_name():
+    turn = SkillTurn()
+    turn.note_preloaded("process-return")
+    turn.note_preloaded("process-return")
+    assert turn.loaded_skills == ["process-return"]
+
+
+def test_note_preloaded_ignores_empty_name():
+    turn = SkillTurn()
+    turn.note_preloaded("")
+    assert turn.skill_name == ""
+    assert turn.loaded_skills == []
+    assert turn.has_skill is False

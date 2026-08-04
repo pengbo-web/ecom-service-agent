@@ -41,6 +41,7 @@ class EcomAgent:
         self.system_prompt = SYSTEM_PROMPT   # 可切换:多 Agent 编排按路由画像覆盖
         self._turn_recall = None   # (last_user, RecallResult) 每轮预召回缓存:react 多步共享,不重复 embedding
         self._turn_item_ctx = None   # (item_id, 商品块) 每轮缓存:同商品不重复请求 hmdp
+        self._turn_skill_ctx = None   # (skill_name, instructions) 本轮预加载的技能流程
         self._turn_qu = None       # 查询理解结果(orchestrator 每轮注入;引擎独立运行时 None=老行为)
         self.history_threshold = settings.history_threshold
         self.history_keep_recent = settings.history_keep_recent
@@ -133,6 +134,7 @@ class EcomAgent:
         self._step_seq = 0
         self._turn_recall = None   # 新一轮:召回缓存作废,按本轮问题重检索
         self._turn_item_ctx = None
+        self._turn_skill_ctx = None
         from app.agent.skills.execution_trace import SkillTurn
         self._skill_turn = SkillTurn()   # G2:新一轮 skill 执行轨迹(旁路埋点)
         self._checkpoint("in_flight")   # 回合开始:持久化用户消息 + 标记进行中
@@ -159,6 +161,8 @@ class EcomAgent:
                 self.store.save(self.session_path, self._session_state())
                 self._write_snapshot()
                 return result
+
+        self._preload_skill(user_input)
 
         # stage 事件:供观测层(自研 tracer/Langfuse 桥)组装阶段 span 树
         self._emit({"type": "stage", "status": "start", "name": "react"})
@@ -510,6 +514,36 @@ class EcomAgent:
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
         return CustomerServiceResponse.model_validate_json(raw)
 
+    def _preload_skill(self, user_input: str) -> None:
+        """确定性预加载:按关键词判定本轮该用哪个 skill,程序化加载并记进本轮轨迹。
+
+        实测模型在自然措辞下从不自己调 load_skill,而守卫是 skill 作用域的——
+        不预加载就等于守卫与自进化闭环都不生效。故由服务端判定,不依赖模型自觉。
+        fail-soft:开关关闭、无匹配、加载失败、任何异常一律静默跳过(退回原行为)。
+        """
+        if not settings.skill_preload_enabled:
+            return
+        mgr = self.skill_manager
+        if mgr is None or not getattr(mgr, "enabled", False):
+            return
+        try:
+            from app.agent.skills.matcher import match_skill
+
+            name = match_skill(user_input, mgr.get_catalog())
+            if not name:
+                return
+            loaded = mgr.load_skill(name)
+            if not loaded.get("success"):
+                return
+            variant = loaded.get("variant") or "live"
+            self._turn_skill_ctx = (name, loaded.get("instructions") or "")
+            turn = getattr(self, "_skill_turn", None)
+            if turn is not None:
+                turn.note_preloaded(name, variant)
+            self._emit({"type": "skill_preloaded", "name": name, "variant": variant})
+        except Exception:  # noqa: BLE001 预加载是增强,失败退回原行为
+            pass
+
     def _build_messages(self) -> list[dict]:
         system_content = self.system_prompt
         if self.skill_manager and self.skill_manager.enabled:
@@ -560,17 +594,25 @@ class EcomAgent:
                     "content": f"以下是此前对话的摘要，用于延续上下文记忆：\n{self.summary}",
                 }
             )
-        # 当前商品块插到最后一条用户消息之前(紧邻本轮问题),recency 压过历史里讨论过的其它商品
+        # 本轮预加载的技能流程,与商品块一样插在最后一条用户消息之前(紧邻本轮问题)。
+        skill_block = None
+        if self._turn_skill_ctx:
+            skill_block = (f"【本轮已加载技能:{self._turn_skill_ctx[0]}】\n"
+                           f"{self._turn_skill_ctx[1]}")
+        # 顺序:技能流程在前、当前商品在后 —— 商品块要紧邻用户消息,保证"这/它"的指代消解
+        pre_user_blocks = [b for b in (skill_block, product_block) if b]
         raw = self.raw_messages
-        if product_block and raw:
+        if pre_user_blocks and raw:
             lu = max((i for i, m in enumerate(raw) if m.get("role") == "user"), default=None)
             if lu is not None:
                 messages.extend(raw[:lu])
-                messages.append({"role": "system", "content": product_block})
+                for block in pre_user_blocks:
+                    messages.append({"role": "system", "content": block})
                 messages.extend(raw[lu:])
             else:
                 messages.extend(raw)
-                messages.append({"role": "system", "content": product_block})
+                for block in pre_user_blocks:
+                    messages.append({"role": "system", "content": block})
         else:
             messages.extend(raw)
         return sanitize_tool_pairs(messages)   # 送模型前自愈 tool_calls/tool 结果配对
