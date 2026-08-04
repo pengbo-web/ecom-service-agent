@@ -57,7 +57,12 @@ def _replace_tree(src: Path, dest: Path) -> None:
     SkillManager._discover 扫的正是 definitions 的直接子目录,而中转副本带着
     **同一个** frontmatter name,一旦崩溃残留就会在下次启动时静默顶掉线上版本
     (残留 .retired → 旧版复辟;残留 .staging → 未过门禁的候选直接上线),
-    且全程无任何报错。`_swap` 是 `_` 前缀辅助目录、自身不含 SKILL.md,不会被加载。
+    且全程无任何报错。
+
+    `_swap` 之所以安全,靠的是**深度**:_discover 只把"直接子目录里直接含 SKILL.md"
+    的目录当技能,而中转副本在 `_swap/<name>.staging/SKILL.md`,深了一层,扫不到
+    (_discover 并没有按 `_` 前缀过滤)。另一处消费方 build_shadow_dir 则是按 `_`
+    前缀排除辅助目录 —— 两处靠的性质不同,改任一处前先确认另一处仍成立。
 
     换上用**两次 rename**:旧目录先改名让位,新目录立刻顶上,最后才慢慢删旧。
     这样"目标目录不存在"的窗口只有两次 rename 之间的一瞬,而不是整个 rmtree 的

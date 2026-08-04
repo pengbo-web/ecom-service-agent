@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from app.agent.skills.gate import build_shadow_dir
 from app.scripts.promote_skill import backup_current, promote, rollback
 
@@ -106,27 +108,39 @@ def test_archive_rejected_moves_whole_candidate_dir(tmp_path):
     assert moved, "附带资料也应一并归档"
 
 
-def test_swap_leftovers_are_not_discovered_as_live_skills(tmp_path):
-    """中转副本带着同一个 frontmatter name:若放成 definitions 的同级兄弟,
-    崩溃残留会在下次启动时静默顶掉线上版本。必须落在不被扫描的 _swap/ 下。"""
+def test_interrupted_swap_leaves_nothing_discoverable(tmp_path, monkeypatch):
+    """中断的换目录不得在被扫描的层级留下中转副本。
+
+    模拟"顶上"那一步失败:修复前中转副本是 definitions 的**同级兄弟**,带着同一个
+    frontmatter name,残留会被 _discover 加载、静默顶掉线上版本;修复后它们在
+    _swap/ 下(深度上就不会被发现)。本测试因此能证伪修复前的实现。
+    """
     from app.agent.skills.loader import SkillManager
+    from app.scripts import promote_skill as ps
 
     defs, cand, archive = _setup(tmp_path)
-    promote("demo-skill", defs, cand, archive, PASS_GATE, False, "t1")
+    real_rename = Path.rename
 
-    # 模拟崩溃残留:两种中转副本都放上
-    swap = Path(defs) / "_swap"
-    swap.mkdir(parents=True, exist_ok=True)
-    for suffix in (".staging", ".retired"):
-        leftover = swap / ("demo-skill" + suffix)
-        leftover.mkdir(parents=True, exist_ok=True)
-        (leftover / "SKILL.md").write_text(LIVE_MD, encoding="utf-8")
+    def boom(self, target):
+        # 只让"staging → 正式目录"这一步失败,回滚那一步照常成功
+        if self.name.endswith(".staging"):
+            raise OSError("模拟崩溃:顶上失败")
+        return real_rename(self, target)
 
+    monkeypatch.setattr(Path, "rename", boom)
+    with pytest.raises(OSError):
+        ps._replace_tree(Path(cand) / "demo-skill", Path(defs) / "demo-skill")
+    monkeypatch.undo()
+
+    # definitions 的直接子目录里不得出现任何中转副本(修复前这里会有 demo-skill.staging)
+    strays = [p.name for p in Path(defs).iterdir()
+              if p.is_dir() and (".staging" in p.name or ".retired" in p.name)]
+    assert strays == [], strays
+
+    # 回滚分支把旧版放了回去,线上技能仍可被正确发现,且是现行版而非候选版
     mgr = SkillManager(skills_dir=defs, enabled=True)
-
-    assert mgr.skill_names == ["demo-skill"]          # 残留没被当成技能加载
-    live = (Path(defs) / "demo-skill" / "SKILL.md").read_text(encoding="utf-8")
-    assert live == CAND_MD                            # 线上仍是刚转正的候选版,没被复辟
+    assert mgr.skill_names == ["demo-skill"]
+    assert (Path(defs) / "demo-skill" / "SKILL.md").read_text(encoding="utf-8") == LIVE_MD
 
 
 def test_replace_tree_leaves_no_leftovers_on_success(tmp_path):
