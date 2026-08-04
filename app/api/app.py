@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.conversations import ensure_active, open_or_reuse
 from app.api.schemas import (AgentReplyRequest, ChatRequest, CreateOrderRequest, CreateUserRequest,
                               LoginRequest, OpenConversationRequest, ResetRequest,
-                              SkillDistillRequest)
+                              SellerChatRequest, SkillDistillRequest)
 from app.api.session_manager import SessionManager
 from app.api.streaming import run_agent_streaming
 from app.auth.token import sign_token, verify_token
@@ -51,6 +51,21 @@ _TRACE_WINDOW = 500
 # 上传技能包的体积上限(压缩包本身,解压后另有 bundle 模块的三重上限)
 _MAX_UPLOAD_BYTES = 5_000_000
 _UPLOAD_CHUNK_BYTES = 65536   # 分块读上传体的块大小(配合上限,避免整包先进内存)
+
+
+def _seller_factory(session_path: str, user_id: str | None = None):
+    """卖家会话工厂:走 SellerOrchestrator(参谋/增长画像),而非买家的 MultiAgentOrchestrator。"""
+    from app.multi_agent.orchestrator import SellerOrchestrator
+    return SellerOrchestrator(session_path=session_path, user_id=user_id)
+
+
+# 卖家会话与买家会话**完全隔离**:独立 SessionManager + 独立目录 + 独立锁字典。
+# 否则店主与某个买家撞同一个 session_id 时,店主的话会落进买家会话里。
+# 买家侧的 SessionManager 是 create_app() 内的局部变量(每次调用可注入/新建,
+# 便于测试隔离);卖家侧不需要这种按次注入,故用模块级单例即可,
+# 关键是 base_dir 与买家侧("app/sessions/api")永不相同。
+seller_sessions = SessionManager(agent_factory=_seller_factory,
+                                 base_dir="app/sessions/seller")
 
 
 def _sse_frame(event: dict) -> str:
@@ -179,6 +194,9 @@ def create_app(session_manager: Optional[SessionManager] = None,
     else:
         from app.session.archive import build_archiver
         manager = SessionManager(archiver=build_archiver(settings.archive_enabled))
+    # 挂到 app.state 供测试/运维按需内省(如校验卖家会话与买家会话确系两套
+    # 独立 SessionManager);不改变 manager 本身的构造与行为。
+    app.state.session_manager = manager
 
     # 生产路径(未注入 manager)才启动空闲回收线程:空闲超时自动巩固长期记忆。
     # 测试都会注入 session_manager,因此不会误起后台线程。
@@ -951,6 +969,48 @@ def create_app(session_manager: Optional[SessionManager] = None,
                     "policy": promotion_policy(risk), "errors": [], "truncated": truncated}
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+
+    def _require_seller_console() -> None:
+        """控制台关掉时给 404 而不是 500——功能不存在是 404 的语义,不是服务器出错。"""
+        if not getattr(settings, "seller_console_enabled", True):
+            raise HTTPException(status_code=404, detail="卖家控制台未启用")
+
+    @app.post("/api/seller/chat", dependencies=[Depends(admin_auth)])
+    def seller_chat(req: SellerChatRequest):
+        """店主与卖家侧 Agent 对话(参谋/增长由 SellerRouter 内部按话题决定)。
+
+        鉴权用 admin_auth:经营数据只对店铺管理者开放,买家 token 拿不到。
+        会话落进 seller_sessions(独立 SessionManager+独立目录),与买家会话
+        的 session_id 命名空间互不相通,同名 session_id 不会串话。
+        """
+        _require_seller_console()
+        sid = (req.session_id or "").strip() or "seller-default"
+        orch = seller_sessions.get_or_create(sid, user_id="seller")
+        lock = seller_sessions.get_lock(sid)
+        with lock:
+            result = orch.chat(req.message or "")
+            try:
+                orch.save()
+            except Exception:      # noqa: BLE001 落盘失败不吞掉已生成的回复
+                logger.exception("卖家会话落盘失败 sid=%s", sid)
+        reply = result.get("reply", "") if isinstance(result, dict) else str(result)
+        key = getattr(orch, "last_agent_key", "analyst")
+        from app.multi_agent.agents import SELLER_AGENT_CONFIGS
+        return {"success": True, "reply": reply, "agent_key": key,
+                "agent": SELLER_AGENT_CONFIGS.get(key, {}).get("name", key),
+                "session_id": sid}
+
+    @app.get("/api/seller/overview", dependencies=[Depends(admin_auth)])
+    def seller_overview(window_days: int = 7):
+        """控制台首屏:经营总览 + 商品诊断 + 当前异常。全只读,不调用 LLM,可高频轮询刷新。"""
+        _require_seller_console()
+        from app.agent.tools.anomaly import anomaly_scan
+        from app.agent.tools.shop_analytics import product_diagnostics, shop_overview
+        return {
+            "overview": shop_overview(window_days=window_days),
+            "products": product_diagnostics(window_days=window_days, top_n=5),
+            "anomalies": anomaly_scan(window_days=window_days)["anomalies"],
+        }
 
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():

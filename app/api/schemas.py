@@ -40,3 +40,8 @@ class CreateOrderRequest(BaseModel):
 
 class SkillDistillRequest(BaseModel):
     doc_text: str           # 产品资料/客服 SOP 正文(纯文本或 markdown)
+
+
+class SellerChatRequest(BaseModel):
+    session_id: str
+    message: str
