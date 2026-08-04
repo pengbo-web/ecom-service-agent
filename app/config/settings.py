@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     collab_enabled: bool = True
     seller_console_enabled: bool = True     # B 端经营控制台入口
 
+    # 异常扫描阈值(确定性判定,不经 LLM);min_samples 防"1 单退 1 单=100%"的假警报
+    anomaly_refund_rate: float = 0.15        # 商品退款率告警线
+    anomaly_tool_error_rate: float = 0.30    # skill 工具失败率告警线
+    anomaly_human_rate: float = 0.40         # skill 转人工率告警线
+    anomaly_min_samples: int = 5             # 低于此样本量不报
+
     # Evaluation 配置（第9期，离线评估工具，无聊天开关）
     eval_dataset_path: str = "app/evaluation/cases.json"
     eval_use_judge: bool = True  # 是否启用 LLM-as-judge（质量/幻觉/过程合理性）

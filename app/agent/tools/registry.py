@@ -20,6 +20,7 @@ from app.agent.tools.order_ops import (
 from app.agent.tools.shop_analytics import (
     shop_overview, product_diagnostics, service_quality,
 )
+from app.agent.tools.anomaly import anomaly_scan
 
 _TOOL_MAP: dict[str, Callable] = {
     "query_order": query_order,
@@ -41,6 +42,7 @@ _TOOL_MAP: dict[str, Callable] = {
     "shop_overview": shop_overview,
     "product_diagnostics": product_diagnostics,
     "service_quality": service_quality,
+    "anomaly_scan": anomaly_scan,
 }
 
 if settings.bargain_enabled:
@@ -428,6 +430,20 @@ TOOL_DEFINITIONS.extend([
         "function": {
             "name": "service_quality",
             "description": "【店铺参谋专用】按技能统计服务质量：执行成功率、工具失败率、转人工率。只读。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "window_days": {"type": "integer", "description": "统计窗口天数，默认 7"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "anomaly_scan",
+            "description": "【店铺参谋专用】按确定性阈值扫描经营与服务异常（退款率/工具失败率/转人工率），返回跨线条目。只读，不调用大模型。",
             "parameters": {
                 "type": "object",
                 "properties": {
