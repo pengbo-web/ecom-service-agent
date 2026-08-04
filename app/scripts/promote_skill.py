@@ -1,10 +1,11 @@
 """候选 Skill 转正 / 回滚 CLI(分级授权铁律的唯一写入点)。
 
 本文件是全仓库**唯一**写入"会被 SkillManager 加载的路径"
-`definitions/<name>/SKILL.md` 的代码。注意 `definitions/` 树下另有两处写入,
+`definitions/<name>/SKILL.md` 的代码。注意 `definitions/` 树下另有三处写入,
 但都只写 `_` 前缀的辅助目录、不会被加载:
   - `gate.build_shadow_dir` → `definitions/_shadow/`(门禁用的影子技能集);
-  - `synthesizer` / `golden_corpus` → `definitions/_candidates/`(待审候选)。
+  - `synthesizer` / `golden_corpus` → `definitions/_candidates/`(待审候选);
+  - `_replace_tree` → `definitions/_swap/`(转正/回滚过程中的中转副本)。
 这条隔离依赖"`_` 前缀 + 目录深度"约定(见 loader._discover),因此候选名的
 路径安全校验是必需的(validator.is_safe_skill_name),否则 `../x` 之类的名字
 能逃出辅助目录、直接覆盖线上 skill。
@@ -52,18 +53,25 @@ def _now_stamp() -> str:
 def _replace_tree(src: Path, dest: Path) -> None:
     """用 src 目录的内容整体替换 dest 目录(技能是**目录**,不止一个 SKILL.md)。
 
-    先把新内容复制到同级 .staging,再**两次 rename**换上:旧目录先改名让位,
-    新目录立刻顶上,最后才慢慢删旧。这样"目标目录不存在"的窗口只有两次 rename
-    之间的一瞬,而不是整个 rmtree 的时长 —— 这点很重要,因为本函数会由看门狗
-    无人值守调用,而 SkillManager 对读不到的技能是**静默跳过**(线上会直接少一个
-    技能且无任何报错)。
+    中转副本放在 `<definitions>/_swap/` 下,**绝不能**放成 dest 的同级兄弟:
+    SkillManager._discover 扫的正是 definitions 的直接子目录,而中转副本带着
+    **同一个** frontmatter name,一旦崩溃残留就会在下次启动时静默顶掉线上版本
+    (残留 .retired → 旧版复辟;残留 .staging → 未过门禁的候选直接上线),
+    且全程无任何报错。`_swap` 是 `_` 前缀辅助目录、自身不含 SKILL.md,不会被加载。
+
+    换上用**两次 rename**:旧目录先改名让位,新目录立刻顶上,最后才慢慢删旧。
+    这样"目标目录不存在"的窗口只有两次 rename 之间的一瞬,而不是整个 rmtree 的
+    时长 —— 这点很重要,因为本函数由看门狗无人值守调用,而 SkillManager 对读不到
+    的技能是**静默跳过**(线上会直接少一个技能且无任何报错)。
 
     为什么不逐文件覆盖:那会留下"新 SKILL.md + 旧参考资料"的半新半旧状态,
     SKILL.md 会指向已不存在的文件,比短暂窗口更糟。
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    staging = dest.with_name(dest.name + ".staging")
-    retired = dest.with_name(dest.name + ".retired")
+    swap = dest.parent / "_swap"
+    swap.mkdir(parents=True, exist_ok=True)
+    staging = swap / (dest.name + ".staging")
+    retired = swap / (dest.name + ".retired")
     for leftover in (staging, retired):
         if leftover.exists():
             shutil.rmtree(leftover)
@@ -75,8 +83,13 @@ def _replace_tree(src: Path, dest: Path) -> None:
     try:
         staging.rename(dest)          # 顶上(瞬时)
     except OSError:
-        if had_old:                   # 顶上失败就把旧的放回去,别让线上少一个技能
-            retired.rename(dest)
+        if had_old:
+            # 顶上失败就把旧的放回去,别让线上少一个技能。放回若也失败,
+            # 也不能让它盖掉原始异常 —— 原始异常才是根因。
+            try:
+                retired.rename(dest)
+            except OSError:
+                pass
         raise
     if had_old:
         shutil.rmtree(retired, ignore_errors=True)
