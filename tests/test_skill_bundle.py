@@ -117,3 +117,24 @@ def test_rejects_symlink_entry(tmp_path):
 def test_rejects_not_a_zip(tmp_path):
     with pytest.raises(BundleError, match="压缩包"):
         extract_skill_bundle(b"this is not a zip", str(tmp_path))
+
+
+def test_corrupted_entry_raises_bundle_error(tmp_path):
+    """条目数据被篡改(CRC 对不上)时必须抛 BundleError,不能漏出 zipfile 的原始异常。
+
+    用 ZIP_STORED 写入,明文原样落在压缩包字节里,翻转其中一个字节即可造成
+    CRC 不符 —— 这是可确定复现的损坏条目。
+    """
+    payload = b"REFERENCE-PAYLOAD-0123456789"
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as z:
+        z.writestr("SKILL.md", SKILL_MD)
+        z.writestr("references/p.md", payload.decode())
+
+    raw = bytearray(buf.getvalue())
+    idx = raw.find(payload)
+    assert idx > 0, "ZIP_STORED 下明文应原样存储,未找到待篡改位置"
+    raw[idx] ^= 0xFF                       # 数据变了但 CRC 没变 → 读取时校验失败
+
+    with pytest.raises(BundleError):
+        extract_skill_bundle(bytes(raw), str(tmp_path))

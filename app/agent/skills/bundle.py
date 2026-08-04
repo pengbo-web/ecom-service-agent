@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import stat
 import zipfile
+import zlib
 from pathlib import PurePosixPath
 
 MAX_ENTRIES = 200              # 条目数上限
@@ -105,24 +106,31 @@ def extract_skill_bundle(data: bytes, dest_dir: str) -> dict:
             target = root / Path(*rel.parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             size = 0
+            # 只把**读取压缩包**这一侧的异常归一成 BundleError:条目声明的大小/CRC
+            # 与实际解压流不符(头部被篡改或包已损坏),不能当作"合规"处理。
+            # 写入目标端的 OSError(磁盘满/无权限/路径过长)是基础设施故障,必须原样
+            # 抛出 —— 把它也报成"压缩包已损坏"会把人指向完全错误的方向。
             try:
-                with zf.open(info) as src, open(target, "wb") as dst:
-                    while True:
-                        chunk = src.read(_CHUNK)
-                        if not chunk:
-                            break
-                        size += len(chunk)
-                        total += len(chunk)
-                        # 不信 zip 头声明的大小,按实际写入字节判上限
-                        if size > MAX_FILE_BYTES:
-                            raise BundleError(f"单个文件过大: {rel.as_posix()}")
-                        if total > MAX_TOTAL_BYTES:
-                            raise BundleError(f"解压后总大小超限(> {MAX_TOTAL_BYTES} 字节)")
-                        dst.write(chunk)
+                src = zf.open(info)
             except (zipfile.BadZipFile, OSError) as exc:
-                # 条目声明的大小/CRC 与实际解压流不符(头部被篡改或包已损坏),
-                # 同样不能当作"合规"处理,统一归一成 BundleError。
-                raise BundleError(f"条目已损坏或与声明不符: {rel.as_posix()}: {exc}") from exc
+                raise BundleError(f"条目无法读取: {rel.as_posix()}: {exc}") from exc
+            with src, open(target, "wb") as dst:
+                while True:
+                    try:
+                        chunk = src.read(_CHUNK)
+                    except (zipfile.BadZipFile, EOFError, zlib.error) as exc:
+                        raise BundleError(
+                            f"条目已损坏或与声明不符: {rel.as_posix()}: {exc}") from exc
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    total += len(chunk)
+                    # 不信 zip 头声明的大小,按实际写入字节判上限
+                    if size > MAX_FILE_BYTES:
+                        raise BundleError(f"单个文件过大: {rel.as_posix()}")
+                    if total > MAX_TOTAL_BYTES:
+                        raise BundleError(f"解压后总大小超限(> {MAX_TOTAL_BYTES} 字节)")
+                    dst.write(chunk)
             written.append(rel.as_posix())
 
         return {"skill_md": str(root / "SKILL.md"),
