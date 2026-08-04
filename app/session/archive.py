@@ -14,11 +14,15 @@ class NullSessionArchiver:
 
 
 class SqliteSessionArchiver:
-    """把会话完整落到 SQLite session_archive 表。"""
+    """把会话完整落到 SQLite session_archive 表。
+
+    去重:通过 archive_session_if_changed 写入,内容没有增长(msg_count 未变)
+    时跳过,避免同一会话被反复归档成多行,过度加权到离线聚类里。
+    """
     def archive(self, session_id: str, agent) -> None:
         try:
             from app.db import get_db
-            get_db().archive_session(
+            get_db().archive_session_if_changed(
                 session_id=session_id,
                 user_id=getattr(agent, "user_id", "default"),
                 messages=list(getattr(agent, "raw_messages", []) or []),

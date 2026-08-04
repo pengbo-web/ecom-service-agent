@@ -311,6 +311,29 @@ class Database:
         finally:
             conn.close()
 
+    def archive_session_if_changed(self, session_id: str, user_id: str,
+                                   messages: list, summary: Optional[str]) -> bool:
+        """仅当该会话内容有增长时才归档,返回是否真的写入。
+
+        archive_session 是纯 INSERT,反复调用会造成同一会话多行归档 —— 那会让离线
+        聚类过度加权同一段对话。故按 msg_count 比对最近一条归档:相同则跳过。
+        保留"内容增长才追加一行"的语义(审计仍能看到演进过程),而不是覆盖。
+        """
+        count = len(messages or [])
+        if count == 0:
+            return False
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT msg_count FROM session_archive WHERE session_id = ? "
+                "ORDER BY id DESC LIMIT 1", (session_id,)).fetchone()
+            if row is not None and (row["msg_count"] or 0) >= count:
+                return False
+        finally:
+            conn.close()
+        self.archive_session(session_id, user_id, messages, summary)
+        return True
+
     def get_archived_session(self, session_id: str) -> Optional[dict]:
         """取该会话最近一条归档(测试/查询用)。"""
         conn = self.connect()

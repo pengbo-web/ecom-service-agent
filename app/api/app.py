@@ -406,6 +406,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
         conv = get_db().get_conversation(req.session_id)
         sid = req.session_id if (conv and conv.get("user_id") == req.user_id) \
             else open_or_reuse(get_db(), req.user_id)["conversation_id"]
+        # 重置会清空这段对话:先归档,否则这段内容就永久丢失、学不到任何东西
+        try:
+            agent = manager.get_or_create(sid, req.user_id)
+            get_db().archive_session_if_changed(
+                session_id=sid, user_id=req.user_id,
+                messages=list(getattr(agent, "raw_messages", []) or []),
+                summary=getattr(agent, "summary", None))
+        except Exception:  # noqa: BLE001 归档 best-effort,失败不阻断重置
+            pass
         manager.reset(sid)                      # 清空 agent 消息 + 热存储
         get_db().delete_session_snapshot(sid)   # 同清冷快照,避免历史回显残留旧消息
         return {"status": "reset", "conversation_id": sid}
@@ -623,6 +632,29 @@ def create_app(session_manager: Optional[SessionManager] = None,
             bubbles = reconstruct_bubbles(getattr(agent, "raw_messages", []))
         get_db().touch_conversation(session_id)   # 人工回复也刷新活跃时间
         return {"status": "ok", "turns": bubbles}
+
+    @app.post("/api/admin/sessions/archive", dependencies=[Depends(admin_auth)])
+    def admin_archive_sessions():
+        """把当前内存里的活跃会话立刻冷归档(供离线自进化闭环使用)。
+
+        为什么需要:归档原本只发生在会话被 TTL 淘汰时(默认 30 天),而失败驱动的
+        skill 改进需要 traces 与 archives 相交 —— 等淘汰意味着最快 30 天后才学得到。
+        离线跑闭环前先打这个接口,即可把刚发生的真实对话纳入学习范围。
+        幂等:内容没增长的会话会被跳过(archive_session_if_changed)。
+        """
+        archived, skipped = [], []
+        for sid, agent in manager.snapshot_agents():
+            try:
+                ok = get_db().archive_session_if_changed(
+                    session_id=sid,
+                    user_id=getattr(agent, "user_id", "default"),
+                    messages=list(getattr(agent, "raw_messages", []) or []),
+                    summary=getattr(agent, "summary", None))
+                (archived if ok else skipped).append(sid)
+            except Exception:  # noqa: BLE001 单个会话失败不影响其余
+                skipped.append(sid)
+        return {"archived": len(archived), "skipped": len(skipped),
+                "archived_sessions": archived}
 
     @app.get("/api/admin/skills", dependencies=[Depends(admin_auth)])
     def admin_skills():

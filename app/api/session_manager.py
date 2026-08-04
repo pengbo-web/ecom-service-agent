@@ -69,6 +69,14 @@ class SessionManager:
         except Exception:
             pass
 
+    def snapshot_agents(self) -> list[tuple]:
+        """当前内存里的 (session_id, agent) 快照(拷贝,遍历时不受并发增删影响)。
+
+        只读用途(如按需冷归档);不改动内部状态、不刷新活跃时间。
+        """
+        with self._guard:
+            return list(self._agents.items())
+
     def sweep(self, idle_ttl: float) -> list[str]:
         """把空闲(距最后活跃 >= idle_ttl)的会话巩固记忆并从内存回收,返回被回收的 session_id。"""
         now = self._clock()
