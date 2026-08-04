@@ -190,8 +190,7 @@ class SellerOrchestrator:
         sid = Path(session_path).stem if session_path else None
         self.engine = EcomAgent(session_path=session_path, session_id=sid, user_id=user_id)
         self.router = SellerRouter(self.engine.client, self.engine.model)
-        self._last_key: str | None = None
-        self.last_agent_key: str = SELLER_DEFAULT
+        self.last_agent_key: str = SELLER_DEFAULT   # 供外部只读查询"上一轮落到哪个画像"
 
         self.profiles: dict[str, dict] = {}
         for key, cfg in SELLER_AGENT_CONFIGS.items():
@@ -209,11 +208,10 @@ class SellerOrchestrator:
         self.client = self.engine.client
 
     def chat(self, user_input: str):
-        from app.multi_agent.seller_router import SELLER_DEFAULT
-
-        key = self.router.route(user_input, self.engine.raw_messages) or self._last_key \
-            or SELLER_DEFAULT
-        self._last_key = key
+        # SellerRouter.route() 的返回值域是 SELLER_AGENTS ∪ {SELLER_DEFAULT},
+        # 永远是真值,不会是 None/""——不像买家侧 QU 那样可能判不出 domain,
+        # 因此这里不需要(也不该有)"粘性路由回退上一轮"的 or 链。
+        key = self.router.route(user_input, self.engine.raw_messages)
         self.last_agent_key = key
         profile = self.profiles.get(key) or next(iter(self.profiles.values()))
         if self.event_sink:
@@ -254,5 +252,11 @@ class SellerOrchestrator:
     def close(self):
         self.engine.tool_manager = self._default_tm
         self.engine.close()
+        # 逐个关闭每个画像的 tool_manager:单个失败要 catch 住继续关下一个,
+        # 否则一个画像的 close() 抛异常就会让后面的画像永久漏关(资源泄漏)。
+        # (MultiAgentOrchestrator.close() 目前是同一个隐患,未在本次改动范围内。)
         for p in self.profiles.values():
-            p["tool_manager"].close()
+            try:
+                p["tool_manager"].close()
+            except Exception:
+                pass

@@ -46,7 +46,12 @@ class SellerRouter:
             max_tokens=10,
         )
         raw = (response.choices[0].message.content or "").strip().lower()
-        for key in SELLER_AGENTS:
-            if key in raw:
-                return key
+        # SELLER_AGENTS 是 set,遍历顺序受哈希随机化影响——不能"先命中谁就返回谁",
+        # 否则同一条既提到 analyst 又提到 growth 的暧昧回复,可能在不同进程里
+        # 落到不同画像,而 growth 是能产草稿的写侧,这个不确定性等于安全隐患。
+        # 做法:先收集*全部*命中的画像,只有恰好命中一个时才采用它;
+        # 命中 0 个或 ≥2 个(暧昧/跑偏)一律落兜底(只读的 analyst)。
+        matched = {key for key in SELLER_AGENTS if key in raw}
+        if len(matched) == 1:
+            return next(iter(matched))
         return SELLER_DEFAULT
