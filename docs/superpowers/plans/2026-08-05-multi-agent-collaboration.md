@@ -1176,7 +1176,9 @@ def test_product_diagnostics_surfaces_refund_reasons(db):
 def test_service_quality_from_skill_traces(db):
     db.record_skill_trace("s1", "u1", "track-order", [], "success")
     db.record_skill_trace("s2", "u1", "track-order", [], "tool_error")
-    db.record_skill_trace("s3", "u1", "track-order", [], "requires_human")
+    # 用轨迹层的真实常量,不写字面量——写死字面量正是漏判 human_rate 的根因
+    from app.agent.skills.execution_trace import OUTCOME_HANDOFF
+    db.record_skill_trace("s3", "u1", "track-order", [], OUTCOME_HANDOFF)
     out = sa.service_quality(window_days=7)
     assert out["success"] is True
     row = [r for r in out["skills"] if r["skill_name"] == "track-order"][0]
@@ -1329,7 +1331,7 @@ def service_quality(window_days: int = 7) -> dict:
             f"SELECT skill_name, COUNT(*) AS total, "
             f"  SUM(CASE WHEN outcome = 'success' THEN 1 ELSE 0 END) AS ok, "
             f"  SUM(CASE WHEN outcome = 'tool_error' THEN 1 ELSE 0 END) AS tool_error, "
-            f"  SUM(CASE WHEN outcome = 'requires_human' THEN 1 ELSE 0 END) AS human "
+            f"  SUM(CASE WHEN outcome = ? THEN 1 ELSE 0 END) AS human "
             f"FROM skill_traces WHERE created_at >= {w} "
             f"GROUP BY skill_name ORDER BY total DESC").fetchall()
         skills = []
