@@ -17,6 +17,9 @@ from app.agent.tools.read_result import read_tool_result
 from app.agent.tools.order_ops import (
     change_address, cancel_order, expedite_shipping, issue_invoice, query_coupons,
 )
+from app.agent.tools.shop_analytics import (
+    shop_overview, product_diagnostics, service_quality,
+)
 
 _TOOL_MAP: dict[str, Callable] = {
     "query_order": query_order,
@@ -35,6 +38,9 @@ _TOOL_MAP: dict[str, Callable] = {
     "expedite_shipping": expedite_shipping,
     "issue_invoice": issue_invoice,
     "query_coupons": query_coupons,
+    "shop_overview": shop_overview,
+    "product_diagnostics": product_diagnostics,
+    "service_quality": service_quality,
 }
 
 if settings.bargain_enabled:
@@ -385,6 +391,53 @@ TOOL_DEFINITIONS.append({
         },
     },
 })
+
+TOOL_DEFINITIONS.extend([
+    {
+        "type": "function",
+        "function": {
+            "name": "shop_overview",
+            "description": "【店铺参谋专用】查询店铺经营总览：订单量、GMV、客单价、退款率、取消率、咨询会话数。只读。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "window_days": {"type": "integer",
+                                    "description": "统计窗口天数，默认 7"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "product_diagnostics",
+            "description": "【店铺参谋专用】按商品诊断：下单量、销售额、退款率、退款原因 top3、库存。按最疼的商品排序。只读。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "window_days": {"type": "integer", "description": "统计窗口天数，默认 7"},
+                    "top_n": {"type": "integer", "description": "返回商品数，默认 5"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "service_quality",
+            "description": "【店铺参谋专用】按技能统计服务质量：执行成功率、工具失败率、转人工率。只读。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "window_days": {"type": "integer", "description": "统计窗口天数，默认 7"},
+                },
+                "required": [],
+            },
+        },
+    },
+])
 
 
 # 有副作用的写工具:执行前查幂等键,成功后写幂等键(防重复副作用)。
