@@ -141,22 +141,36 @@ class SkillManager:
         return "\n".join(lines)
 
     def list_skill_files(self, skill_name: str) -> list[str]:
-        """该技能目录下除 SKILL.md 外的附带文件(相对路径,已排序)。
+        """该技能目录下除自身 SKILL.md 外的附带文件(相对路径,已排序)。
 
         Agent Skills 标准里一个技能是**目录**,可带参考资料;这里只做列举,
         内容由模型经 read_skill_file 按需读取(渐进式披露,不一次性灌进上下文)。
         未知技能/目录读不了 → []。
+
+        安全:rglob 会跟进**符号链接目录**,故必须逐个确认解析后仍在技能目录内。
+        否则技能目录里放一个指向别处的符链,就能把外部文件名列进模型上下文——
+        内容虽有 read_skill_file 的独立拦截,但文件名本身已是信息泄露。
         """
         skill = self._skills.get(skill_name)
         if skill is None:
             return []
         root = skill.path.parent
         try:
-            return sorted(
-                p.relative_to(root).as_posix()
-                for p in root.rglob("*")
-                if p.is_file() and p.name != "SKILL.md"
-            )
+            root_resolved = root.resolve()
+            found: list[str] = []
+            for p in root.rglob("*"):
+                if not p.is_file():
+                    continue
+                rel = p.relative_to(root)
+                # 只排除技能自身的顶层 SKILL.md;嵌套的同名文件是正常附带资料
+                if rel.as_posix() == "SKILL.md":
+                    continue
+                try:
+                    p.resolve().relative_to(root_resolved)
+                except ValueError:
+                    continue          # 经符链逃出技能目录,不列出
+                found.append(rel.as_posix())
+            return sorted(found)
         except OSError:
             return []
 

@@ -40,6 +40,33 @@ def test_lists_empty_for_unknown_skill(tmp_path):
     assert _mgr(tmp_path).list_skill_files("nope") == []
 
 
+def test_lists_nested_skill_md_as_normal_file(tmp_path):
+    """只排除技能自身的顶层 SKILL.md;嵌套的同名文件是正常附带资料。"""
+    mgr = _mgr(tmp_path, {"references/SKILL.md": "被引用的另一份说明"})
+    assert mgr.list_skill_files("demo-skill") == ["references/SKILL.md"]
+
+
+def test_does_not_list_files_reached_through_symlink(tmp_path):
+    """rglob 会跟进符链目录:经符链逃出技能目录的文件名不得被列出(信息泄露)。"""
+    import os
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("机密", encoding="utf-8")
+
+    mgr = _mgr(tmp_path, {"references/ok.md": "正常资料"})
+    skill_dir = tmp_path / "definitions" / "demo-skill"
+    try:
+        os.symlink(str(outside), str(skill_dir / "linked"), target_is_directory=True)
+    except (OSError, NotImplementedError, AttributeError):
+        import pytest
+        pytest.skip("当前环境不允许创建符号链接(Windows 需开发者模式或管理员)")
+
+    files = mgr.list_skill_files("demo-skill")
+    assert "references/ok.md" in files
+    assert not any("secret" in f for f in files), files
+
+
 # ---------- read_skill_file ----------
 
 def test_reads_bundled_file(tmp_path):
