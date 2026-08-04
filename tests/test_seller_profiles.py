@@ -1,10 +1,17 @@
-"""卖家画像:只读边界、买卖两侧工具不互穿、prompt 含硬约束。"""
+"""卖家画像:只读边界、买卖两侧工具不互穿、prompt 含硬约束。
+
+两条边界(参谋只读 / 买卖工具不互穿)不再在本文件里手抄工具名单——手抄的名单
+只在"当时没漏"时才成立,新工具一加,名单和事实就悄悄分家(这正是
+draft_outreach 曾经踩过的坑:它是状态可变的写工具,却不在旧的 WRITE_TOOLS
+字面量里)。现在两条边界都从 app.agent.tools.registry 里的 TOOL_TRAITS 派生,
+且有穷尽性测试兜底:_TOOL_MAP 里任何没打过标签的新工具都会让构建变红。
+"""
 
 from app.multi_agent.agents import AGENT_CONFIGS, SELLER_AGENT_CONFIGS
-from app.agent.tools.registry import TOOL_DEFINITIONS
-
-WRITE_TOOLS = {"apply_refund", "place_order", "cancel_order", "change_address",
-               "expedite_shipping", "issue_invoice", "negotiate_price"}
+from app.agent.tools.registry import (
+    _TOOL_MAP, BUYER_WRITE_TOOLS, MUTATING_TOOLS, SELLER_ONLY_TOOLS,
+    TOOL_DEFINITIONS, TOOL_TRAITS,
+)
 
 
 def test_seller_configs_shape_matches_buyer():
@@ -16,21 +23,34 @@ def test_seller_configs_shape_matches_buyer():
 
 def test_analyst_is_read_only():
     """参谋碰到任何写工具 = 职责边界破了,也就是安全边界破了。"""
-    assert SELLER_AGENT_CONFIGS["analyst"]["tools"] & WRITE_TOOLS == set()
+    assert SELLER_AGENT_CONFIGS["analyst"]["tools"] & MUTATING_TOOLS == set()
 
 
 def test_buyer_profiles_never_get_seller_tools():
     """经营数据绝不能进买家会话——买家问一句就能拿到全店 GMV 是数据泄漏。"""
-    seller_only = {"shop_overview", "product_diagnostics", "service_quality",
-                   "anomaly_scan", "find_opportunities", "draft_outreach",
-                   "list_outreach_drafts"}
     for key, cfg in AGENT_CONFIGS.items():
-        assert cfg["tools"] & seller_only == set(), f"{key} 混入了 B 端工具"
+        assert cfg["tools"] & SELLER_ONLY_TOOLS == set(), f"{key} 混入了 B 端工具"
 
 
 def test_seller_profiles_never_get_buyer_write_tools():
+    """卖家画像不该拿到*买家域*的写工具(apply_refund/cancel_order 等)。
+
+    注意这里用 BUYER_WRITE_TOOLS(= MUTATING_TOOLS - SELLER_ONLY_TOOLS),而不是
+    整个 MUTATING_TOOLS——growth 画像拥有 draft_outreach 是设计如此(它是
+    mutating 但也是 seller_only,营销 Agent 的本职就是落草稿),不是越界。
+    """
     for key, cfg in SELLER_AGENT_CONFIGS.items():
-        assert cfg["tools"] & WRITE_TOOLS == set(), f"{key} 混入了买家写工具"
+        assert cfg["tools"] & BUYER_WRITE_TOOLS == set(), f"{key} 混入了买家写工具"
+
+
+def test_all_tool_map_entries_are_classified():
+    """穷尽性兜底:_TOOL_MAP 里的每个工具都必须在 TOOL_TRAITS 里打过标签。
+
+    没打标签的新工具不会静默地被当成"安全"放过——这条测试直接红,
+    逼着加工具的人在 registry.py 里补一行分类。
+    """
+    unclassified = set(_TOOL_MAP) - set(TOOL_TRAITS)
+    assert unclassified == set(), f"以下工具未在 TOOL_TRAITS 中分类: {unclassified}"
 
 
 def test_all_declared_tools_are_registered():

@@ -523,6 +523,74 @@ TOOL_DEFINITIONS.extend([
 _WRITE_TOOLS = frozenset({"apply_refund", "cancel_order", "change_address"})
 
 
+# ---- 工具分类元数据:安全边界的唯一事实来源 ----
+#
+# 上面的 _WRITE_TOOLS 只服务幂等去重这一个窄用途(见其注释,故意漏了
+# negotiate_price)。这里是另一件事:给*每一个*注册工具打两条独立的安全标签,
+# 供测试derivation 用,不再让测试里手抄一份工具名单——手抄的名单只在"当时没漏"
+# 时才成立,新工具一加,名单和事实就悄悄分家。
+#
+# 标签含义:
+#   "mutating"     该工具会改变持久状态或产生对外可见的落地效果
+#                  (写库、生成会被人工审批消费的草稿行等)。判据以*当前实现*
+#                  为准——是否真的调用了 db.xxx()/等价持久化,而不是望文生义。
+#   "seller_only"  该工具暴露的是全店经营数据,或只服务卖家侧动作(起草触达),
+#                  绝不能出现在买家画像里(否则一句问话就能套出全店 GMV)。
+#
+# _TOOL_MAP 里每加一个新工具,必须在这里补一行——否则下面的穷尽性测试
+# (test_all_tool_map_entries_are_classified)会红,而不是悄悄被当成"安全"放过。
+TOOL_TRAITS: dict[str, frozenset[str]] = {
+    "query_order": frozenset(),
+    "query_product": frozenset(),
+    "query_logistics": frozenset(),
+    "apply_refund": frozenset({"mutating"}),
+    "search_knowledge": frozenset(),
+    "list_user_orders": frozenset(),
+    "recall_user_memory": frozenset(),
+    # 写入长期记忆并落盘(ltm.save())+ 重建 FTS 索引,是真实的状态变更。
+    "save_user_memory": frozenset({"mutating"}),
+    "load_skill": frozenset(),
+    "read_skill_file": frozenset(),
+    "read_tool_result": frozenset(),
+    "change_address": frozenset({"mutating"}),
+    "cancel_order": frozenset({"mutating"}),
+    # expedite_shipping/issue_invoice 当前实现只读订单后组装文案返回,未落任何
+    # 表(参见 order_ops.py 对应函数与其"只读"注释)——按当前代码是非 mutating。
+    # 若未来接了真实的仓库加急通道/开票系统,需要把它们挪进 "mutating"。
+    "expedite_shipping": frozenset(),
+    "issue_invoice": frozenset(),
+    "query_coupons": frozenset(),
+    "shop_overview": frozenset({"seller_only"}),
+    "product_diagnostics": frozenset({"seller_only"}),
+    "service_quality": frozenset({"seller_only"}),
+    "anomaly_scan": frozenset({"seller_only"}),
+    "find_opportunities": frozenset({"seller_only"}),
+    # draft_outreach 两条标签都占:它落一行草稿到 DB(mutating),而且只服务
+    # 营销 Agent 这个卖家侧角色(seller_only)——买家画像绝不该拥有它。
+    "draft_outreach": frozenset({"mutating", "seller_only"}),
+    "list_outreach_drafts": frozenset({"seller_only"}),
+    # bump_bargain_state 推进议价轮次并落库,是真实的状态变更;但它服务的是
+    # 买家侧议价流程,不带 seller_only。
+    "negotiate_price": frozenset({"mutating"}),
+}
+
+# 会改变持久状态/产生落地效果的注册工具(见上方 TOOL_TRAITS 说明)。
+MUTATING_TOOLS: frozenset[str] = frozenset(
+    name for name, traits in TOOL_TRAITS.items() if "mutating" in traits
+)
+
+# 只服务卖家侧、买家画像绝不能拿到的注册工具。
+SELLER_ONLY_TOOLS: frozenset[str] = frozenset(
+    name for name, traits in TOOL_TRAITS.items() if "seller_only" in traits
+)
+
+# 买家域的写工具:mutating 但不 seller_only。draft_outreach 虽是 mutating,
+# 但它是营销 Agent(卖家侧)专属的落草稿动作,不属于"买家写工具"这条边界——
+# 营销 Agent 拥有它是设计如此,不是越界;卖家画像该防的是碰到 apply_refund/
+# cancel_order 这类买家域写工具,不是任何 mutating 工具。
+BUYER_WRITE_TOOLS: frozenset[str] = MUTATING_TOOLS - SELLER_ONLY_TOOLS
+
+
 def execute_tool(name: str, arguments: dict) -> str:
     """根据工具名称分发执行，返回 JSON 字符串结果。写工具带幂等保护(R6)。"""
     func = _TOOL_MAP.get(name)
