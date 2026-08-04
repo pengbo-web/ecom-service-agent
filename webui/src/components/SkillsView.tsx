@@ -29,20 +29,27 @@ export function SkillsView() {
   const [data, setData] = useState<SkillsOverview | null>(null);
   const [err, setErr] = useState<string>("");
   const [upResult, setUpResult] = useState<SkillUploadResult | null>(null);
+  // 上传失败要单独展示在上传卡片里:复用顶部那个 err 会渲染成"读取失败",
+  // 指向的是总览拉取失败,把人引到完全错误的方向。
+  const [upErr, setUpErr] = useState("");
   const [busy, setBusy] = useState(false);
 
-  async function onPickBundle(file: File | null) {
+  async function onPickBundle(file: File | null, input?: HTMLInputElement) {
     if (!file) return;
     setBusy(true);
     setUpResult(null);
+    setUpErr("");
     try {
       const result = await uploadSkillBundle(file);
       setUpResult(result);
       if (result.accepted) await load();   // 候选列表刷新出新条目
     } catch (e) {
-      setErr(String(e));
+      // 校验不通过走的是 200 + accepted:false,能进这里的是网络/鉴权/体积超限
+      setUpErr(`上传请求失败（网络、鉴权或体积超限）：${String(e)}`);
     } finally {
       setBusy(false);
+      // 清空 input:否则改好文件后再选**同名**文件不会触发 onChange,界面像没反应
+      if (input) input.value = "";
     }
   }
 
@@ -159,9 +166,10 @@ export function SkillsView() {
               上传只会落到<b>待审候选</b>，并跑与自动生成候选相同的校验与风险分级，<b>不会直接上线</b>。
             </div>
             <input type="file" accept=".zip,.md,.markdown,.txt" disabled={busy}
-              onChange={(e) => onPickBundle(e.target.files?.[0] || null)}
+              onChange={(e) => onPickBundle(e.target.files?.[0] || null, e.currentTarget)}
               className="text-xs" />
             {busy && <div className="text-xs text-muted-foreground">上传中…</div>}
+            {upErr && <div className="text-xs text-destructive">⚠️ {upErr}</div>}
             {upResult && (upResult.accepted ? (
               <div className="text-xs text-emerald-600 dark:text-emerald-400">
                 ✅ 已收为候选 <b>{upResult.name}</b>
