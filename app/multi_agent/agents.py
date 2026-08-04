@@ -44,3 +44,31 @@ AGENT_CONFIGS = {
         },
     },
 }
+
+
+# ---- B 端(卖家)画像:与买家画像结构一致,但工具子集完全不相交 ----
+from app.prompts.seller_agents import ANALYST_PROMPT, GROWTH_PROMPT
+
+# 卖家侧的公共工具:知识库 + skill 体系(不含任何买家记忆/买家写动作)
+_SELLER_COMMON_TOOLS = {
+    "search_knowledge", "load_skill", "read_skill_file", "read_tool_result",
+}
+
+SELLER_AGENT_CONFIGS = {
+    "analyst": {
+        "name": "参谋-小策",
+        "prompt": ANALYST_PROMPT,
+        "tools": _SELLER_COMMON_TOOLS | {
+            "shop_overview", "product_diagnostics", "service_quality", "anomaly_scan",
+        },
+    },
+    "growth": {
+        "name": "增长-小拓",
+        "prompt": GROWTH_PROMPT,
+        "tools": _SELLER_COMMON_TOOLS | {
+            "find_opportunities", "draft_outreach", "list_outreach_drafts",
+            # 增长也要看经营面才能判断值不值得推
+            "shop_overview", "product_diagnostics",
+        },
+    },
+}
