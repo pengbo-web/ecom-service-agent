@@ -16,6 +16,11 @@
   ③ 把现行版本备份到 `_archive/<name>/<时间戳>/SKILL.md`。
 `--force` 只能跳过②(门禁),**不能**跳过①(校验)——编错工具名的候选永远不许上。
 
+`promote()` 另有一个仅供代码调用的 `block_on_high` 参数(CLI 不暴露):它是给
+**无人值守**调用方(`skill_watchdog`)用的关,`high`(碰钱/承诺类)档一律拒绝
+自动放行,必须靠人跑本 CLI(不传 `block_on_high`,默认 `False`)。人工路径的
+既有默认行为不变。
+
 用法:
   python -m app.scripts.promote_skill --list                    列出候选与校验结果
   python -m app.scripts.promote_skill <skill-name>              校验+门禁+转正
@@ -37,8 +42,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.agent.skills import risk as risk_mod  # noqa: E402
 from app.agent.skills.gate import is_safe_skill_name  # noqa: E402
-from app.agent.skills.tree_text import classify_tree_risk, validate_skill_tree  # noqa: E402
+from app.agent.skills.tree_text import (  # noqa: E402
+    classify_tree_risk,
+    has_escaping_symlink,
+    validate_skill_tree,
+)
 from app.utils.console import enable_utf8_stdout  # noqa: E402
 
 DEFINITIONS_DIR = "app/agent/skills/definitions"
@@ -174,16 +184,45 @@ def backup_current(definitions_dir: str, skill_name: str, archive_dir: str,
     return dest_dir / "SKILL.md"
 
 
+def _snapshot_path(definitions_dir: str, skill_name: str) -> Path:
+    """算出某个候选的快照会落在哪(`_snapshot_candidate` 内部用的是同一条公式)。
+
+    独立成一个函数是因为 `promote()` 需要在调用 `_snapshot_candidate` **之前**
+    就知道这个路径 —— 这样即使快照函数本身中途炸掉(比如 copytree 抛出时快照
+    目录已经落了半棵树),`promote()` 的 `finally` 依然知道该清理哪里,不必依赖
+    函数正常返回值。
+    """
+    return Path(definitions_dir) / "_swap" / (skill_name + ".snapshot")
+
+
 def _snapshot_candidate(candidate_dir: Path, definitions_dir: str, skill_name: str) -> Path:
     """把候选目录整棵树快照到 `<definitions>/_swap/<name>.snapshot/`,返回快照路径。
 
     放在 `_swap` 下而不是临时目录:与正式目录同卷,后续 `_replace_tree` 的 copytree
     才不会退化成跨卷复制;而 `_swap` 对 _discover / list_candidates 的隐身性质见
     `_replace_tree` 的 docstring(`.snapshot` 与 `.staging`/`.retired` 三者不重名)。
+
+    **符号链接逃逸 = 拒绝快照(fail-closed)**:`read_skill_tree`/`classify_tree_risk`
+    刻意不把解析后逃出候选目录的文件纳入审核面(模型经 loader 也读不到它)——但
+    `shutil.copytree` 默认会**解引用**符号链接,把逃逸目标的内容原样当成普通文件
+    复制进快照,而不是复制符号链接本身。这样判档时"看不到"的字节,装机时却会
+    被原样搬进正式目录:候选目录外任意一份磁盘文件(比如系统配置、其他技能的
+    未公开草稿)都能通过一个符号链接被"洗"成审核通过的技能内容。两个可选修法
+    (二选一,这里选前者):
+      a) 发现逃逸符号链接就直接拒绝快照(本实现);
+      b) 用 `copytree(..., symlinks=True)` 保留符号链接本身,不解引用。
+    选 a 而不是 b:b 会把一个真实指向候选目录之外的符号链接对象原样装进正式
+    目录——虽然 `loader.read_skill_file`/`list_skill_files` 现在会因为解析后越界
+    而拒绝读它,但这依赖"以后没有代码路径会绕过那条解析检查"这个假设一直成立;
+    a 则是从根上不让这种候选转正,逼一个人去把候选目录本身修干净(去掉逃逸链接
+    或把内容改成候选目录内部的普通文件),不依赖任何下游代码永远做对。
     """
-    swap = Path(definitions_dir) / "_swap"
-    swap.mkdir(parents=True, exist_ok=True)
-    snapshot = swap / (skill_name + ".snapshot")
+    if has_escaping_symlink(candidate_dir):
+        raise OSError("候选目录内存在解析后逃出目录的符号链接(审核面看不到,但 "
+                      "copytree 会把目标内容原样复制进去),拒绝快照转正")
+
+    snapshot = _snapshot_path(definitions_dir, skill_name)
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
     if snapshot.exists():
         shutil.rmtree(snapshot)
     shutil.copytree(candidate_dir, snapshot)
@@ -191,8 +230,9 @@ def _snapshot_candidate(candidate_dir: Path, definitions_dir: str, skill_name: s
 
 
 def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_dir: str,
-            gate_result: dict | None, force: bool, timestamp: str) -> dict:
-    """把候选转正:快照 → 校验 → 门禁 → 备份 → 写正式目录。
+            gate_result: dict | None, force: bool, timestamp: str,
+            *, block_on_high: bool = False) -> dict:
+    """把候选转正:快照 → 校验 → 门禁 → (可选)风险门 → 备份 → 写正式目录。
 
     返回 `{"promoted", "reason", "backup", "risk"}`。
     任一关卡不过都不写正式目录(force 只放行门禁,不放行校验)。
@@ -201,11 +241,18 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
     copytree(耗时) → _replace_tree 再从磁盘重读候选目录"。校验过的字节与最终装上
     线的字节之间隔着一整段可写窗口 —— 而 `POST /api/admin/skills/upload` 现在能从
     网页并发替换那个候选目录。先把候选整棵树快照下来,**校验、判档、安装全部只认
-    这一份快照**,TOCTOU 就在构造上消失了。快照在所有退出路径上都会被清掉。
+    这一份快照**,TOCTOU 就在构造上消失了。快照路径由 `_snapshot_path` 提前算出
+    (不依赖 `_snapshot_candidate` 正常返回),因此下面唯一的 `finally` 在所有退出
+    路径上都能清到它——包括 `_snapshot_candidate` 自己中途失败、已经落了半棵树
+    的情形(修复前 `except OSError` 分支直接 return,不走任何 `finally`,那半棵
+    树会一直留在 `_swap/` 下)。
 
-    `risk` 按快照的**整棵树**判档(含附带资料)并原样返回,不在此处拦截:高危档的
-    含义是"必须由人来放行",而人跑 `promote_skill <name>` 正是那个放行动作;拦住
-    自动化的地方在 skill_watchdog(它转正前会自己再判一次档)。
+    `risk` 按快照的**整棵树**判档(含附带资料)。默认 `block_on_high=False`:
+    高危档的含义是"必须由人来放行",而人跑 `promote_skill <name>` 正是那个放行
+    动作,所以人工路径默认不拦、只如实报出 `risk`。`block_on_high=True` 是给
+    **无人值守**的调用方(`skill_watchdog`)用的关:它对**这份快照**判档,而
+    快照就是即将被装上线的那份字节本身——判档看到的与装机装的是同一份内容,
+    不会再有"看的是一份、装的是另一份"的 TOCTOU 窗口。
     """
     if not is_safe_skill_name(skill_name):
         return {"promoted": False, "reason": f"非法 skill 名,拒绝操作: {skill_name!r}",
@@ -216,13 +263,14 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
         return {"promoted": False, "reason": f"候选不存在: {candidate}",
                 "backup": None, "risk": None}
 
+    snapshot = _snapshot_path(definitions_dir, skill_name)
     try:
-        snapshot = _snapshot_candidate(candidate.parent, definitions_dir, skill_name)
-    except OSError as exc:
-        return {"promoted": False, "reason": f"候选快照失败,拒绝转正: {exc}",
-                "backup": None, "risk": None}
+        try:
+            _snapshot_candidate(candidate.parent, definitions_dir, skill_name)
+        except OSError as exc:
+            return {"promoted": False, "reason": f"候选快照失败,拒绝转正: {exc}",
+                    "backup": None, "risk": None}
 
-    try:
         report = validate_skill_tree(snapshot)
         if not report["valid"]:
             return {"promoted": False,
@@ -246,6 +294,12 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
 
         is_new = not (Path(definitions_dir) / skill_name / "SKILL.md").exists()
         risk = classify_tree_risk(snapshot, is_new_skill=is_new, tree=report["tree"])
+
+        if block_on_high and risk_mod.promotion_policy(risk) == risk_mod.POLICY_MANUAL:
+            return {"promoted": False,
+                    "reason": f"整棵技能树判档为高风险({risk}),自动化转正拒绝放行,"
+                              f"需人工执行: python -m app.scripts.promote_skill {skill_name}",
+                    "backup": None, "risk": risk}
 
         backup = backup_current(definitions_dir, skill_name, archive_dir, timestamp)
 

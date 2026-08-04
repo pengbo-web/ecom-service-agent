@@ -133,6 +133,14 @@ def _process_skill_upload(raw: bytes, filename: str) -> dict:
             return _reject(report["errors"], report["unknown_tools"])
 
         name = report["name"]
+        # 残留竞态(已知、按要求不加锁,记在这里而不是装作不存在):`_skill_canary_block`
+        # 在这一行查过"没有活跃灰度",`ps._replace_tree` 要再等几行(整树 copytree
+        # 之后)才真正写盘。如果 `skill_watchdog --start` 恰好在这几行中间对同一个
+        # 技能开了灰度,这次上传仍会覆盖候选目录、灰度看到的会是被换掉的内容。
+        # 窗口只有一次内存校验 + 一次同卷 copytree 的时长,比 C1 关掉的那个
+        # "整段请求处理期间"窗口小两三个数量级,而且触发条件极窄(必须与
+        # --start 命中同一个技能名的同一瞬间);与 skill_watchdog.py 里
+        # classify→db.start_canary 那处同级残留窗口一样,接受它而不是加锁。
         blocked = _skill_canary_block(name)
         if blocked:
             return _reject([blocked])
@@ -886,7 +894,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
         from app.agent.skills import doc_distill as dd
         from app.agent.skills.risk import promotion_policy
-        from app.agent.skills.tree_text import classify_tree_risk
+        from app.agent.skills.tree_text import classify_tree_risk, validate_skill_tree
         from app.scripts import promote_skill as ps
 
         doc = (req.doc_text or "").strip()
@@ -924,9 +932,19 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 return {"created": False, "name": name, "risk": None, "policy": None,
                         "errors": [blocked], "truncated": truncated}
 
+            # 校验 + 判档都看整棵树(与上传端点同口径)。蒸馏产物眼下只有一份
+            # SKILL.md、`distill_from_doc` 内部也已经用 `validate_candidate` 校验
+            # 过同一份正文,这里再校验一遍在今天看来是重复的——但上传端点两者都跑,
+            # 蒸馏端点只跑判档不跑校验,正是终审点名的"同一件事两套标准";不校验
+            # 一次就不该只因为"产物目前恰好没有附件"而心存侥幸。
+            tree_report = validate_skill_tree(staging / name)
+            if not tree_report["valid"]:
+                return {"created": False, "name": name, "risk": None, "policy": None,
+                        "errors": tree_report["errors"], "truncated": truncated}
+
             is_new = not (Path(ps.DEFINITIONS_DIR) / name / "SKILL.md").exists()
-            # 判档看整棵树(与上传端点同口径;蒸馏产物眼下没有附件,但口径不该有两套)
-            risk = classify_tree_risk(staging / name, is_new_skill=is_new)
+            risk = classify_tree_risk(staging / name, is_new_skill=is_new,
+                                      tree=tree_report["tree"])
 
             ps._replace_tree(staging / name, Path(ps.CANDIDATES_DIR) / name)
             return {"created": True, "name": name, "risk": risk,

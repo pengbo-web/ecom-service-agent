@@ -85,6 +85,14 @@ def start_for_candidate(skill_name: str, definitions_dir: str, candidates_dir: s
                           f"python -m app.scripts.promote_skill {skill_name}"}
 
     if policy == risk_mod.POLICY_CANARY_AB:
+        # 残留竞态(已知、按要求不加锁,记在这里而不是装作不存在):判档在这一行
+        # 之上已经做完,`db.start_canary` 在这一行才登记。如果候选目录在这两行
+        # 之间被并发的 synthesize_skills/improve_skill 原地改写,登记的灰度百分比
+        # 会来自"判档时那份"而不是"实际开始服务的那份"。窗口远比本次修复关掉的
+        # 转正 TOCTOU(check_canaries→promote 之间那段)小得多——只有判档和一次
+        # DB 写入之间的间隙,没有磁盘 IO/网络 IO——接受它而不是加锁,理由与
+        # 上传端点那处同级残留竞态一致(见 app/api/app.py `_process_skill_upload`
+        # 里 `_skill_canary_block` 调用前的注释)。
         db.start_canary(skill_name, str(candidate), risk_mod.CANARY_PERCENT, risk, policy)
         return {"risk": risk, "policy": policy, "action": "canary_started",
                 "detail": f"已开 {risk_mod.CANARY_PERCENT}% 灰度,等 --check 收口"}
@@ -105,12 +113,16 @@ def start_for_candidate(skill_name: str, definitions_dir: str, candidates_dir: s
         return {"risk": risk, "policy": policy, "action": "gate_failed",
                 "detail": gate_result["reason"]}
 
+    # block_on_high=True:门禁用的是上面 gate_candidate 那次判档时读到的候选,
+    # 而 promote() 真正装机前会对**自己重新快照的那份字节**再判一次档——
+    # 这里同样是无人值守的自动化路径,不该比 check_canaries 的转正宽松。
     promoted = promote(skill_name, definitions_dir, candidates_dir, archive_dir,
-                       gate_result=gate_result, force=False, timestamp=_now_stamp())
+                       gate_result=gate_result, force=False, timestamp=_now_stamp(),
+                       block_on_high=True)
     if promoted["promoted"]:
         # percent=0:已转正进正式目录,不需替换正文,只登记以便 --check 做绝对值监控
         db.start_canary(skill_name, str(candidate), 0, risk, policy)
-    return {"risk": risk, "policy": policy,
+    return {"risk": promoted.get("risk") or risk, "policy": policy,
             "action": "gated" if promoted["promoted"] else "promote_failed",
             "detail": promoted["reason"]}
 
@@ -171,35 +183,36 @@ def check_canaries(definitions_dir: str, candidates_dir: str, archive_dir: str,
 
         if verdict["decision"] == DECISION_PROMOTE:
             if is_ab:
-                # 转正前**重新判档**:开灰度后候选文件可能被 improve_skill 原地覆盖,
-                # 变成动钱内容。只在开灰度时判过一次是 TOCTOU,必须在真正上线前再判。
-                cand_dir = Path(candidates_dir) / skill_name
-                try:
-                    cand_dir.joinpath("SKILL.md").read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError) as exc:
-                    entry["action"] = "promote_blocked"
-                    entry["detail"] = f"转正前读不到候选文件,拒绝上线: {exc}"
-                    results.append(entry)
-                    continue
-                now_is_new = not (Path(definitions_dir) / skill_name / "SKILL.md").exists()
-                # 整棵树重判:灰度期间被塞进来的不只是新正文,也可能是一份新附件
-                now_risk = classify_tree_risk(cand_dir, is_new_skill=now_is_new)
-                if risk_mod.promotion_policy(now_risk) == risk_mod.POLICY_MANUAL:
-                    entry["action"] = "promote_blocked_risk_changed"
-                    entry["detail"] = (
-                        f"候选在灰度期间变成高危档({now_risk}),拒绝自动上线,需人工处理:"
-                        f"python -m app.scripts.promote_skill {skill_name}")
-                    db.finish_canary(skill_name, "rolled_back")
-                    results.append(entry)
-                    continue
-                # 灰度实战胜出 → 转正(force:实战证据强于离线门禁,校验仍会跑)
+                # 灰度实战胜出 → 转正。**不再自己先读一遍候选目录重新判档**:
+                # 那次预判(读 cand_dir → classify_tree_risk(cand_dir))和下面
+                # promote() 内部真正快照之间还是隔着一段可写窗口——预判本身就是
+                # 一次新的 TOCTOU 读,只是把窗口挪了个位置,并没有关掉它。
+                # `promote(..., block_on_high=True)` 才是真正关掉窗口的地方:它
+                # 对**自己快照下来的那份字节**判档,风险结果只从这里的返回值读
+                # (`promoted["risk"]`),不再有"谁读的字节"和"谁装的字节"不一致
+                # 的可能。force=True:灰度实战数据比离线评测是更强的证据,但校验
+                # 与(block_on_high 的)风险门都照跑,不因为 force 被放行。
                 promoted = promote(skill_name, definitions_dir, candidates_dir, archive_dir,
-                                   gate_result=None, force=True, timestamp=_now_stamp())
-                entry["action"] = "promoted" if promoted["promoted"] else "promote_failed"
-                entry["detail"] = promoted["reason"]
+                                   gate_result=None, force=True, block_on_high=True,
+                                   timestamp=_now_stamp())
+                risk_now = promoted.get("risk")
+                entry["risk"] = risk_now
                 if promoted["promoted"]:
+                    entry["action"] = "promoted"
+                    entry["detail"] = promoted["reason"]
                     db.finish_canary(skill_name, "promoted")
-                # 转正失败 → 灰度保持活跃,下轮再判(不留"已转正"的假记录)
+                elif (risk_now is not None
+                      and risk_mod.promotion_policy(risk_now) == risk_mod.POLICY_MANUAL):
+                    # block_on_high 拦下来的:候选在灰度期间(或本轮判档与安装之间
+                    # 那一瞬)变成了高危档——必须显式升级为"需人工",不能和"门禁
+                    # /校验失败"之类的普通失败混成一条谁都看不出该干什么的日志。
+                    entry["action"] = "promote_blocked_risk_changed"
+                    entry["detail"] = promoted["reason"]
+                    db.finish_canary(skill_name, "rolled_back")
+                else:
+                    entry["action"] = "promote_failed"
+                    entry["detail"] = promoted["reason"]
+                # 转正失败(非风险拦截)→ 灰度保持活跃,下轮再判(不留"已转正"的假记录)
             else:
                 entry["action"] = "watch_passed"   # 绝对值达标,结束监控
                 db.finish_canary(skill_name, "promoted")
