@@ -38,3 +38,42 @@ describe("skills overview api", () => {
     expect(d.candidates[1].policy).toBeNull();
   });
 });
+
+describe("upload skill bundle api", () => {
+  beforeEach(() => { localStorage.clear(); });
+
+  it("上传成功返回名字/风险档/包内文件", async () => {
+    const { uploadSkillBundle } = await import("@/lib/api");
+    // 显式标注参数,使 mock.calls 推断为 [url, init] 二元组(否则严格模式下 calls[0][1] 越界报错)
+    const spy = vi.fn(async (_url: string, _init: RequestInit) => ({
+      ok: true,
+      json: async () => ({ accepted: true, name: "upload-demo", replaced: false,
+                           risk: "low", policy: "canary_ab",
+                           files: ["references/policy.md"], errors: [], unknown_tools: [] }),
+    }));
+    vi.stubGlobal("fetch", spy);
+
+    const f = new File(["dummy"], "skill.zip", { type: "application/zip" });
+    const r = await uploadSkillBundle(f);
+
+    expect(r.accepted).toBe(true);
+    expect(r.name).toBe("upload-demo");
+    expect(r.files).toEqual(["references/policy.md"]);
+    // 必须以 FormData 提交(后端是 multipart),不能是 JSON
+    expect(spy.mock.calls[0][1].body).toBeInstanceOf(FormData);
+  });
+
+  it("校验未过时把错误带回前端", async () => {
+    const { uploadSkillBundle } = await import("@/lib/api");
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ accepted: false, name: "", replaced: false, risk: null,
+                           policy: null, files: [],
+                           errors: ["引用了未知工具: order_list"],
+                           unknown_tools: ["order_list"] }),
+    })));
+    const r = await uploadSkillBundle(new File(["x"], "SKILL.md"));
+    expect(r.accepted).toBe(false);
+    expect(r.errors[0]).toContain("order_list");
+  });
+});

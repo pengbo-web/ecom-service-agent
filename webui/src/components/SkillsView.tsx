@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { getSkillsOverview, type SkillsOverview } from "@/lib/api";
+import { getSkillsOverview, uploadSkillBundle,
+  type SkillUploadResult, type SkillsOverview } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RotateCcw } from "lucide-react";
@@ -27,6 +28,23 @@ function rate(counts: Record<string, number>): string {
 export function SkillsView() {
   const [data, setData] = useState<SkillsOverview | null>(null);
   const [err, setErr] = useState<string>("");
+  const [upResult, setUpResult] = useState<SkillUploadResult | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function onPickBundle(file: File | null) {
+    if (!file) return;
+    setBusy(true);
+    setUpResult(null);
+    try {
+      const result = await uploadSkillBundle(file);
+      setUpResult(result);
+      if (result.accepted) await load();   // 候选列表刷新出新条目
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function load() {
     try { setData(await getSkillsOverview()); setErr(""); }
@@ -129,6 +147,34 @@ export function SkillsView() {
               <div className="text-sm text-muted-foreground">当前没有灰度在跑</div>
             )}
           </div>
+        </section>
+
+        {/* 上传技能包 */}
+        <section>
+          <h3 className="mb-2 text-sm font-semibold">上传技能包</h3>
+          <Card className="flex flex-col gap-2 p-4 text-sm">
+            <div className="text-muted-foreground">
+              技能是一个<b>目录</b>（<code>SKILL.md</code> + 可选的 <code>references/</code> 参考资料），
+              所以用 <b>.zip</b> 上传；只有一份说明时也可直接选 <code>.md</code>。
+              上传只会落到<b>待审候选</b>，并跑与自动生成候选相同的校验与风险分级，<b>不会直接上线</b>。
+            </div>
+            <input type="file" accept=".zip,.md,.markdown,.txt" disabled={busy}
+              onChange={(e) => onPickBundle(e.target.files?.[0] || null)}
+              className="text-xs" />
+            {busy && <div className="text-xs text-muted-foreground">上传中…</div>}
+            {upResult && (upResult.accepted ? (
+              <div className="text-xs text-emerald-600 dark:text-emerald-400">
+                ✅ 已收为候选 <b>{upResult.name}</b>
+                {upResult.replaced ? "（覆盖了同名旧候选）" : ""} · 风险 {upResult.risk} ·
+                放行 {upResult.policy}
+                {upResult.files.length > 0 && <> · 附带 {upResult.files.length} 份资料</>}
+              </div>
+            ) : (
+              <div className="text-xs text-destructive">
+                ❌ 未通过：{upResult.errors.join("；")}
+              </div>
+            ))}
+          </Card>
         </section>
       </div>
     </div>

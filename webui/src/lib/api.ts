@@ -204,3 +204,19 @@ export type SkillsOverview = {
 export function getSkillsOverview(): Promise<SkillsOverview> {
   return getJSON<SkillsOverview>("/api/admin/skills");
 }
+
+export type SkillUploadResult = {
+  accepted: boolean; name: string; replaced: boolean;
+  risk: string | null; policy: string | null;
+  files: string[]; errors: string[]; unknown_tools: string[];
+};
+
+/** 上传技能包(.zip)或单个 SKILL.md 作为候选(后端只写 _candidates 并跑同一套校验)。 */
+export async function uploadSkillBundle(file: File): Promise<SkillUploadResult> {
+  const form = new FormData();
+  form.append("file", file);
+  // 注意:不要手动设 Content-Type,交给浏览器带上 multipart 边界
+  const r = await adminFetch("/api/admin/skills/upload", { method: "POST", body: form });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
