@@ -119,13 +119,16 @@ def _archive_rejected(skill_name: str, candidates_dir: str, archive_dir: str) ->
     保留以便复盘,同时确保它不再被 list_candidates 选中重开灰度。移动失败返回 None
     (不抛:收口流程不该因归档失败而中断)。
     """
-    src = Path(candidates_dir) / skill_name / "SKILL.md"
-    if not src.exists():
+    src_dir = Path(candidates_dir) / skill_name
+    if not (src_dir / "SKILL.md").exists():
         return None
     try:
         dest_dir = Path(archive_dir) / skill_name / f"rejected-{_now_stamp()}"
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(src), str(dest_dir / "SKILL.md"))
+        dest_dir.parent.mkdir(parents=True, exist_ok=True)
+        if dest_dir.exists():
+            shutil.rmtree(dest_dir)
+        # 整目录搬走:候选可能带参考资料,只搬 SKILL.md 会在候选区留下孤儿附件
+        shutil.move(str(src_dir), str(dest_dir))
         return str(dest_dir / "SKILL.md")
     except OSError:
         return None

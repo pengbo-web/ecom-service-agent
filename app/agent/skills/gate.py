@@ -47,14 +47,14 @@ def build_shadow_dir(definitions_dir: str, skill_name: str,
         skill_file = child / "SKILL.md"
         if not skill_file.exists():
             continue
-        target = dest / child.name
-        target.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(skill_file, target / "SKILL.md")
+        # 整目录复制:技能可带参考资料,影子集缺了附件等于在评一个残缺技能
+        shutil.copytree(child, dest / child.name)
 
     # 候选覆盖/新增目标 skill(新建 skill 时正式目录里还没有它)
     target = dest / skill_name
-    target.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(Path(candidate_path), target / "SKILL.md")
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(Path(candidate_path).parent, target)
     return dest
 
 

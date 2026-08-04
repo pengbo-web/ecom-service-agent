@@ -49,13 +49,37 @@ def _now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def _atomic_write(dest: Path, content: str) -> None:
-    """先写临时文件再原子替换:半截写入会让 frontmatter 解析失败,而 SkillManager
-    对解析失败的 skill 是**静默跳过** —— 线上会直接少一个 skill 且无任何报错。
-    本流程由看门狗无人值守执行,必须原子。"""
-    tmp = dest.with_name(dest.name + ".tmp")
-    tmp.write_text(content, encoding="utf-8")
-    tmp.replace(dest)
+def _replace_tree(src: Path, dest: Path) -> None:
+    """用 src 目录的内容整体替换 dest 目录(技能是**目录**,不止一个 SKILL.md)。
+
+    先把新内容复制到同级 .staging,再**两次 rename**换上:旧目录先改名让位,
+    新目录立刻顶上,最后才慢慢删旧。这样"目标目录不存在"的窗口只有两次 rename
+    之间的一瞬,而不是整个 rmtree 的时长 —— 这点很重要,因为本函数会由看门狗
+    无人值守调用,而 SkillManager 对读不到的技能是**静默跳过**(线上会直接少一个
+    技能且无任何报错)。
+
+    为什么不逐文件覆盖:那会留下"新 SKILL.md + 旧参考资料"的半新半旧状态,
+    SKILL.md 会指向已不存在的文件,比短暂窗口更糟。
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    staging = dest.with_name(dest.name + ".staging")
+    retired = dest.with_name(dest.name + ".retired")
+    for leftover in (staging, retired):
+        if leftover.exists():
+            shutil.rmtree(leftover)
+
+    shutil.copytree(src, staging)
+    had_old = dest.exists()
+    if had_old:
+        dest.rename(retired)          # 让位(瞬时)
+    try:
+        staging.rename(dest)          # 顶上(瞬时)
+    except OSError:
+        if had_old:                   # 顶上失败就把旧的放回去,别让线上少一个技能
+            retired.rename(dest)
+        raise
+    if had_old:
+        shutil.rmtree(retired, ignore_errors=True)
 
 
 def list_candidates(candidates_dir: str, definitions_dir: str) -> list[dict]:
@@ -100,21 +124,23 @@ def list_candidates(candidates_dir: str, definitions_dir: str) -> list[dict]:
 
 def backup_current(definitions_dir: str, skill_name: str, archive_dir: str,
                    timestamp: str) -> Path | None:
-    """把现行版本备份到 archive_dir/<name>/<timestamp>/SKILL.md。
+    """把现行技能**整个目录**备份到 archive_dir/<name>/<timestamp>/。
 
-    正式目录尚无该 skill(全新候选)→ 无需备份,返回 None。
+    技能是目录(可带 references 等参考资料),只备份 SKILL.md 会让回滚丢附件。
+    正式目录尚无该技能(全新候选)→ 无需备份,返回 None。
     """
     if not is_safe_skill_name(skill_name):
         return None
-    live = Path(definitions_dir) / skill_name / "SKILL.md"
-    if not live.exists():
+    live_dir = Path(definitions_dir) / skill_name
+    if not (live_dir / "SKILL.md").exists():
         return None
 
     dest_dir = Path(archive_dir) / skill_name / timestamp
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / "SKILL.md"
-    shutil.copyfile(live, dest)
-    return dest
+    if dest_dir.exists():
+        shutil.rmtree(dest_dir)
+    dest_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(live_dir, dest_dir)
+    return dest_dir / "SKILL.md"
 
 
 def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_dir: str,
@@ -153,9 +179,8 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
 
     backup = backup_current(definitions_dir, skill_name, archive_dir, timestamp)
 
-    dest_dir = Path(definitions_dir) / skill_name
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_write(dest_dir / "SKILL.md", content)
+    # 整目录替换:候选可能带 references 等附带资料,只写 SKILL.md 会让它指向不存在的文件
+    _replace_tree(candidate.parent, Path(definitions_dir) / skill_name)
 
     return {"promoted": True,
             "reason": "已转正" + ("(--force 跳过门禁)" if force else ""),
@@ -179,10 +204,8 @@ def rollback(skill_name: str, definitions_dir: str, archive_dir: str) -> dict:
         return {"rolled_back": False, "reason": f"无备份可回滚: {skill_archive}", "restored_from": None}
 
     newest = stamps[-1]
-    dest_dir = Path(definitions_dir) / skill_name
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    _atomic_write(dest_dir / "SKILL.md",
-                  (newest / "SKILL.md").read_text(encoding="utf-8"))
+    # 整目录还原:备份里含当时的全部附带资料,只还原 SKILL.md 会留下上一版的残余附件
+    _replace_tree(newest, Path(definitions_dir) / skill_name)
     return {"rolled_back": True, "reason": f"已回滚到 {newest.name}",
             "restored_from": str(newest / "SKILL.md")}
 
