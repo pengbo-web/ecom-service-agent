@@ -1,9 +1,9 @@
 import * as React from "react";
-import { MessageSquare, LayoutDashboard, Headset, FlaskConical, Brain, RotateCcw, ShoppingBag, ClipboardList, Sparkles } from "lucide-react";
+import { MessageSquare, LayoutDashboard, Headset, FlaskConical, Brain, RotateCcw, ShoppingBag, ClipboardList, Sparkles, BarChart3 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
-export type View = "shop" | "chat" | "orders" | "dash" | "seat" | "eval" | "mem" | "skills";
+export type View = "shop" | "chat" | "orders" | "dash" | "seat" | "eval" | "mem" | "skills" | "ops";
 
 const TABS: { v: View; icon: React.ReactNode; label: string }[] = [
   { v: "shop", icon: <ShoppingBag className="h-4 w-4" />, label: "商城" },
@@ -14,6 +14,7 @@ const TABS: { v: View; icon: React.ReactNode; label: string }[] = [
   { v: "eval", icon: <FlaskConical className="h-4 w-4" />, label: "评估" },
   { v: "mem", icon: <Brain className="h-4 w-4" />, label: "记忆" },
   { v: "skills", icon: <Sparkles className="h-4 w-4" />, label: "Skill" },
+  { v: "ops", icon: <BarChart3 className="h-4 w-4" />, label: "经营" },
 ];
 
 export function AppShell({ view, onView, onReset, children }: {

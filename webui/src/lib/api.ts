@@ -237,3 +237,44 @@ export async function distillSkillFromDoc(docText: string): Promise<SkillDistill
   if (!r.ok) throw new Error("HTTP " + r.status);
   return r.json();
 }
+
+// ---- 经营控制台(参谋侧:只读经营总览 + 异常清单 + 对话)----
+export type SellerAnomaly = {
+  kind: string; subject: string; subject_name?: string;
+  value: number; threshold: number; detail?: Record<string, unknown>;
+};
+
+export type SellerOverview = {
+  overview: {
+    success: boolean; window_days: number; orders: number; gmv: number;
+    avg_order_value: number; refunds: number; refund_rate: number;
+    cancels: number; cancel_rate: number; conversations: number;
+    orders_per_conversation: number;
+  };
+  products: { success: boolean; window_days: number; products: Array<{
+    sku: string; name: string; orders: number; revenue: number;
+    refunds: number; refund_rate: number; stock: number | null;
+    refund_reasons: Array<{ reason: string; count: number }>;
+  }> };
+  anomalies: SellerAnomaly[];
+};
+
+export type SellerChatReply = {
+  success: boolean; reply: string; agent: string; agent_key: string; session_id: string;
+};
+
+export async function getSellerOverview(windowDays = 7): Promise<SellerOverview> {
+  const r = await adminFetch(`/api/seller/overview?window_days=${windowDays}`);
+  if (!r.ok) throw new Error(`加载经营数据失败 (${r.status})`);
+  return r.json();
+}
+
+export async function sellerChat(sessionId: string, message: string): Promise<SellerChatReply> {
+  const r = await adminFetch("/api/seller/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, message }),
+  });
+  if (!r.ok) throw new Error(`参谋暂时不可用 (${r.status})`);
+  return r.json();
+}
