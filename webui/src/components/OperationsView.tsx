@@ -6,14 +6,6 @@ import { Card } from "@/components/ui/card";
 import { RotateCcw, Send } from "lucide-react";
 import { GrowthPanel } from "@/components/operations/GrowthPanel";
 
-// 模块级缓存(不是 state):App.tsx 按 view 条件渲染各 Tab,离开"经营"页会把
-// OperationsView 整个卸载,切回来是全新挂载,组件内 state 会清零。若只靠
-// state,刷新失败这类"旧数据+过期标记"的场景在离开再回来后就直接消失
-// (界面变回一片空白,店主会误读成"系统从没采集过数据",而不是"这次没
-// 刷新到最新值")。把上一次成功拉取的快照存在组件外,新挂载先拿它垫底。
-let cachedOverview: SellerOverview | null = null;
-let cachedWindowDays = 7;
-
 type ChatMsg = { role: "user" | "assistant"; text: string; agent?: string };
 
 const WINDOW_OPTIONS = [7, 14, 30];
@@ -33,14 +25,17 @@ function anomalyTone(value: number, threshold: number): string {
 }
 
 export function OperationsView() {
-  const [data, setData] = useState<SellerOverview | null>(cachedOverview);
+  const [data, setData] = useState<SellerOverview | null>(null);
   const [err, setErr] = useState("");
   // 刷新失败时下方仍是上一次成功拉取的旧数据。店主正是靠这个面板判断某项
   // 异常要不要处理,所以必须显式标出"这是过期数据",不能默默照常渲染
   // (与 SkillsView 同口径:stale 与 data 分开存,stale 为 true 时旧 data 保留不清空)。
   const [stale, setStale] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [windowDays, setWindowDays] = useState(cachedWindowDays);
+  const [windowDays, setWindowDays] = useState(7);
+  // 请求序号:窗口快速切换/连续刷新时,慢的旧响应不能覆盖快的新响应——
+  // 只有仍是"最新一次发起的请求"时,其结果才允许写入 state。
+  const reqIdRef = useRef(0);
 
   // 对话请求独立一套 busy/err:复用页面级 err 会把"参谋这轮答不上来"渲染成
   // "经营数据读取失败",把店主引到完全错误的方向(与 SkillsView 的
@@ -58,20 +53,21 @@ export function OperationsView() {
   const [tab, setTab] = useState<"diag" | "growth">("diag");
 
   async function load(days: number) {
+    const reqId = ++reqIdRef.current;
     setBusy(true);
     try {
       const d = await getSellerOverview(days);
-      cachedOverview = d;
-      cachedWindowDays = days;
+      if (reqId !== reqIdRef.current) return; // 更新的请求已发出,这次结果作废
       setData(d);
       setErr("");
       setStale(false);
     } catch (e) {
+      if (reqId !== reqIdRef.current) return; // 同上:过期请求的失败也不该覆盖当前状态
       // 旧 data 原样保留,只标 stale——绝不能让这次失败悄悄清空或替换成空壳数据。
       setErr(String(e));
       setStale(true);
     } finally {
-      setBusy(false);
+      if (reqId === reqIdRef.current) setBusy(false);
     }
   }
 
@@ -177,19 +173,22 @@ export function OperationsView() {
           </div>
         )}
 
-        {/* 关键指标:每张卡片都挂在同一个统计窗口下——脱离窗口的数字对店主没有意义 */}
+        {/* 关键指标:每张卡片各自标出自己的统计窗口——卡片一旦被单独截图/挪用/
+            滚动出上下文,脱离窗口的数字对店主就没有意义,不能只靠一个共享的
+            大标题一次性交代。 */}
         <section>
-          <h3 className="mb-2 text-sm font-semibold">
-            关键指标{windowLabel && `（${windowLabel}）`}
-          </h3>
+          <h3 className="mb-2 text-sm font-semibold">关键指标</h3>
           {!data && busy && <div className="text-sm text-muted-foreground">加载中…</div>}
           {!data && !busy && err && <div className="text-sm text-muted-foreground">暂无数据</div>}
           {metrics.length > 0 && (
             <div className={`grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5 ${stale ? "opacity-60" : ""}`}>
               {metrics.map((m) => (
-                <Card key={m.label} className="p-3">
+                <Card key={m.label} className="p-3" data-testid="metric-card">
                   <div className="text-xs text-muted-foreground">{m.label}</div>
                   <div className="mt-1 text-lg font-semibold">{m.value}</div>
+                  {windowLabel && (
+                    <div className="mt-1 text-[10px] text-muted-foreground">{windowLabel}</div>
+                  )}
                 </Card>
               ))}
             </div>
@@ -202,7 +201,7 @@ export function OperationsView() {
           <div className={`flex flex-col gap-2 ${stale ? "opacity-60" : ""}`}>
             {!data && busy && <div className="text-sm text-muted-foreground">加载中…</div>}
             {(data?.anomalies || []).map((a, i) => (
-              <Card key={`${a.kind}-${a.subject}-${i}`} className="p-3 text-sm">
+              <Card key={`${a.kind}-${a.subject}-${i}`} className="p-3 text-sm" data-testid="anomaly-row">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-medium">{a.subject_name || a.subject}</span>
                   <span className={anomalyTone(a.value, a.threshold)}>
