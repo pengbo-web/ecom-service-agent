@@ -78,6 +78,54 @@ ORDERS = {
         "carrier": None,
         "estimated_delivery": None,
     },
+    # ---- 以下三笔为 N4(评价体系)补充的已签收订单:让"评价"演示不止一个商品
+    # ----(此前只有 ORD-20240110-003 一笔 delivered,不够摆出差评 top 商品的对比)。
+    # 对应评价由 app/db/seed.py::_DEMO_REVIEWS 落库,评分故意有好有差。
+    "ORD-20240105-006": {
+        "order_id": "ORD-20240105-006",
+        "user": "小明",
+        "status": "delivered",
+        "items": [
+            {"name": "Nike Air Max 270 运动鞋", "sku": "SHOE-270-BK-42", "quantity": 1, "price": 899.00}
+        ],
+        "total": 899.00,
+        "created_at": "2024-01-05 09:00:00",
+        "shipped_at": "2024-01-06 08:00:00",
+        "tracking_number": "SF2233445566",
+        "carrier": "顺丰速运",
+        "estimated_delivery": "2024-01-08",
+        "delivered_at": "2024-01-08 10:00:00",
+    },
+    "ORD-20240108-007": {
+        "order_id": "ORD-20240108-007",
+        "user": "小红",
+        "status": "delivered",
+        "items": [
+            {"name": "Apple AirPods Pro 2", "sku": "ELEC-APP-002", "quantity": 1, "price": 1799.00}
+        ],
+        "total": 1799.00,
+        "created_at": "2024-01-08 11:00:00",
+        "shipped_at": "2024-01-09 09:00:00",
+        "tracking_number": "YT7788990011",
+        "carrier": "圆通速递",
+        "estimated_delivery": "2024-01-11",
+        "delivered_at": "2024-01-11 14:00:00",
+    },
+    "ORD-20240112-008": {
+        "order_id": "ORD-20240112-008",
+        "user": "阿杰",
+        "status": "delivered",
+        "items": [
+            {"name": "戴森 V15 吸尘器", "sku": "HOME-DYSON-V15", "quantity": 1, "price": 4299.00}
+        ],
+        "total": 4299.00,
+        "created_at": "2024-01-12 13:00:00",
+        "shipped_at": "2024-01-13 09:00:00",
+        "tracking_number": "JD1122334455",
+        "carrier": "京东物流",
+        "estimated_delivery": "2024-01-15",
+        "delivered_at": "2024-01-15 16:00:00",
+    },
 }
 
 PRODUCTS = {

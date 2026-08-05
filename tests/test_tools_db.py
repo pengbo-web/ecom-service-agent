@@ -47,12 +47,21 @@ def test_query_logistics():
     assert r["logistics"]["carrier"] == "顺丰速运"
 
 
-def test_list_user_orders():
+def test_list_user_orders_returns_every_seeded_order():
+    """auth 全局关闭时(见 conftest._force_local_session_backends)
+    list_user_orders 不做按用户过滤,应当原样覆盖 mock_data 里种下的每一笔订单。
+
+    比对 order_id **集合**而不是数量:数量断言是个魔法数字,每次往 mock_data
+    里加订单(如 N4 给"评价"演示补的几笔已签收订单)都得跟着手改这个数字,
+    还测不出"是不是那几笔"这个真正关心的行为。比对集合会随 mock_data 自动
+    更新期望,这条测试真正验证的性质是"没做用户过滤时,列表 = 全部种子订单"。
+    """
     from app.agent.tools.user_orders import list_user_orders
     from app.agent.tools.mock_data import ORDERS
     r = list_user_orders()
     assert r["success"] is True
-    assert r["count"] == len(ORDERS)
+    got_ids = {o["order_id"] for o in r["orders"]}
+    assert got_ids == set(ORDERS.keys())
 
 
 def test_apply_refund_mutates_db():

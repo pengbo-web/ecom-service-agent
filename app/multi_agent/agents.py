@@ -68,6 +68,9 @@ SELLER_AGENT_CONFIGS = {
         "prompt": ANALYST_PROMPT,
         "tools": _SELLER_COMMON_TOOLS | {
             "shop_overview", "product_diagnostics", "service_quality", "anomaly_scan",
+            # N4:评价洞察(全店均分/差评率 + 差评 top 商品与关键词)。只读、
+            # seller_only(见 registry.SELLER_ONLY_TOOLS),不出现在任何买家画像里。
+            "review_insights",
         },
     },
     "growth": {

@@ -25,9 +25,18 @@ def test_get_order_missing_returns_none(db):
     assert db.get_order("NOPE") is None
 
 
-def test_list_orders_count(db):
+def test_list_orders_returns_every_seeded_order(db):
+    """`list_orders()` 必须原样覆盖 mock_data 里种下的每一笔订单——不多不少。
+
+    直接比对 order_id **集合**,而不是数量:数量断言是个魔法数字,每次往
+    mock_data 里加一笔订单(如 N4 给"评价"演示补的几笔已签收订单)都得跟着手改
+    这个数字,而且改错了(比如手滑加错/漏加)测试也照样能过,因为它只关心
+    "个数对不对",不关心"是不是那几笔"。比对集合则会随 mock_data 自动更新
+    期望,还能真正验证返回的是"种了什么就原样能读回什么"这个行为本身。
+    """
     from app.agent.tools.mock_data import ORDERS
-    assert len(db.list_orders()) == len(ORDERS)
+    got_ids = {o["order_id"] for o in db.list_orders()}
+    assert got_ids == set(ORDERS.keys())
 
 
 def test_get_product_specs_is_dict(db):

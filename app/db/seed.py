@@ -75,18 +75,23 @@ def seed_from_mock(db: Database) -> None:
     _seed_reviews(db)
 
 
-# 评价演示数据(N4):只对 mock_data.ORDERS 里**真正已签收**的订单项造评价——
-# 目前只有 ORD-20240110-003(大壮 / 小米14 Ultra 手机)一笔是 delivered。
-# 刻意不在这里另造合成订单来凑"多条评价":test_db_repository.py::
-# test_list_orders_count、test_tools_db.py::test_list_user_orders 都断言过
-# `len(db.list_orders()) == len(mock_data.ORDERS)`——种子脚本擅自插入
-# mock_data 之外的订单会让这两个既有断言失真,而这两个测试文件不在本任务
-# 允许改动的文件范围内。因此这里只种一条评价:避免控制台在全新安装时是
-# 空的,但不假装有更多"已签收"库存来演示多商品对比。
+# 评价演示数据(N4):对应 mock_data.ORDERS 里四笔已签收订单(1 笔原有 +
+# 3 笔为本任务补充,见 mock_data.py 对应注释),评分故意有好有差,好让"评价"
+# 控制台的「差评 top 商品」真的摆得出多个商品的对比,而不是一张只有一行的卡片。
+# 差评文案(rating<=2)刻意写进至少一个 COMMITMENT_KEYWORDS 词表词
+# (见 app/agent/skills/risk.py),这样 review_insights 的词表匹配才有东西可抽——
+# 这几款商品的真实名字("Nike Air Max 270 运动鞋"等)全都带型号数字,天生会被
+# 数字过滤规则挡在词表外,不能指望"商品名"这条路径命中。
 _DEMO_REVIEWS = [
     # (order_id, user, sku, rating, content)
     ("ORD-20240110-003", "大壮", "PHONE-MI14U-BK",
-     2, "手机发热比较明显,信号也不太稳定,客服回复也慢"),
+     2, "手机用一周就发热明显,申请退差价客服一直不处理,体验很差"),
+    ("ORD-20240105-006", "小明", "SHOE-270-BK-42",
+     2, "鞋子穿两天就开胶,申请退款还要自己承担运费,很失望"),
+    ("ORD-20240108-007", "小红", "ELEC-APP-002",
+     5, "降噪效果很好,续航也够用,物流很快"),
+    ("ORD-20240112-008", "阿杰", "HOME-DYSON-V15",
+     1, "吸尘器质量有问题,申请全额退但客服一直拖着不处理"),
 ]
 
 
