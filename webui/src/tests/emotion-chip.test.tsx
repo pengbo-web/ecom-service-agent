@@ -38,10 +38,19 @@ describe("MetadataChips 情绪标", () => {
     expect(screen.queryByText(/情绪激烈/)).not.toBeInTheDocument();
   });
 
-  it("level 1 不渲染情绪标", () => {
+  it("emotion=unhappy(即使 level 1)渲染「不满」——Finding-3 后前端不再自行按 " +
+     "emotion_level 数字过滤,只认后端已判定的 emotion 标签", () => {
     render(<MetadataChips meta={{
       intent: "product_consult", confidence: 0.9, requires_human: false,
       emotion: "unhappy", emotion_level: 1,
+    }} />);
+    expect(screen.getByText("不满")).toBeInTheDocument();
+    expect(screen.queryByText(/情绪激烈/)).not.toBeInTheDocument();
+  });
+
+  it("emotion 缺省(老后端/规则快筛轮次)时不渲染情绪标", () => {
+    render(<MetadataChips meta={{
+      intent: "product_consult", confidence: 0.9, requires_human: false,
     }} />);
     expect(screen.queryByText(/不满/)).not.toBeInTheDocument();
     expect(screen.queryByText(/情绪激烈/)).not.toBeInTheDocument();

@@ -160,6 +160,16 @@ class EcomAgent:
                 self._status = "complete"
                 self.store.save(self.session_path, self._session_state())
                 self._write_snapshot()
+                # Finding-1修复:FAQ 秒答是 chat() 里唯一提前 return 的分支(已核实
+                # 全函数无其它早退路径),之前直接在这里返回,跳过了末尾的
+                # _record_skill_turn/_record_turn_signal——而 FAQ 缓存命中的前提
+                # 正是 need_kb=True,即本轮已经过 LLM 查询理解、情绪已判定,结果
+                # 被直接丢弃,turn_signals 的分母因此系统性缺这一类轮次。
+                # 两个方法本身是幂等的旁路埋点(开关/异常都 fail-soft),在这里调用
+                # 一次、末尾正常路径调用一次,两处互斥(此分支必 return,不会同时
+                # 落两次),不会重复写库。
+                self._record_skill_turn(result)
+                self._record_turn_signal(result)
                 return result
 
         self._preload_skill(user_input)
