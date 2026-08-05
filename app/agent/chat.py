@@ -99,8 +99,8 @@ class EcomAgent:
         self.store = get_session_store()
         loaded = self.store.load(self.session_path)
         if loaded:
-            self.summary = loaded["summary"]
-            self.raw_messages = loaded["messages"]
+            self.summary = loaded.get("summary")
+            self.raw_messages = loaded.get("messages", [])
             if loaded.get("short_term_memory"):
                 self.memory_manager.restore_stm(loaded["short_term_memory"])
             # R2 恢复:上次回合被中断(in_flight)→ 修复可能的孤儿 tool_call/结果,持久历史保持合法

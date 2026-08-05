@@ -104,3 +104,33 @@ def test_recovery_complete_session_untouched(monkeypatch, tmp_path):
     set_session_store(RecordingStore(initial=normal))
     a = EcomAgent(session_path=str(tmp_path / "s.json"), session_id="s", user_id="u")
     assert len(a.raw_messages) == 2 and a._status == "complete"   # 正常会话不被改动
+
+
+# ---- 缺字段的存量会话:不应崩溃(Bug 1 回归) ----
+def test_recovery_missing_summary_key_defaults_to_none(monkeypatch, tmp_path):
+    """存量会话缺 summary 键(而非 summary=None)——曾经的裸 loaded["summary"] 会 KeyError。"""
+    monkeypatch.setattr(settings, "memory_dir", str(tmp_path))
+    missing_summary = {
+        "version": 1, "short_term_memory": None,
+        "status": "complete", "step_seq": 0,
+        "messages": [{"role": "user", "content": "在吗"}],
+        # 注意:没有 "summary" 键
+    }
+    set_session_store(RecordingStore(initial=missing_summary))
+    a = EcomAgent(session_path=str(tmp_path / "s.json"), session_id="s", user_id="u")
+    assert a.summary is None
+    assert len(a.raw_messages) == 1
+
+
+def test_recovery_missing_messages_key_defaults_to_empty(monkeypatch, tmp_path):
+    """存量会话缺 messages 键——曾经的裸 loaded["messages"] 会 KeyError,应降级为空会话。"""
+    monkeypatch.setattr(settings, "memory_dir", str(tmp_path))
+    missing_messages = {
+        "version": 1, "summary": "之前聊过退货", "short_term_memory": None,
+        "status": "complete", "step_seq": 0,
+        # 注意:没有 "messages" 键
+    }
+    set_session_store(RecordingStore(initial=missing_messages))
+    a = EcomAgent(session_path=str(tmp_path / "s.json"), session_id="s", user_id="u")
+    assert a.raw_messages == []
+    assert a.summary == "之前聊过退货"

@@ -152,4 +152,55 @@ describe("GrowthPanel", () => {
     render(<GrowthPanel />);
     expect(await screen.findByText(/暂无待审草稿/)).toBeInTheDocument();
   });
+
+  it("草稿卡片显示商机类型的中文标签,而不是原始标识符", async () => {
+    stub([DRAFT]);
+    render(<GrowthPanel />);
+    const card = await screen.findByTestId("draft-1");
+    // 中文标签(与后端 OPPORTUNITY_KINDS 同源)必须出现
+    expect(within(card).getByText("下单后久未推进")).toBeInTheDocument();
+    // 原始标识符不该再原样展示给店主
+    expect(within(card).queryByText("stale_pending_order")).not.toBeInTheDocument();
+  });
+
+  it("未知的商机类型标签兜底显示原始标识符,而不是留空", async () => {
+    const UNKNOWN = { ...DRAFT, id: 9, opportunity_type: "brand_new_kind" };
+    stub([UNKNOWN]);
+    render(<GrowthPanel />);
+    const card = await screen.findByTestId("draft-9");
+    expect(within(card).getByText("brand_new_kind")).toBeInTheDocument();
+  });
+
+  it("同一批扫描里多张草稿共享的整段来源理由默认折叠,不逐条铺开长段落", async () => {
+    const LONG_REASON = "这是一段很长的店铺诊断原文,包含多项经营指标与多条建议,足够长到需要折叠展示给店主看。";
+    const A = { ...DRAFT, id: 5, user_id: "uA", reason: LONG_REASON };
+    const B = { ...DRAFT, id: 6, user_id: "uB", reason: LONG_REASON };
+    stub([A, B]);
+    render(<GrowthPanel />);
+    const cardA = await screen.findByTestId("draft-5");
+
+    // 折叠态:完整长段落不应该整段出现在 DOM 里
+    expect(within(cardA).queryByText(LONG_REASON)).not.toBeInTheDocument();
+    // 但要留一个展开入口,理由本身没有被丢弃
+    const toggle = within(cardA).getByTestId("reason-toggle-5");
+    expect(toggle).toHaveTextContent("展开");
+
+    fireEvent.click(toggle);
+    // 展开后完整文本可见,且该卡片自己的按钮变成"收起"
+    expect(within(cardA).getByText(new RegExp(LONG_REASON))).toBeInTheDocument();
+    expect(within(cardA).getByTestId("reason-toggle-5")).toHaveTextContent("收起");
+
+    // 另一张卡片(同样的长理由)默认仍是折叠态,互不影响
+    const cardB = await screen.findByTestId("draft-6");
+    expect(within(cardB).getByTestId("reason-toggle-6")).toHaveTextContent("展开");
+  });
+
+  it("较短的来源理由不需要折叠交互,直接原样显示", async () => {
+    const SHORT = { ...DRAFT, id: 7, reason: "未付款" };
+    stub([SHORT]);
+    render(<GrowthPanel />);
+    const card = await screen.findByTestId("draft-7");
+    expect(within(card).getByText(/未付款/)).toBeInTheDocument();
+    expect(within(card).queryByTestId("reason-toggle-7")).not.toBeInTheDocument();
+  });
 });

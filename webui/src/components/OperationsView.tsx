@@ -16,6 +16,33 @@ function pct(x: number, digits = 1): string {
 
 // 跨线幅度越大颜色越重:超出告警线一半以上标红,刚跨线标橙,理论上不会出现
 // 但兜个底(未跨线不该出现在异常清单里,出现了也不误判为安全色)。
+// 异常明细里的键值经常混着分数(0~1,要按指标卡同款格式转百分比)和嵌套结构
+// (如退款原因是 {reason, count}[] 的数组)——直接 `${k}:${v}` 拼接会把对象
+// 字符串化成 [object Object]。这里逐值判断:能安全转成一行文本的转,转不出来
+// 的（未知形状的对象）直接省略这一项，绝不能让 [object Object] 露出去。
+function formatDetailValue(key: string, value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (Array.isArray(value)) {
+    const parts = value
+      .map((item) => {
+        if (item && typeof item === "object" && "reason" in item && "count" in item) {
+          const it = item as { reason: unknown; count: unknown };
+          return `${it.reason}×${it.count}`;
+        }
+        return null;
+      })
+      .filter((s): s is string => s !== null);
+    return parts.length > 0 ? parts.join("、") : null;
+  }
+  if (typeof value === "object") return null; // 未知形状的对象,无法安全渲染成文本,宁可省略
+  if (typeof value === "number") {
+    // rate/ratio 字段是后端给的小数分数,和指标卡用同一套 pct() 格式化,不能原样吐 17 位小数
+    if (/rate|ratio/i.test(key)) return pct(value);
+    return String(value);
+  }
+  return String(value);
+}
+
 function anomalyTone(value: number, threshold: number): string {
   if (threshold <= 0) return "text-destructive";
   const over = (value - threshold) / threshold;
@@ -208,11 +235,19 @@ export function OperationsView() {
                     当前 {pct(a.value, 2)} · 告警线 {pct(a.threshold, 2)}
                   </span>
                 </div>
-                {a.detail && Object.keys(a.detail).length > 0 && (
-                  <div className="mt-1 text-xs text-muted-foreground">
-                    {Object.entries(a.detail).map(([k, v]) => `${k}:${v}`).join(" · ")}
-                  </div>
-                )}
+                {a.detail && Object.keys(a.detail).length > 0 && (() => {
+                  const parts = Object.entries(a.detail)
+                    .map(([k, v]) => {
+                      const rendered = formatDetailValue(k, v);
+                      return rendered === null ? null : `${k}:${rendered}`;
+                    })
+                    .filter((s): s is string => s !== null);
+                  return parts.length > 0 ? (
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      {parts.join(" · ")}
+                    </div>
+                  ) : null;
+                })()}
               </Card>
             ))}
             {data && data.anomalies.length === 0 && (

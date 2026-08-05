@@ -47,6 +47,46 @@ describe("OperationsView", () => {
     }
   });
 
+  it("异常明细里的嵌套数组要渲染成可读文本,不能出现 [object Object]", async () => {
+    const DATA_NESTED = {
+      ...DATA,
+      anomalies: [{
+        kind: "refund_rate_high", subject: "P002", subject_name: "T恤",
+        value: 1 / 6, threshold: 0.15,
+        detail: {
+          orders: 20, refunds: 6, top_reason: "尺码不准,偏大一码",
+          success_rate: 1 / 6,
+          refund_reasons: [{ reason: "尺码不准,偏大一码", count: 6 }, { reason: "色差", count: 1 }],
+        },
+      }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => DATA_NESTED })));
+    render(<OperationsView />);
+    const row = await screen.findByTestId("anomaly-row");
+
+    // 嵌套数组必须被拆成可读文本,绝不能整个对象被字符串化成 [object Object]
+    expect(within(row).queryByText(/\[object Object\]/)).not.toBeInTheDocument();
+    expect(within(row).getByText(/尺码不准,偏大一码×6/)).toBeInTheDocument();
+  });
+
+  it("异常明细里的分数字段要按百分比渲染,不能吐出 17 位小数原始浮点数", async () => {
+    const DATA_RATE = {
+      ...DATA,
+      anomalies: [{
+        kind: "refund_rate_high", subject: "P003", subject_name: "外套",
+        value: 1 / 6, threshold: 0.15,
+        detail: { orders: 20, refunds: 6, success_rate: 1 / 6 },
+      }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => DATA_RATE })));
+    render(<OperationsView />);
+    const row = await screen.findByTestId("anomaly-row");
+
+    expect(within(row).queryByText(/0\.16666666666666666/)).not.toBeInTheDocument();
+    // 与指标卡同款 pct() 格式:1 位小数的百分比
+    expect(within(row).getByText(/success_rate:16\.7%/)).toBeInTheDocument();
+  });
+
   it("无异常时给明确空态而不是留白", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => ({
       ok: true, json: async () => ({ ...DATA, anomalies: [] }) })));

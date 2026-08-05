@@ -13,6 +13,19 @@ const OPPORTUNITY_KINDS: { kind: string; label: string }[] = [
 
 type SentWarning = { id: number; user_id: string; reason: string };
 
+// 商机类型是内部标识符,不该直接展示给店主——复用 OPPORTUNITY_KINDS 里已有的
+// 中文映射(与后端 app/agent/tools/growth.py 的 OPPORTUNITY_KINDS 同源)。未知
+// 类型(以后端新增了这里还没同步)兜底显示原始标识符,而不是空白。
+function oppKindLabel(kind: string): string {
+  return OPPORTUNITY_KINDS.find((k) => k.kind === kind)?.label ?? kind;
+}
+
+// 「来源理由」是整段店铺诊断原文,同一批扫描生成的多张草稿会一字不差地
+// 重复这一整段——不能丢数据(理由本身是有效的每条草稿信息),但默认展开会
+// 让店主对着 8 张一模一样的长段落反复下滑。所以按行折叠、可展开,阈值内的
+// 短文本(未跨行/不长)直接原样显示,不额外加交互。
+const REASON_PREVIEW_LEN = 40;
+
 export function GrowthPanel() {
   const [drafts, setDrafts] = useState<OutreachDraft[] | null>(null);
   const [err, setErr] = useState("");
@@ -22,6 +35,9 @@ export function GrowthPanel() {
   // 把还没完成的那一行按钮重新点亮,等于放行了一次仍在途中的批准请求
   // (见任务约束:防连点必须按行隔离,不能相互覆盖)。
   const [busyIds, setBusyIds] = useState<Set<number>>(new Set());
+  // 「来源理由」默认折叠、按 id 记哪些卡片被手动展开过——与 busyIds 同一套
+  // Set 记录法,保证互不干扰(展开一张不影响其它卡片的折叠状态)。
+  const [expandedReasons, setExpandedReasons] = useState<Set<number>>(new Set());
   // 批准/驳回失败的原因按 draft id 记:失败的草稿会退回列表继续显示,原因
   // 只属于这一条,绝不能冒泡成页面级错误条,把其它正常草稿也吓成"出错了"
   // (与 OperationsView 的 err/chatErr 分离同一道理)。
@@ -71,6 +87,14 @@ export function GrowthPanel() {
     setBusyIds((prev) => {
       const next = new Set(prev);
       if (isBusy) next.add(id); else next.delete(id);
+      return next;
+    });
+  }
+
+  function toggleReason(id: number) {
+    setExpandedReasons((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
   }
@@ -184,7 +208,7 @@ export function GrowthPanel() {
                     <span className="text-xs text-muted-foreground">关联订单 {d.order_id}</span>
                   )}
                   <span className="rounded bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                    {d.opportunity_type}
+                    {oppKindLabel(d.opportunity_type)}
                   </span>
                 </div>
 
@@ -198,7 +222,27 @@ export function GrowthPanel() {
                 <div className="mt-2 whitespace-pre-wrap rounded-md bg-secondary/40 p-2 text-sm">
                   {d.content}
                 </div>
-                <div className="mt-1 text-xs text-muted-foreground">来源理由：{d.reason}</div>
+                {(() => {
+                  const isLong = d.reason.length > REASON_PREVIEW_LEN || d.reason.includes("\n");
+                  const isExpanded = expandedReasons.has(d.id);
+                  const showFull = isExpanded || !isLong;
+                  const preview = d.reason.split("\n")[0].slice(0, REASON_PREVIEW_LEN);
+                  return (
+                    <div className="mt-1 text-xs text-muted-foreground">
+                      来源理由：{showFull ? d.reason : `${preview}…`}
+                      {isLong && (
+                        <button
+                          type="button"
+                          className="ml-1 text-primary underline underline-offset-2"
+                          onClick={() => toggleReason(d.id)}
+                          data-testid={`reason-toggle-${d.id}`}
+                        >
+                          {isExpanded ? "收起" : "展开"}
+                        </button>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 {rowErr[d.id] && (
                   <div className="mt-2 text-xs text-destructive">⚠️ {rowErr[d.id]}</div>
