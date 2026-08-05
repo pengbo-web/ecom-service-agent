@@ -195,37 +195,7 @@ class EcomAgent:
         self.store.save(self.session_path, self._session_state())   # 回合结束:完整落盘(必落)
         self._write_snapshot()
         self._record_skill_turn(result)
-        self._publish_service_signal(result)
         return result
-
-    def _publish_service_signal(self, result: CustomerServiceResponse) -> None:
-        """客服侧旁路埋点:本轮明确失败(转人工)时给参谋 Agent 发一条信号。
-
-        客服 Agent **不判断"是否异常"**——那是 anomaly_scan 的确定性职责。
-        这里只报告"刚刚这一轮没搞定",让参谋侧知道有事发生。
-
-        与 _record_skill_turn 读同一个真实的 result 对象、同一种取法(属性访问,
-        而非按 dict 取值)——两处旁路埋点没道理用两套读法。
-
-        fail-soft:与 skill_trace 埋点同一姿态,任何异常吞掉,绝不影响买家这一轮。
-        """
-        from app.config.settings import settings
-
-        if not getattr(settings, "collab_enabled", True):
-            return
-        if not getattr(result, "requires_human", False):
-            return
-        try:
-            from app.multi_agent import bus
-            bus.publish(bus.EV_SIGNAL_ANOMALY, {
-                "kind": "service_escalation",
-                "subject": getattr(self, "session_id", "") or "",
-                "session_id": getattr(self, "session_id", "") or "",
-                "user_id": getattr(self, "user_id", "") or "",
-                "intent": getattr(result, "intent", ""),
-            }, bus.AGENT_SERVICE, bus.AGENT_ANALYST)
-        except Exception:  # noqa: BLE001 旁路埋点,绝不影响主链路
-            pass
 
     def _record_skill_turn(self, result: CustomerServiceResponse) -> None:
         """G2:本轮若加载过 skill,把执行轨迹落库(供 G3 失败采集 / G4 门禁分析)。

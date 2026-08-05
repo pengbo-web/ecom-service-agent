@@ -25,6 +25,38 @@ def _build_confirm_reply(action: str, result: dict) -> str:
     return "✅ " + (result.get("message") or "操作已完成。")
 
 
+def _publish_escalation_signal(session_id: str, agent, intent_out: str,
+                               reasons: list) -> None:
+    """转人工的"终态"埋点:客服侧旁路信号,告诉参谋 Agent 刚刚这一轮没搞定。
+
+    放在这里(而不是 EcomAgent.chat() 内部)是因为"是否转人工"这件事在
+    chat() 返回之后才终局——reasons 非空时是 HITL 规则(重复提问/低置信度/
+    敏感意图/关键词)在这里事后追加升级的,chat() 自己并不知道这些规则判过
+    什么。旧版把埋点放在 chat() 里、只看模型自报的 requires_human,漏掉了
+    这一大类真实转人工(同一问题问 3 遍、置信度过低等)。
+
+    带上 reasons:should_escalate 对模型自报的 requires_human 也会如实回填一条
+    "模型判定需转人工",所以参谋侧看 reasons 的内容而非"是否为空"就能分清
+    "模型自己就要转人工"（reasons 只有这一条）和"规则事后强制升级"（reasons
+    里还有低置信度/重复提问/敏感意图等规则自己触发的原因）。
+
+    fail-soft:与 skill_trace/旧版 _publish_service_signal 同一姿态——总线
+    不可用绝不能让买家这一轮的回复受影响,任何异常原地吞掉。
+    """
+    try:
+        from app.multi_agent import bus
+        bus.publish(bus.EV_SIGNAL_ANOMALY, {
+            "kind": "service_escalation",
+            "subject": session_id or "",
+            "session_id": session_id or "",
+            "user_id": getattr(agent, "user_id", "") or "",
+            "intent": intent_out,
+            "reasons": list(reasons or []),
+        }, bus.AGENT_SERVICE, bus.AGENT_ANALYST)
+    except Exception:  # noqa: BLE001 旁路埋点,绝不影响买家这一轮回复
+        pass
+
+
 def run_agent_streaming(agent, user_input: str, tracer=None,
                         session_id: str = "", guard_pipeline=None,
                         hitl=None, confirm: bool = False,
@@ -140,6 +172,10 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         intent_out = result.intent.value
         if qu is not None and qu.intent == "投诉" and intent_out not in ("complaint",):
             intent_out = "complaint"   # QU 前置判定优先:情绪/投诉轮生成侧意图常漂移
+        # 旁路信号:到这里"是否转人工"才是终局结果(自报 or 规则事后升级),
+        # 不影响下面照常发 metadata——发信号失败也不能拖累这一轮回复。
+        if requires_human_out:
+            _publish_escalation_signal(session_id, agent, intent_out, reasons)
         _sink({"type": "metadata", "intent": intent_out,
                "confidence": result.confidence,
                "requires_human": requires_human_out,
