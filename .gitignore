@@ -42,3 +42,10 @@ app/sessions/
 
 # WebUI
 webui/node_modules
+
+# Skill 自进化的运行期产物:候选/归档/搬运暂存区。
+# 它们由合成器、上传端点、转正与看门狗在运行时生成,内容随真实流量变化,
+# 不是源码——进版本库只会让每次跑一遍就产生一堆无意义 diff。
+app/agent/skills/definitions/_candidates/
+app/agent/skills/definitions/_archive/
+app/agent/skills/definitions/_swap/
