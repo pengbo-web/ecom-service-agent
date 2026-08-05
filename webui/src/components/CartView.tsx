@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { addToCartApi, createOrder, getCart, removeFromCartApi, type CartItem } from "@/lib/api";
+import { createOrder, getCart, removeFromCartApi, setCartQuantity, type CartItem } from "@/lib/api";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ShoppingCart, Minus, Plus, Trash2 } from "lucide-react";
@@ -40,19 +40,17 @@ export function CartView({ onShop, onCartChanged }: { onShop: () => void; onCart
   }
 
   async function changeQuantity(item: CartItem, delta: number) {
+    const next = item.quantity + delta;
     setBusySku(item.sku);
     clearErr(item.sku);
     try {
-      if (delta > 0) {
-        await addToCartApi(item.sku, delta);
-      } else if (item.quantity + delta <= 0) {
+      // 增/减都走同一个「设置数量」端点(PUT /api/cart/{sku}),不按方向拆成
+      // 两条不同路径——唯一的例外是减到 0:那不是"数量",是"移除",走既有
+      // 的显式 DELETE,而不是拿 0 去调设置数量接口(后端会拒绝非正数)。
+      if (next <= 0) {
         await removeFromCartApi(item.sku);
       } else {
-        // 现有的购物车端点只有「加购(累加)」与「移除(整行删除)」,没有单独的
-        // 「设置数量」接口——减量因此实现为"先删再以新数量加回",而不是
-        // 新增一个写端点(与本任务只允许改动既定端点这条约束一致)。
-        await removeFromCartApi(item.sku);
-        await addToCartApi(item.sku, item.quantity + delta);
+        await setCartQuantity(item.sku, next);
       }
       await load();
     } catch (e) {

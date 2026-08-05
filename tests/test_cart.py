@@ -60,3 +60,42 @@ def test_cart_tools_are_buyer_side_and_have_no_checkout(db):
     from app.agent.tools import cart
     assert not hasattr(cart, "checkout")
     assert not hasattr(cart, "place_order")
+
+
+# ---------------------------------------------------------------------------
+# set_cart_quantity:改数量走"设置"而非"累加",与 add_to_cart 互补
+# ---------------------------------------------------------------------------
+
+def test_set_quantity_increases(db):
+    db.add_to_cart("u1", "P001", 1)
+    assert db.set_cart_quantity("u1", "P001", 5) is True
+    assert db.list_cart("u1")[0]["quantity"] == 5
+
+
+def test_set_quantity_decreases(db):
+    db.add_to_cart("u1", "P001", 5)
+    assert db.set_cart_quantity("u1", "P001", 2) is True
+    assert db.list_cart("u1")[0]["quantity"] == 2
+
+
+def test_set_quantity_rejects_non_positive(db):
+    """非正数直接拒绝,不做静默删除——"设为 0"与"移除"是两件事。"""
+    db.add_to_cart("u1", "P001", 3)
+    assert db.set_cart_quantity("u1", "P001", 0) is False
+    assert db.set_cart_quantity("u1", "P001", -1) is False
+    assert db.list_cart("u1")[0]["quantity"] == 3   # 未被非法值改动
+
+
+def test_set_quantity_does_not_touch_other_users_cart(db):
+    """越权改别人购物车里同名 sku 的数量必须不生效。"""
+    db.add_to_cart("u1", "P001", 2)
+    db.add_to_cart("u2", "P001", 9)
+    assert db.set_cart_quantity("u1", "P001", 4) is True
+    assert db.list_cart("u1")[0]["quantity"] == 4
+    assert db.list_cart("u2")[0]["quantity"] == 9   # u2 的行完全不受影响
+
+
+def test_set_quantity_missing_sku_is_not_created(db):
+    """sku 不在购物车里不是"设置成功"的一种,不会隐式创建一行。"""
+    assert db.set_cart_quantity("u1", "P404", 3) is False
+    assert db.list_cart("u1") == []

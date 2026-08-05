@@ -1427,6 +1427,29 @@ class Database:
         finally:
             conn.close()
 
+    def set_cart_quantity(self, user_id: str, sku: str, quantity: int) -> bool:
+        """把某个 sku 的购物车数量**设置**为一个具体值(而不是累加)——与
+        `add_to_cart` 的累加语义互补,一个负责"加",一个负责"设为",避免同一
+        件事有两个隐式入口。
+
+        两条硬约束:
+        ① quantity 必须是正整数,非正数直接拒绝(返回 False),不做静默删除;
+        "设为 0"与"移除"是两件事,移除请显式调用 `remove_from_cart`。
+        ② 只对该用户名下已存在的 active 行生效——sku 不在购物车里不算"设置"
+        的对象,不会隐式创建一行(新增走 `add_to_cart` 那条唯一路径)。"""
+        if quantity is None or int(quantity) <= 0:
+            return False
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE carts SET quantity = ?, added_at = ? "
+                "WHERE user_id = ? AND sku = ? AND status = 'active'",
+                (int(quantity), self._now(), user_id, sku))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
     def abandoned_carts(self, hours: int = 48, limit: int = 100) -> list[dict]:
         """超过阈值仍处于 active 的购物车行——"加购未下单"商机的数据来源。"""
         conn = self.connect()

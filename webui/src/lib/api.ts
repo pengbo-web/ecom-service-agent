@@ -122,6 +122,22 @@ export async function removeFromCartApi(sku: string): Promise<{ success: boolean
   return r.json();
 }
 
+/** 把某个 sku 的数量设置为一个具体值(而不是累加)。增/减都走这一个端点,
+ * 不按方向拆成两条不同路径。quantity 必须是正整数,设为 0 请改用移除。 */
+export async function setCartQuantity(sku: string, quantity: number): Promise<{ success: boolean }> {
+  const r = await fetch(`/api/cart/${encodeURIComponent(sku)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ quantity }),
+  });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch { /* 忽略非 JSON 响应体 */ }
+    throw new Error(detail || `设置数量失败 (${r.status})`);
+  }
+  return r.json();
+}
+
 // ---- 评价(N4:买家评已签收订单;一单一 sku 只能评一次)----
 export type ReviewableItem = { order_id: string; sku: string; name: string; delivered_at: string | null };
 

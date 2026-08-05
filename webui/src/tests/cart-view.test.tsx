@@ -22,6 +22,13 @@ function stubCart(initial: CartItem[]) {
         quantity: body.quantity, added_at: "t", status: "active" });
       return { ok: true, json: async () => ({ success: true }) };
     }
+    if (u.startsWith("/api/cart/") && method === "PUT") {
+      const sku = decodeURIComponent(u.replace("/api/cart/", ""));
+      const body = JSON.parse(init!.body as string);
+      const existing = items.find((it) => it.sku === sku);
+      if (existing) existing.quantity = body.quantity;
+      return { ok: true, json: async () => ({ success: true }) };
+    }
     if (u.startsWith("/api/cart/") && method === "DELETE") {
       const sku = decodeURIComponent(u.replace("/api/cart/", ""));
       const idx = items.findIndex((it) => it.sku === sku);
@@ -41,7 +48,7 @@ describe("CartView", () => {
     expect(await screen.findByText("购物车空空如也，去商城逛逛吧～")).toBeInTheDocument();
   });
 
-  it("加购后件数更新", async () => {
+  it("加购后件数更新(增/减都走同一个设置数量端点)", async () => {
     stubCart([{ id: 1, user_id: "u1", sku: "P001", quantity: 1, added_at: "t", status: "active" }]);
     render(<CartView onShop={() => {}} />);
     expect(await screen.findByText("共 1 件")).toBeInTheDocument();
@@ -50,9 +57,17 @@ describe("CartView", () => {
     await waitFor(() => expect(screen.getByText("共 2 件")).toBeInTheDocument());
 
     const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls;
-    const postCall = calls.find((c) => (c[1] as RequestInit | undefined)?.method === "POST");
-    expect(postCall).toBeTruthy();
-    expect(JSON.parse((postCall![1] as RequestInit).body as string)).toEqual({ item_id: "P001", quantity: 1 });
+    const putCall = calls.find((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
+    expect(putCall).toBeTruthy();
+    expect(String(putCall![0])).toBe("/api/cart/P001");
+    expect(JSON.parse((putCall![1] as RequestInit).body as string)).toEqual({ quantity: 2 });
+
+    // 减量同样走 PUT(而不是先 DELETE 再 POST 这种两次往返)
+    fireEvent.click(await screen.findByRole("button", { name: "减少数量" }));
+    await waitFor(() => expect(screen.getByText("共 1 件")).toBeInTheDocument());
+    const putCalls = calls.filter((c) => (c[1] as RequestInit | undefined)?.method === "PUT");
+    expect(putCalls.length).toBe(2);
+    expect(JSON.parse((putCalls[1][1] as RequestInit).body as string)).toEqual({ quantity: 1 });
   });
 
   it("移除后该商品从列表消失", async () => {

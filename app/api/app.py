@@ -13,9 +13,10 @@ from fastapi.staticfiles import StaticFiles
 
 from app.agent.tools.user_orders import STATUS_LABELS
 from app.api.conversations import ensure_active, open_or_reuse
-from app.api.schemas import (AgentReplyRequest, CartAddRequest, ChatRequest, CreateOrderRequest,
-                              CreateUserRequest, LoginRequest, OpenConversationRequest, ResetRequest,
-                              ReviewRequest, SellerChatRequest, ShopProfileRequest, SkillDistillRequest)
+from app.api.schemas import (AgentReplyRequest, CartAddRequest, CartQuantityRequest, ChatRequest,
+                              CreateOrderRequest, CreateUserRequest, LoginRequest,
+                              OpenConversationRequest, ResetRequest, ReviewRequest,
+                              SellerChatRequest, ShopProfileRequest, SkillDistillRequest)
 from app.api.session_manager import SessionManager
 from app.api.streaming import run_agent_streaming
 from app.auth.token import sign_token, verify_token
@@ -490,6 +491,24 @@ def create_app(session_manager: Optional[SessionManager] = None,
         """当前用户的购物车(供「购物车」页)。"""
         user = _resolve_user(request, None)
         return {"success": True, "items": get_db().list_cart(user)}
+
+    @app.put("/api/cart/{sku}")
+    def set_cart_quantity_endpoint(sku: str, req: CartQuantityRequest, request: Request):
+        """把购物车里某个 sku 的数量设置为一个具体值(而不是累加)。前端的
+        「改数量」+/- 控件统一走这一个端点(而不是加/减各挂一条不同路径)——
+        减少数量如果拆成"先删再按新数量加回",第二次调用失败就会把买家的
+        购物车项凭空丢掉,两次网络往返也没有原子性。数量必须是正整数,
+        非正数明确拒绝而不是静默删除;「设为 0」与「移除」是两件事,移除
+        请显式调用 DELETE。sku 不在购物车里同样不是"设置成功"的一种,
+        返回 404 明确告知,而不是隐式创建一行(新增走 POST /api/cart)。"""
+        user = _resolve_user(request, None)
+        qty = int(req.quantity)
+        if qty <= 0:
+            raise HTTPException(422, "数量必须是正整数;如需移除该商品请使用移除功能")
+        ok = get_db().set_cart_quantity(user, sku, qty)
+        if not ok:
+            raise HTTPException(404, f"购物车里没有商品 {sku},无法设置数量")
+        return {"success": True}
 
     @app.delete("/api/cart/{sku}")
     def remove_cart_item_endpoint(sku: str, request: Request):

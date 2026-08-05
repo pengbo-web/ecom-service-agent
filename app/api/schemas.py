@@ -67,3 +67,9 @@ class CartAddRequest(BaseModel):
     本地 sku),映射为 carts.sku;user_id 同样由服务端 _resolve_user 解析。"""
     item_id: str
     quantity: int = 1
+
+
+class CartQuantityRequest(BaseModel):
+    """把购物车里某个 sku 的数量设置为一个具体值(而不是累加)。
+    sku 取自路径 `PUT /api/cart/{sku}`,这里只带数量。"""
+    quantity: int
