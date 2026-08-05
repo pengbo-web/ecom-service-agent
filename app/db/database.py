@@ -180,6 +180,14 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_outreach_status
                     ON outreach_drafts(status, id);
+                CREATE TABLE IF NOT EXISTS shop_profile (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    shop_name TEXT,
+                    tone TEXT,
+                    banned_words TEXT,
+                    updated_by TEXT,
+                    updated_at TEXT
+                );
                 """
             )
             # 兼容旧库：products 补 floor_price 列
@@ -1126,5 +1134,37 @@ class Database:
                 (draft_id,))
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # ---------- 店铺人格(单店:CHECK (id = 1) 把"单行"写进 schema) ----------
+    def get_shop_profile(self) -> dict:
+        """读店铺人格。无行(从未设置过)返回空 dict——由调用方(load_profile)
+        决定空值时的默认语气,这里不掺入任何默认值。"""
+        conn = self.connect()
+        try:
+            row = conn.execute("SELECT * FROM shop_profile WHERE id = 1").fetchone()
+            return dict(row) if row else {}
+        finally:
+            conn.close()
+
+    def set_shop_profile(self, fields: dict, updated_by: str) -> None:
+        """写店铺人格(单行 upsert,id 恒为 1)。只覆盖调用方传入的字段,
+        未传的字段保留旧值(用 COALESCE 落到已有行,首次写入落到默认空值)。"""
+        conn = self.connect()
+        try:
+            existing = conn.execute("SELECT * FROM shop_profile WHERE id = 1").fetchone()
+            base = dict(existing) if existing else {}
+            shop_name = fields.get("shop_name", base.get("shop_name", ""))
+            tone = fields.get("tone", base.get("tone", ""))
+            banned_words = fields.get("banned_words", base.get("banned_words", ""))
+            conn.execute(
+                "INSERT INTO shop_profile (id, shop_name, tone, banned_words, "
+                "updated_by, updated_at) VALUES (1, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET shop_name = excluded.shop_name, "
+                "tone = excluded.tone, banned_words = excluded.banned_words, "
+                "updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+                (shop_name, tone, banned_words, updated_by, self._now()))
+            conn.commit()
         finally:
             conn.close()

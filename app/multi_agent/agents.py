@@ -8,7 +8,9 @@
 load_skill / read_skill_file / read_tool_result。
 """
 
-from app.prompts.agents import AFTERSALE_PROMPT, MIDSALE_PROMPT, PRESALE_PROMPT
+from app.prompts.agents import (AFTERSALE_BASE_PROMPT, AFTERSALE_PROMPT,
+                                MIDSALE_BASE_PROMPT, MIDSALE_PROMPT,
+                                PRESALE_BASE_PROMPT, PRESALE_PROMPT)
 
 # 每个领域画像都具备的公共工具
 _COMMON_TOOLS = {
@@ -21,6 +23,10 @@ AGENT_CONFIGS = {
     "presale": {
         "name": "小夕-售前",
         "prompt": PRESALE_PROMPT,
+        # base_prompt:不含风格头/安全规则的领域正文——orchestrator 每轮据此
+        # 配店主当前语气重新拼接(见 build_profile_prompt);prompt 字段保留
+        # 不变,以免破坏既有引用(CLI/评测沙箱等仍按默认语气使用它)。
+        "base_prompt": PRESALE_BASE_PROMPT,
         "tools": _COMMON_TOOLS | {
             "query_product", "query_coupons", "negotiate_price", "list_user_orders",
             "place_order",   # 促成下单:创建待支付订单(不代付款)
@@ -29,6 +35,7 @@ AGENT_CONFIGS = {
     "midsale": {
         "name": "小夕-售中",
         "prompt": MIDSALE_PROMPT,
+        "base_prompt": MIDSALE_BASE_PROMPT,
         "tools": _COMMON_TOOLS | {
             "query_order", "query_logistics", "expedite_shipping",
             "change_address", "cancel_order", "list_user_orders",
@@ -38,6 +45,7 @@ AGENT_CONFIGS = {
     "aftersale": {
         "name": "小夕-售后",
         "prompt": AFTERSALE_PROMPT,
+        "base_prompt": AFTERSALE_BASE_PROMPT,
         "tools": _COMMON_TOOLS | {
             "query_order", "query_logistics", "apply_refund",
             "issue_invoice", "list_user_orders",

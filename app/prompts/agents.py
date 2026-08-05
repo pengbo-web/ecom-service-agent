@@ -5,26 +5,40 @@
 
 （保留旧常量别名 POSTSALE_PROMPT / COMPLAINT_PROMPT 以兼容其它引用；
 AGENT_CONFIGS 已改用新的三域常量。）
+
+**N1 品牌语气可配置**:风格头不再在模块导入时被硬编码进三个域常量的固定文案——
+`build_profile_prompt()` 把"风格块(店主可控)"当参数拼进来，PRESALE_PROMPT 等
+常量仍在导入时用**默认**风格块拼好(供 CLI/评测沙箱按默认语气使用)，但真正服务
+买家的编排器(`orchestrator.py::MultiAgentOrchestrator.chat()`)每轮用
+`app.config.shop_profile.load_profile()` 读店主当前设置重新拼一份。
 """
 
-_STYLE = """## 说话风格(最高优先级,压过下面所有"热情/主动推荐/先安抚/给2-3个方案"的措辞)
-- 像真人客服,**简短口语**:一般 1~3 句话说清,别写小作文、别长篇大论。
-- **直接答重点**,一次说清一个点;不主动塞 2-3 个方案、不列一堆问题让顾客选。
-- **少格式少 emoji**:不用标题、不大段加粗、不堆项目符号;emoji 最多一个、能不用就不用。
-- **去客套**:不要"您好呀~""小夕来帮您看""给您一个温暖的抱抱""需要我帮您……吗"这类开场白和结尾套话。
-- 投诉/不满:一句共情就够,别长段道歉,直接给办法。
-- 例:"这多少钱"→"¥1799,现货,今天拍明天发~";"怎么退货"→ 一两句说清关键步骤即可。
-(下面的领域规则中,与本风格冲突的"热情主动/2-3个方案/先安抚长段"一律以本风格为准;工具调用与安全底线不受影响,照常执行。)
+from app.config import shop_profile as _sp
 
-"""
-
-
-_NO_ORDER = """## 不代客下单(硬规则,禁止违反)
+# 不代客下单(硬规则,禁止违反)。这是**安全规则**,拼接顺序上必须晚于店主可控
+# 的风格块——见下面 build_profile_prompt 的顺序说明。对外公开为 SAFETY_RULES
+# (原名 _NO_ORDER,内容不变)供拼接顺序测试断言。
+SAFETY_RULES = """## 不代客下单(硬规则,禁止违反)
 - **不要替顾客下单**:即使系统里存在下单动作,也不要主动调用来代客建单——下单要顾客本人操作。
 - 顾客说"下单/买这个/拍下"时:**引导他自助下单**——"在商城或商品卡上点『立即购买』就能下单啦,下单后可以在『我的订单』里看到~";可顺带帮查优惠券、议价。
 - **只能依据真实工具返回**陈述订单结果:没有真实建单/查询就不要说"已为您创建订单""已下单",也不要编造订单号、收货地址、支付状态。
 
 """
+
+# 默认风格块(店主未自定义时使用):用空 profile 渲染,render_style_block 内部
+# 会回落到 shop_profile.DEFAULT_TONE / DEFAULT_SHOP_NAME。不走 load_profile()——
+# 那个函数会读数据库,而这里是模块导入时执行的常量拼接,不该在 import 阶段碰 DB。
+_DEFAULT_STYLE_BLOCK = _sp.render_style_block({})
+
+
+def build_profile_prompt(base_prompt: str, style_block: str) -> str:
+    """组装一份画像的 system prompt。
+
+    **顺序即安全边界**:风格块(店主可控) → 安全规则 → 领域正文。安全规则必须在
+    店主文本之后,后写的指令优先级更高,店主无法用语气设定豁免"不代客下单/
+    不许编造"这类底线。改这个顺序等于把店主输入提到底线之上,不要改。
+    """
+    return style_block + SAFETY_RULES + base_prompt
 
 
 ROUTER_PROMPT = """你是一个意图分类器，负责判断用户的消息应该由哪个客服专家处理。
@@ -173,10 +187,18 @@ AFTERSALE_PROMPT = """你是「并夕夕」电商平台的售后服务专家，�
 10. 全程使用简体中文回复,不夹带英文单词(商品名/单号/券码等专有标识除外)"""
 
 
-# 给三个画像统一加"简短真人"风格头(最高优先级,压过各画像里的"热情/长段"措辞)
-PRESALE_PROMPT = _STYLE + _NO_ORDER + PRESALE_PROMPT
-MIDSALE_PROMPT = _STYLE + _NO_ORDER + MIDSALE_PROMPT
-AFTERSALE_PROMPT = _STYLE + _NO_ORDER + AFTERSALE_PROMPT
+# base_prompt:不含风格头/安全规则的领域正文——供 orchestrator 每轮按店主当前
+# 语气重新拼接(AGENT_CONFIGS[k]["base_prompt"] 直接引用这三个常量)。
+PRESALE_BASE_PROMPT = PRESALE_PROMPT
+MIDSALE_BASE_PROMPT = MIDSALE_PROMPT
+AFTERSALE_BASE_PROMPT = AFTERSALE_PROMPT
+
+# 给三个画像统一拼上"默认风格块 + 安全规则"(= build_profile_prompt(原文, 默认风格块))。
+# 保留这三个常量本身不变,供 CLI / 评测沙箱按默认语气使用；运行时的真实拼接见
+# orchestrator.py,那里用店主当前配置的风格块代替 _DEFAULT_STYLE_BLOCK。
+PRESALE_PROMPT = build_profile_prompt(PRESALE_BASE_PROMPT, _DEFAULT_STYLE_BLOCK)
+MIDSALE_PROMPT = build_profile_prompt(MIDSALE_BASE_PROMPT, _DEFAULT_STYLE_BLOCK)
+AFTERSALE_PROMPT = build_profile_prompt(AFTERSALE_BASE_PROMPT, _DEFAULT_STYLE_BLOCK)
 
 # ---- 向后兼容别名（旧代码/测试可能仍引用；语义已并入新三域）----
 POSTSALE_PROMPT = AFTERSALE_PROMPT

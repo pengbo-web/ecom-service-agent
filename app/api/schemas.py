@@ -45,3 +45,10 @@ class SkillDistillRequest(BaseModel):
 class SellerChatRequest(BaseModel):
     session_id: str
     message: str
+
+
+class ShopProfileRequest(BaseModel):
+    """店主提交的店铺人格设定(店铺名/语气/禁语)。空 tone = 恢复默认语气。"""
+    shop_name: str = ""
+    tone: str = ""
+    banned_words: str = ""

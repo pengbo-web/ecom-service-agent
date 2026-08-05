@@ -38,12 +38,15 @@ class MultiAgentOrchestrator:
         self.router = Router(self.engine.client, self.engine.model)
         self._last_key: str | None = None   # 粘性路由:QU 未判定 domain 时沿用上轮
 
-        # 每个画像 = 专属 prompt + 工具子集(独立 ToolManager,仅暴露该领域允许的工具)
+        # 每个画像 = 专属 prompt + 工具子集(独立 ToolManager,仅暴露该领域允许的工具)。
+        # base_prompt(不含风格头/安全规则的领域正文)供 chat() 每轮按店主当前
+        # 语气重新拼接；prompt(默认语气版)留作 fail-soft 回落目标。
         self.profiles: dict[str, dict] = {}
         for key, cfg in AGENT_CONFIGS.items():
             self.profiles[key] = {
                 "name": cfg["name"],
                 "prompt": cfg["prompt"],
+                "base_prompt": cfg["base_prompt"],
                 "tool_manager": ToolManager(
                     use_mcp=settings.mcp_enabled,
                     mcp_server_url=settings.mcp_server_url,
@@ -80,11 +83,33 @@ class MultiAgentOrchestrator:
                 event.update(intent=qu.intent, need_kb=qu.need_kb, source=qu.source)
             self.event_sink(event)
         # 切画像:同一硬化引擎,换 prompt + 工具子集;透传 event_sink/client(含 tracer 包装)
-        self.engine.system_prompt = profile["prompt"]
+        self.engine.system_prompt = self._build_system_prompt(profile)
         self.engine.tool_manager = profile["tool_manager"]
         self.engine.event_sink = self.event_sink
         self.engine.client = self.client
         return self.engine.chat(user_input)
+
+    def _build_system_prompt(self, profile: dict) -> str:
+        """每轮按店主当前语气组装 system prompt(N1:品牌语气可配置)。
+
+        这是承重改动点:原来 PRESALE_PROMPT 等常量在**模块导入时**就拼好了风格头,
+        店主改语气不会生效。这里改成买家每轮 chat() 时才组装:读店铺人格 →
+        渲染风格块 → build_profile_prompt 拼上安全规则与领域正文——顺序即安全
+        边界(风格块在前,安全规则在后,店主文本压不过"不代客下单/不许编造")。
+
+        fail-soft:读配置/渲染/拼接任何一步出错,都直接回落 profile["prompt"]
+        (导入时就拼好的默认语气版)——这是买家对话的热路径,配置表读不出来
+        绝不能让这一轮对话失败。
+        """
+        try:
+            from app.config.shop_profile import load_profile, render_style_block
+            from app.prompts.agents import build_profile_prompt
+            style_block = render_style_block(load_profile())
+            return build_profile_prompt(profile["base_prompt"], style_block)
+        except Exception:  # noqa: BLE001 配置读取/拼接失败不能让买家会话失败
+            logging.getLogger(__name__).warning(
+                "店铺语气组装失败,回落默认语气 prompt", exc_info=True)
+            return profile["prompt"]
 
     # ---- 委托给引擎(对外接口与 EcomAgent 一致)----
     @property

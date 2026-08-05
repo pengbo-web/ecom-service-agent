@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RotateCcw, Send } from "lucide-react";
 import { GrowthPanel } from "@/components/operations/GrowthPanel";
+import { ShopProfilePanel } from "@/components/operations/ShopProfilePanel";
 
 type ChatMsg = { role: "user" | "assistant"; text: string; agent?: string };
 
@@ -77,7 +78,7 @@ export function OperationsView() {
   // 「经营诊断」是原有的只读总览+参谋对话;「商机与触达」是 M14 新增的
   // 草稿审批子区,两者拉的数据/操作完全不相关,分 tab 避免把批准/驳回这类
   // 会真实触达买家的按钮和纯只读的经营看板混在同一屏,增加误触风险。
-  const [tab, setTab] = useState<"diag" | "growth">("diag");
+  const [tab, setTab] = useState<"diag" | "growth" | "profile">("diag");
 
   async function load(days: number) {
     const reqId = ++reqIdRef.current;
@@ -170,6 +171,7 @@ export function OperationsView() {
           {([
             { key: "diag" as const, label: "经营诊断" },
             { key: "growth" as const, label: "商机与触达" },
+            { key: "profile" as const, label: "店铺语气" },
           ]).map((t) => (
             <button
               key={t.key}
@@ -186,6 +188,8 @@ export function OperationsView() {
         </div>
 
         {tab === "growth" && <GrowthPanel />}
+
+        {tab === "profile" && <ShopProfilePanel />}
 
         {tab === "diag" && (
         <>

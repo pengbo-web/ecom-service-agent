@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from app.api.conversations import ensure_active, open_or_reuse
 from app.api.schemas import (AgentReplyRequest, ChatRequest, CreateOrderRequest, CreateUserRequest,
                               LoginRequest, OpenConversationRequest, ResetRequest,
-                              SellerChatRequest, SkillDistillRequest)
+                              SellerChatRequest, ShopProfileRequest, SkillDistillRequest)
 from app.api.session_manager import SessionManager
 from app.api.streaming import run_agent_streaming
 from app.auth.token import sign_token, verify_token
@@ -1061,6 +1061,30 @@ def create_app(session_manager: Optional[SessionManager] = None,
             "products": product_diagnostics(window_days=window_days, top_n=5),
             "anomalies": anomaly_scan(window_days=window_days)["anomalies"],
         }
+
+    @app.get("/api/admin/shop/profile", dependencies=[Depends(admin_auth)])
+    def get_shop_profile_api():
+        """店主读取当前店铺人格(语气/称呼/禁语)。fail-soft:读不到返回默认。"""
+        _require_seller_console()
+        from app.config.shop_profile import DEFAULT_TONE, MAX_TONE_CHARS, load_profile
+        p = load_profile()
+        return {"success": True, "profile": p,
+                "default_tone": DEFAULT_TONE, "max_tone_chars": MAX_TONE_CHARS}
+
+    @app.put("/api/admin/shop/profile", dependencies=[Depends(admin_auth)])
+    def put_shop_profile_api(req: ShopProfileRequest):
+        """店主保存店铺人格。留空 tone = 恢复默认(不是错误);下一轮对话起生效。"""
+        _require_seller_console()
+        from app.config.shop_profile import validate_tone
+        ok, why = validate_tone(req.tone or "")
+        if not ok:
+            raise HTTPException(status_code=400, detail=why)
+        get_db().set_shop_profile(
+            {"shop_name": (req.shop_name or "").strip(),
+             "tone": (req.tone or "").strip(),
+             "banned_words": (req.banned_words or "").strip()},
+            updated_by="admin")
+        return {"success": True}
 
     def _deliver_outreach(draft: dict) -> dict:
         """把一条已批准的触达草稿投递给买家。**绝不抛**。

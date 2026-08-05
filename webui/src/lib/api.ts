@@ -320,3 +320,30 @@ export async function getOpportunities(
   if (!r.ok) throw new Error(`加载商机失败 (${r.status})`);
   return r.json();
 }
+
+// ---- 店铺人格(N1:品牌语气可配置)----
+export type ShopProfile = { shop_name: string; tone: string; banned_words: string };
+export type ShopProfileResult = {
+  success: boolean; profile: ShopProfile; default_tone: string; max_tone_chars: number;
+};
+
+export async function getShopProfile(): Promise<ShopProfileResult> {
+  const r = await adminFetch("/api/admin/shop/profile");
+  if (!r.ok) throw new Error(`加载店铺人格失败 (${r.status})`);
+  return r.json();
+}
+
+/** 保存店铺人格。留空 tone = 恢复默认(不是错误);后端校验超长会返回 400。 */
+export async function putShopProfile(p: ShopProfile): Promise<{ success: boolean }> {
+  const r = await adminFetch("/api/admin/shop/profile", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(p),
+  });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch { /* 忽略非 JSON 响应体 */ }
+    throw new Error(detail || `保存失败 (${r.status})`);
+  }
+  return r.json();
+}
