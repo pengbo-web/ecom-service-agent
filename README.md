@@ -182,6 +182,7 @@ pytest                                # 运行全部单元测试
 │  │ 产 signal.*   │                   │      ready         │                  │
 │  └──────────────┴──────────────────┴──────────────────┘                  │
 │  共享上下文池 SharedContext：key/value(JSON)/source_agent/correlation_id  │
+│    参谋写诊断 → 卖家两副画像每轮经数据围栏注入最近若干条（真读真写）      │
 │  协作 Worker `app/scripts/agent_collab.py`：拉取式消费，不阻塞买家会话     │
 └─────────────────────────────────┬────────────────────────────────────────┘
                                   ▼
@@ -228,8 +229,24 @@ pytest                                # 运行全部单元测试
 | 店铺参谋 Agent（`analyst`） | `POST /api/seller/chat` | B 端店主 | `shop_overview`、`product_diagnostics`、`service_quality`、`anomaly_scan` | **全只读**，工具子集里不含任何写库工具；异常判定用确定性阈值，LLM 只负责解释与建议 |
 | 营销增长 Agent（`growth`） | `POST /api/seller/chat` | B 端店主 | `find_opportunities`、`draft_outreach`、`list_outreach_drafts` | 只产出草稿，`draft_outreach` 是它唯一的写路径，写出的记录恒为 `status='draft'` |
 
-买家画像与卖家画像的工具子集完全不相交（见 `tests/test_collab_e2e.py::test_buyer_chat_never_exposes_seller_tools`），
+买家画像与卖家画像的工具子集完全不相交（见 `tests/test_seller_profiles.py::test_buyer_profiles_never_get_seller_tools`
+以及同文件里覆盖评估沙箱构造路径的 `test_eval_sandbox_agent_gets_no_seller_tools`），
 经营数据、商机名单、其他买家信息不会进入 C 端会话上下文。
+
+### 共享上下文池到底怎么被读
+
+写入方是参谋:`handle_signal` 每出一条诊断就写 `shared_context[diagnosis:<subject>]`，
+带 `source_agent` 与 `correlation_id`。读取方有两个，用途不同，都要说清楚：
+
+- **卖家画像（生产读路径）**：`SellerOrchestrator` 每轮把最近 N 条诊断经
+  `render_context_block` 的**数据围栏**拼进画像 prompt——参谋异步写下的归因，
+  店主下一次开口时参谋与营销两副画像都读得到。围栏是第一层防线（内容里含买家
+  可控文本），真正的兜底仍是"参谋工具全只读、营销产物必过人工"。
+- **协作时间线（审计读路径）**：按 `correlation_id` 把一条链上写过的共享上下文
+  读出来展示。
+
+注意 worker 里的营销处理器 `handle_insight` 读的是**事件 payload 里的诊断**，
+不是从池子里取——总线负责一条链内的传递，池子负责跨链、跨会话的沉淀，两者不重复。
 
 ### 协作 Worker 的运行方式
 

@@ -59,6 +59,28 @@ def fetch_entry(kind: str, subject: str) -> Optional[dict]:
         return None
 
 
+def recent_entries(kind: str = KEY_DIAGNOSIS, limit: int = 5) -> list[dict]:
+    """按 kind 取最近若干条共享上下文(整条,含 source_agent/correlation_id)。
+
+    这是**卖家画像注入共享上下文的读路径**:参谋写下的诊断要能被下一轮的参谋
+    自己、以及营销读到,否则这个池子就只是个写完没人看的审计表。按 kind 前缀取
+    最近 N 条,而不是按 subject 精确取(fetch/fetch_entry 那条路)——店主开口时
+    我们并不知道他要问哪个商品,给最近的几条让模型自己挑更贴近实际。
+
+    与 share()/fetch() 同样 fail-soft:读不到就返回空列表,渲染出来是空串,
+    卖家那一轮照常进行。
+    """
+    from app.config.settings import settings
+
+    if not getattr(settings, "collab_enabled", True):
+        return []
+    try:
+        return get_db().list_shared_context(prefix=f"{kind}:", limit=max(1, int(limit)))
+    except Exception as exc:  # noqa: BLE001 读不到就不注入,绝不打断卖家会话
+        logger.warning("共享上下文列举失败(已忽略,本轮不注入): %s %s", kind, exc)
+        return []
+
+
 def _serialize_value(value: dict) -> str:
     """把 value 序列化成围栏里的一行文本,用 JSON 而非隐式 dict repr / str()。
 

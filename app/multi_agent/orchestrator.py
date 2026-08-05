@@ -6,6 +6,7 @@
 延迟/成本低,加新领域只是加一份画像。对外接口与 EcomAgent 一致。
 """
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -168,8 +169,15 @@ class MultiAgentOrchestrator:
     def close(self):
         self.engine.tool_manager = self._default_tm   # 复位后由 engine.close 关闭
         self.engine.close()
+        # 逐个关闭每个画像的 tool_manager:单个失败要 catch 住继续关下一个,
+        # 否则一个画像的 close() 抛异常就会让后面的画像永久漏关(资源泄漏)。
+        # 与 SellerOrchestrator.close() 同一写法——那边先修好并留了一句"买家侧
+        # 还有同款隐患"的注释,而一个有人写明的已知泄漏比直接修掉它更糟。
         for p in self.profiles.values():
-            p["tool_manager"].close()
+            try:
+                p["tool_manager"].close()
+            except Exception:  # noqa: BLE001 单个画像关不掉不能连累其余
+                pass
 
 
 class SellerOrchestrator:
@@ -180,7 +188,16 @@ class SellerOrchestrator:
 
     刻意复用同一个硬化引擎 EcomAgent:空回复降级、落盘指针、事件流、持久化
     全部照旧;卖家侧的差异只在 prompt + 工具子集 + 注入的共享上下文。
+
+    "注入的共享上下文"指:每轮把 shared_context 里最近的诊断结论经
+    `render_context_block`(带数据围栏)拼到画像 prompt 后面 —— 参谋异步写下的
+    归因,店主下一次开口时两个画像都能读到。这也是那道围栏在生产里唯一被真正
+    走到的地方;它只是第一层,真正的兜底仍是"参谋工具全只读、营销产物必过人工"。
     """
+
+    #: 每轮注入多少条共享上下文。取小值:这是每轮都要进 prompt 的固定开销,
+    #: 而店主真正关心的永远是最近那几条诊断。
+    SHARED_CONTEXT_LIMIT = 5
 
     def __init__(self, session_path: Optional[str] = None, user_id: Optional[str] = None):
         from app.agent.chat import EcomAgent
@@ -217,11 +234,30 @@ class SellerOrchestrator:
         if self.event_sink:
             self.event_sink({"type": "route", "agent": profile["name"], "key": key,
                              "actor": "seller"})
-        self.engine.system_prompt = profile["prompt"]
+        self.engine.system_prompt = profile["prompt"] + self._shared_context_block()
         self.engine.tool_manager = profile["tool_manager"]
         self.engine.event_sink = self.event_sink
         self.engine.client = self.client
         return self.engine.chat(user_input)
+
+    def _shared_context_block(self) -> str:
+        """本轮要拼到画像 prompt 后面的共享上下文片段(没有就返回空串)。
+
+        内容里可能含用户可控文本(买家咨询原文会进诊断摘要),所以一律走
+        `render_context_block` 的数据围栏,与 app/agent/product_context.py 同手法。
+        整段 fail-soft:读库失败/渲染失败都退化成空串,店主那一轮照常回答——
+        共享上下文是锦上添花的参考,不是回答的前提。
+        """
+        from app.multi_agent import shared_context as sc
+
+        try:
+            entries = sc.recent_entries(sc.KEY_DIAGNOSIS,
+                                        limit=self.SHARED_CONTEXT_LIMIT)
+            return sc.render_context_block(entries)
+        except Exception:  # noqa: BLE001 注入失败不该让卖家会话失败
+            logging.getLogger(__name__).warning("共享上下文注入失败(本轮跳过)",
+                                                exc_info=True)
+            return ""
 
     @property
     def raw_messages(self) -> list:
