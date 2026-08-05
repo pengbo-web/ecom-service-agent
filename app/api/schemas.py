@@ -52,3 +52,11 @@ class ShopProfileRequest(BaseModel):
     shop_name: str = ""
     tone: str = ""
     banned_words: str = ""
+
+
+class ReviewRequest(BaseModel):
+    """买家提交评价。user_id 由服务端 _resolve_user 解析,不信请求体自报的身份。"""
+    order_id: str
+    sku: str
+    rating: int
+    content: str = ""

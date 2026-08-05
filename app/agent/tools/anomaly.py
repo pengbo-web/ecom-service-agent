@@ -9,6 +9,7 @@ min_samples 是必需的:样本 1 单退 1 单是 100% 退款率,但那不是异
 
 from __future__ import annotations
 
+from app.agent.tools import reviews as rv
 from app.agent.tools import shop_analytics as sa
 from app.agent.tools.shop_analytics import product_diagnostics, service_quality
 
@@ -16,6 +17,10 @@ from app.agent.tools.shop_analytics import product_diagnostics, service_quality
 # 成常量而不是留在调用处的字面量 20——下面 products_truncated 的判断和这次调用
 # 用的切片大小必须永远指向同一个数字,两处各写一遍字面量迟早会脱节。
 PRODUCT_SCAN_LIMIT = 20
+
+# 差评扫描一次读取的评价行数上限,同一目的:reviews_truncated 的判断与这次调用
+# 用的行数上限必须指向同一个数字。
+REVIEW_SCAN_LIMIT = rv.REVIEW_SCAN_LIMIT
 
 
 def _thresholds() -> dict:
@@ -26,6 +31,7 @@ def _thresholds() -> dict:
         "human_rate": float(getattr(settings, "anomaly_human_rate", 0.40)),
         "min_samples": int(getattr(settings, "anomaly_min_samples", 5)),
         "angry_rate": float(getattr(settings, "anomaly_angry_rate", 0.20)),
+        "bad_review_rate": float(getattr(settings, "anomaly_bad_review_rate", 0.30)),
     }
 
 
@@ -54,6 +60,20 @@ def _scanned_sku_total(window_days: int) -> int:
             f"SELECT COUNT(DISTINCT oi.sku) AS n "
             f"FROM order_items oi JOIN orders o ON o.order_id = oi.order_id "
             f"WHERE o.created_at >= {w} AND oi.sku IS NOT NULL AND oi.sku != ''"
+        ).fetchone()
+        return int(row["n"] or 0)
+    finally:
+        conn.close()
+
+
+def _scanned_review_total(window_days: int) -> int:
+    """窗口内 reviews 表实际行数(不受 REVIEW_SCAN_LIMIT 限制),用来判断差评
+    扫描是不是把长尾评价切没了。口径同 `_scanned_sku_total`。"""
+    conn = sa.get_db().connect()
+    try:
+        w = sa._window_clause(window_days)
+        row = conn.execute(
+            f"SELECT COUNT(*) AS n FROM reviews WHERE created_at >= {w}"
         ).fetchone()
         return int(row["n"] or 0)
     finally:
@@ -118,10 +138,29 @@ def anomaly_scan(window_days: int = 7) -> dict:
             {"total": emo["total"], "counts": emo.get("counts", {})},
         ))
 
+    # 差评率:按商品聚合窗口内评价(rating<=2 为差评),同一套跨线才报 +
+    # min_samples 兜底的纪律。db 显式传 sa.get_db()——与本文件其余查询共用
+    # 同一份(测试里被 monkeypatch 过的)db 引用,不在 reviews 模块内部另行
+    # 解析一次 get_db() 读到不相干的库(见 reviews.py 模块 docstring)。
+    review_products = rv.product_review_breakdown(
+        sa.get_db(), window_days, limit=REVIEW_SCAN_LIMIT)
+    for rp in review_products:
+        if rp["total"] >= t["min_samples"] and rp["bad_rate"] >= t["bad_review_rate"]:
+            anomalies.append(_finding(
+                "bad_review_rate_high", rp["sku"], rp["name"],
+                rp["bad_rate"], t["bad_review_rate"],
+                {"total": rp["total"], "bad_count": rp["bad_count"],
+                 "bad_terms": rp["bad_terms"]},
+            ))
+    reviews_examined = sum(p["total"] for p in review_products)
+    reviews_total = _scanned_review_total(window_days)
+
     return {"success": True, "window_days": int(window_days),
             "thresholds": t, "anomalies": anomalies,
             "products_examined": len(products),
-            "products_truncated": products_total > len(products)}
+            "products_truncated": products_total > len(products),
+            "reviews_examined": reviews_examined,
+            "reviews_truncated": reviews_total > reviews_examined}
 
 
 def scan_and_publish(window_days: int = 7) -> dict:

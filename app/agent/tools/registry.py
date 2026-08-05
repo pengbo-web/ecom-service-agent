@@ -24,6 +24,7 @@ from app.agent.tools.anomaly import anomaly_scan
 from app.agent.tools.growth import (
     find_opportunities, draft_outreach, list_outreach_drafts_tool,
 )
+from app.agent.tools.reviews import review_insights
 
 _TOOL_MAP: dict[str, Callable] = {
     "query_order": query_order,
@@ -49,6 +50,7 @@ _TOOL_MAP: dict[str, Callable] = {
     "find_opportunities": find_opportunities,
     "draft_outreach": draft_outreach,
     "list_outreach_drafts": list_outreach_drafts_tool,
+    "review_insights": review_insights,
 }
 
 if settings.bargain_enabled:
@@ -512,6 +514,24 @@ TOOL_DEFINITIONS.extend([
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "review_insights",
+            "description": (
+                "【店铺参谋专用】评价洞察：全店均分/差评率 + 差评 top 商品，"
+                "每个商品附差评关键词（词表匹配，不编造）。只读。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "window_days": {"type": "integer", "description": "统计窗口天数，默认 7"},
+                    "top_n": {"type": "integer", "description": "返回商品数，默认 5"},
+                },
+                "required": [],
+            },
+        },
+    },
 ])
 
 
@@ -572,6 +592,9 @@ TOOL_TRAITS: dict[str, frozenset[str]] = {
     # bump_bargain_state 推进议价轮次并落库,是真实的状态变更;但它服务的是
     # 买家侧议价流程,不带 seller_only。
     "negotiate_price": frozenset({"mutating"}),
+    # review_insights 全只读(仅 SELECT),但暴露的是全店差评数据——买家画像
+    # 绝不能拥有它,否则一句"这个店差评多不多"就能套出全店维度的数据。
+    "review_insights": frozenset({"seller_only"}),
 }
 
 # 会改变持久状态/产生落地效果的注册工具(见上方 TOOL_TRAITS 说明)。

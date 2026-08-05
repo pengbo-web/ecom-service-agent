@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api.conversations import ensure_active, open_or_reuse
 from app.api.schemas import (AgentReplyRequest, ChatRequest, CreateOrderRequest, CreateUserRequest,
-                              LoginRequest, OpenConversationRequest, ResetRequest,
+                              LoginRequest, OpenConversationRequest, ResetRequest, ReviewRequest,
                               SellerChatRequest, ShopProfileRequest, SkillDistillRequest)
 from app.api.session_manager import SessionManager
 from app.api.streaming import run_agent_streaming
@@ -451,6 +451,24 @@ def create_app(session_manager: Optional[SessionManager] = None,
         raw = [o for o in get_db().list_orders() if o.get("user") == user]
         raw.sort(key=lambda o: o.get("created_at") or "", reverse=True)
         return {"orders": [_fmt_order(o) for o in raw]}
+
+    @app.get("/api/reviewable")
+    def reviewable(request: Request):
+        """当前买家可评价的已签收订单项。"""
+        uid = _resolve_user(request, None)
+        return {"success": True, "items": get_db().reviewable_items(uid)}
+
+    @app.post("/api/review")
+    def submit_review(req: ReviewRequest, request: Request):
+        """买家提交评价。一单一 sku 一次;重复给明确中文提示而不是 500。"""
+        uid = _resolve_user(request, None)
+        if not (1 <= int(req.rating) <= 5):
+            raise HTTPException(status_code=400, detail="评分需在 1-5 之间")
+        rid = get_db().create_review(req.order_id, uid, req.sku,
+                                     int(req.rating), (req.content or "").strip())
+        if rid is None:
+            return {"success": False, "reason": "这笔订单的该商品已经评价过了,不能重复评价。"}
+        return {"success": True, "review_id": rid}
 
     _UID_RE = re.compile(r"^[\w一-龥-]{1,32}$")
 
@@ -1060,6 +1078,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
         """
         _require_seller_console()
         from app.agent.tools.anomaly import anomaly_scan
+        from app.agent.tools.reviews import review_insights
         from app.agent.tools.shop_analytics import (
             product_diagnostics, service_quality, shop_overview)
         return {
@@ -1067,6 +1086,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
             "products": product_diagnostics(window_days=window_days, top_n=5),
             "anomalies": anomaly_scan(window_days=window_days)["anomalies"],
             "quality": service_quality(window_days=window_days),
+            "reviews": review_insights(window_days=window_days),
         }
 
     @app.get("/api/admin/shop/profile", dependencies=[Depends(admin_auth)])

@@ -96,6 +96,7 @@ class Settings(BaseSettings):
     anomaly_human_rate: float = 0.40         # skill 转人工率告警线
     anomaly_min_samples: int = 5             # 低于此样本量不报
     anomaly_angry_rate: float = 0.20         # 激烈情绪(angry)占比告警线
+    anomaly_bad_review_rate: float = 0.30    # 商品差评率(rating<=2)告警线
 
     # 情绪信号旁路埋点(N2):按每一轮写 turn_signals,与 skill_trace_enabled 同姿态
     # ——关闭时不写库,任何异常都 fail-soft,绝不影响回复主流程。

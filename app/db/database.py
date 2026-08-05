@@ -200,6 +200,18 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_turn_signals_created
                     ON turn_signals(created_at);
+                CREATE TABLE IF NOT EXISTS reviews (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    sku TEXT NOT NULL,
+                    rating INTEGER NOT NULL,
+                    content TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(order_id, sku)
+                );
+                CREATE INDEX IF NOT EXISTS idx_reviews_sku ON reviews(sku, created_at);
+                CREATE INDEX IF NOT EXISTS idx_reviews_created ON reviews(created_at);
                 """
             )
             # 兼容旧库：products 补 floor_price 列
@@ -1232,5 +1244,103 @@ class Database:
             angry_rate = (counts["angry"] / total) if total else 0.0
             return {"window_days": int(window_days), "total": total,
                     "counts": counts, "angry_rate": angry_rate}
+        finally:
+            conn.close()
+
+    # ---------- 评价(N4:买家评已签收订单,参谋只读分析差评) ----------
+    def create_review(self, order_id: str, user_id: str, sku: str, rating: int,
+                      content: str) -> Optional[int]:
+        """买家提交一条评价。返回新建评价 id;不满足条件一律返回 None(不抛)。
+
+        两条硬约束在插入前就拦下,而不是只靠 UNIQUE 约束兜底:
+        ①只有该订单**确实是这个买家的**、且状态为 delivered(已签收)才可评——
+        没收到货就能评分是假数据,这条不能只靠前端隐藏按钮防,否则一次直接
+        调接口就绕过去了;
+        ②一个订单的一个 sku 只能评一次,这条交给 `reviews(order_id, sku)` 的
+        UNIQUE 约束兜底(并发下唯一可靠的判重方式),命中时捕获
+        IntegrityError 同样返回 None——调用方(API 端点)据此给出统一的
+        "不能重复评价"中文提示,而不是让 500 冒出去。
+        """
+        conn = self.connect()
+        try:
+            order = conn.execute(
+                "SELECT user, status FROM orders WHERE order_id = ?", (order_id,)
+            ).fetchone()
+            if order is None or order["status"] != "delivered" or order["user"] != user_id:
+                return None
+            cur = conn.execute(
+                "INSERT INTO reviews (order_id, user_id, sku, rating, content, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (order_id, user_id, sku, int(rating), content or "", self._now()),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+        except sqlite3.IntegrityError:
+            return None
+        finally:
+            conn.close()
+
+    def list_reviews(self, sku: Optional[str] = None, window_days: Optional[int] = None,
+                     limit: int = 50) -> list[dict]:
+        """按 id DESC 取评价,可选按 sku / 窗口天数过滤。"""
+        conn = self.connect()
+        try:
+            sql = "SELECT * FROM reviews"
+            clauses: list[str] = []
+            params: list = []
+            if sku:
+                clauses.append("sku = ?")
+                params.append(sku)
+            if window_days is not None:
+                clauses.append(f"created_at >= datetime('now', '-{max(1, int(window_days))} days')")
+            if clauses:
+                sql += " WHERE " + " AND ".join(clauses)
+            sql += " ORDER BY id DESC LIMIT ?"
+            params.append(max(1, int(limit)))
+            rows = conn.execute(sql, tuple(params)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def review_stats(self, window_days: int) -> dict:
+        """窗口内全店评价统计:总数/均分/差评率(rating<=2)。除零返回 0.0
+        而非 None——与 shop_analytics._rate 同口径,消费方是 LLM 与前端展示,
+        null 会诱导模型现编数字。"""
+        conn = self.connect()
+        try:
+            w = f"datetime('now', '-{max(1, int(window_days))} days')"
+            row = conn.execute(
+                f"SELECT COUNT(*) AS total, COALESCE(AVG(rating), 0) AS avg_rating, "
+                f"SUM(CASE WHEN rating <= 2 THEN 1 ELSE 0 END) AS bad "
+                f"FROM reviews WHERE created_at >= {w}"
+            ).fetchone()
+            total = int(row["total"] or 0)
+            bad = int(row["bad"] or 0)
+            return {
+                "window_days": int(window_days),
+                "total": total,
+                "avg_rating": float(row["avg_rating"] or 0.0) if total else 0.0,
+                "bad_rate": (bad / total) if total else 0.0,
+            }
+        finally:
+            conn.close()
+
+    def reviewable_items(self, user_id: str) -> list[dict]:
+        """该买家当前可评价的订单项:已签收(delivered) 且该 (order_id, sku)
+        尚未评过价。没收到货就能评分是假数据,故只从 delivered 订单里挑;
+        已评过的 (order_id, sku) 用 NOT EXISTS 排除,评完即从列表消失。"""
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT o.order_id AS order_id, oi.sku AS sku, oi.name AS name, "
+                "       o.delivered_at AS delivered_at "
+                "FROM orders o JOIN order_items oi ON oi.order_id = o.order_id "
+                "WHERE o.user = ? AND o.status = 'delivered' "
+                "  AND NOT EXISTS (SELECT 1 FROM reviews r "
+                "                  WHERE r.order_id = o.order_id AND r.sku = oi.sku) "
+                "ORDER BY o.created_at DESC, oi.id",
+                (user_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
         finally:
             conn.close()

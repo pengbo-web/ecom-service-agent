@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getSellerOverview, sellerChat,
-  type SellerOverview, type SellerChatReply, type EmotionDistribution } from "@/lib/api";
+  type SellerOverview, type SellerChatReply, type EmotionDistribution,
+  type ReviewInsights } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RotateCcw, Send } from "lucide-react";
@@ -85,6 +86,57 @@ export function EmotionDistributionCard({ emotion, windowDays }:
       <div className="mt-2 text-xs text-muted-foreground">
         激烈占比 {pct(emotion.angry_rate)} · 统计窗口 {windowDays} 天
       </div>
+    </Card>
+  );
+}
+
+// N4:评价洞察卡——均分/差评率 + 差评 top 商品与其关键词。`reviews` 目前是
+// 可选字段(后端刚补上,老响应体没有这个键时不该崩,走空态)。bad_terms 抽不出
+// 就是空数组(词表匹配,宁可留空也不编造),前端据此显示"暂无高频关键词"。
+export function ReviewInsightsCard({ reviews, windowDays }:
+  { reviews?: ReviewInsights; windowDays: number }) {
+  if (!reviews || reviews.total === 0) {
+    return (
+      <Card className="p-3 text-sm text-muted-foreground" data-testid="reviews-empty">
+        过去 {windowDays} 天暂无评价
+      </Card>
+    );
+  }
+  return (
+    <Card className="p-3 text-sm" data-testid="reviews-card">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+        <div>
+          <div className="text-xs text-muted-foreground">评价均分</div>
+          <div className="mt-1 text-lg font-semibold">{reviews.avg_rating.toFixed(1)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">差评率</div>
+          <div className="mt-1 text-lg font-semibold">{pct(reviews.bad_rate)}</div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">评价总数</div>
+          <div className="mt-1 text-lg font-semibold">{reviews.total}</div>
+        </div>
+      </div>
+      {reviews.products.length > 0 && (
+        <div className="mt-3 flex flex-col gap-2 border-t pt-2">
+          <div className="text-xs font-medium text-muted-foreground">差评 top 商品</div>
+          {reviews.products.map((p) => (
+            <div key={p.sku} className="flex flex-col gap-0.5 text-xs" data-testid={`review-product-${p.sku}`}>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-foreground">{p.name}</span>
+                <span className="text-muted-foreground">
+                  均分 {p.avg_rating.toFixed(1)} · 差评 {p.bad_count} 条
+                </span>
+              </div>
+              <div className="text-muted-foreground">
+                {p.bad_terms.length > 0 ? `高频词：${p.bad_terms.join("、")}` : "暂无高频关键词"}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="mt-2 text-xs text-muted-foreground">统计窗口 {windowDays} 天</div>
     </Card>
   );
 }
@@ -271,6 +323,16 @@ export function OperationsView() {
             {data && (
               <EmotionDistributionCard emotion={data.quality?.emotion} windowDays={windowDays} />
             )}
+          </div>
+        </section>
+
+        {/* 评价:均分/差评率 + 差评 top 商品与其关键词,如实摆出统计口径,
+            是否告警看下面的跨线异常区(bad_review_rate_high)。 */}
+        <section>
+          <h3 className="mb-2 text-sm font-semibold">评价</h3>
+          <div className={stale ? "opacity-60" : ""}>
+            {!data && busy && <div className="text-sm text-muted-foreground">加载中…</div>}
+            {data && <ReviewInsightsCard reviews={data.reviews} windowDays={windowDays} />}
           </div>
         </section>
 

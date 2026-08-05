@@ -71,3 +71,32 @@ def seed_from_mock(db: Database) -> None:
         conn.commit()
     finally:
         conn.close()
+
+    _seed_reviews(db)
+
+
+# 评价演示数据(N4):只对 mock_data.ORDERS 里**真正已签收**的订单项造评价——
+# 目前只有 ORD-20240110-003(大壮 / 小米14 Ultra 手机)一笔是 delivered。
+# 刻意不在这里另造合成订单来凑"多条评价":test_db_repository.py::
+# test_list_orders_count、test_tools_db.py::test_list_user_orders 都断言过
+# `len(db.list_orders()) == len(mock_data.ORDERS)`——种子脚本擅自插入
+# mock_data 之外的订单会让这两个既有断言失真,而这两个测试文件不在本任务
+# 允许改动的文件范围内。因此这里只种一条评价:避免控制台在全新安装时是
+# 空的,但不假装有更多"已签收"库存来演示多商品对比。
+_DEMO_REVIEWS = [
+    # (order_id, user, sku, rating, content)
+    ("ORD-20240110-003", "大壮", "PHONE-MI14U-BK",
+     2, "手机发热比较明显,信号也不太稳定,客服回复也慢"),
+]
+
+
+def _seed_reviews(db: Database) -> None:
+    """种子评价演示数据,避免"评价"控制台在全新安装时是空的。
+
+    走 `Database.create_review` 落评价——复用与买家提交同一条校验路径(只有
+    delivered 订单、且该订单确实属于这个用户才能评),种子数据本身也不能
+    绕开这条规则。`create_review` 自带的 UNIQUE 判重意味着重复跑本函数
+    (如多次执行种子脚本)不会插出重复评价,是安全的幂等操作。
+    """
+    for order_id, user, sku, rating, content in _DEMO_REVIEWS:
+        db.create_review(order_id, user, sku, rating, content)

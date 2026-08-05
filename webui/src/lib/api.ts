@@ -80,6 +80,35 @@ export async function getMyOrders(): Promise<MyOrder[]> {
   return r.ok ? (await r.json()).orders as MyOrder[] : [];
 }
 
+// ---- 评价(N4:买家评已签收订单;一单一 sku 只能评一次)----
+export type ReviewableItem = { order_id: string; sku: string; name: string; delivered_at: string | null };
+
+/** 当前买家可评价的已签收订单项(已评过的不会出现在这里)。 */
+export async function getReviewableItems(): Promise<ReviewableItem[]> {
+  const r = await fetch("/api/reviewable", { headers: authHeaders() });
+  if (!r.ok) throw new Error(`加载可评价订单失败 (${r.status})`);
+  return (await r.json()).items as ReviewableItem[];
+}
+
+export type SubmitReviewResult = { success: boolean; review_id?: number; reason?: string };
+
+/** 提交评价。重复评价时后端返回 success:false + reason(明确中文提示,不是 500)。 */
+export async function submitReview(
+  orderId: string, sku: string, rating: number, content: string
+): Promise<SubmitReviewResult> {
+  const r = await fetch("/api/review", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ order_id: orderId, sku, rating, content }),
+  });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch { /* 忽略非 JSON 响应体 */ }
+    throw new Error(detail || `提交评价失败 (${r.status})`);
+  }
+  return r.json();
+}
+
 // demo 一键体验:后端开 DEMO_MODE 时,前端自动登录 demo_user_id、跳过登录卡片。
 export async function getConfig(): Promise<{ demo_mode: boolean; demo_user_id: string }> {
   try {
@@ -255,6 +284,16 @@ export type EmotionDistribution = {
   angry_rate: number;
 };
 
+// N4:评价洞察(全店均分/差评率 + 差评 top 商品与其关键词)。词表匹配抽出的
+// bad_terms 可能为空(抽不出就留空,不编造),前端须按空数组处理。
+export type ReviewProduct = {
+  sku: string; name: string; avg_rating: number; bad_count: number; bad_terms: string[];
+};
+export type ReviewInsights = {
+  success: boolean; window_days: number; avg_rating: number; total: number;
+  bad_rate: number; products: ReviewProduct[];
+};
+
 export type SellerOverview = {
   overview: {
     success: boolean; window_days: number; orders: number; gmv: number;
@@ -269,6 +308,7 @@ export type SellerOverview = {
   }> };
   anomalies: SellerAnomaly[];
   quality?: { success: boolean; window_days: number; emotion: EmotionDistribution };
+  reviews?: ReviewInsights;
 };
 
 export type SellerChatReply = {
