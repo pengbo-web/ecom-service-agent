@@ -1038,7 +1038,12 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 orch.save()
             except Exception:      # noqa: BLE001 落盘失败不吞掉已生成的回复
                 logger.exception("卖家会话落盘失败 sid=%s", sid)
-        reply = result.get("reply", "") if isinstance(result, dict) else str(result)
+        # SellerOrchestrator.chat() 委托给 EcomAgent.chat(),后者恒返回
+        # CustomerServiceResponse **pydantic 对象**(与买家侧 streaming.py
+        # 的 result.reply 同一读法),从不是 dict——这里要用属性访问,
+        # 不能当 dict 用 .get(),否则永远走不到分支,只会把整个对象的 repr
+        # 字符串化后当成回复发给店主。
+        reply = result.reply
         key = getattr(orch, "last_agent_key", "analyst")
         from app.multi_agent.agents import SELLER_AGENT_CONFIGS
         return {"success": True, "reply": reply, "agent_key": key,

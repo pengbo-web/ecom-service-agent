@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.multi_agent.agents import SELLER_AGENT_CONFIGS
+from app.schemas.response import CustomerServiceResponse, IntentType
 
 
 @pytest.fixture()
@@ -43,13 +44,20 @@ def test_seller_chat_returns_agent_key(client, monkeypatch):
 
     这里刻意用 growth 而不是 analyst:analyst 恰好是端点取不到属性时的兜底值,
     用它做断言就分不清"真读到了"还是"兜底成了同一个值"——测试会失去可失败性。
+
+    FakeOrch.chat() 刻意返回**真实的 CustomerServiceResponse**(与
+    SellerOrchestrator.chat() 的真实契约一致),不用裸 dict——用 dict 会掩盖
+    "端点按属性访问读 reply"这件事:dict 恰好也有 `.get("reply")` 能用,
+    测试会在端点仍是 `isinstance(result, dict)` 分支时假装通过。
     """
     from app.api import app as appmod
 
     class FakeOrch:
         last_agent_key = "growth"
         def chat(self, text):
-            return {"reply": f"收到:{text}", "requires_human": False}
+            return CustomerServiceResponse(
+                intent=IntentType.OTHER, confidence=1.0,
+                reply=f"收到:{text}", requires_human=False)
         def save(self):
             pass
 
@@ -62,6 +70,42 @@ def test_seller_chat_returns_agent_key(client, monkeypatch):
     assert body["agent_key"] == "growth"
     assert body["agent"] == SELLER_AGENT_CONFIGS["growth"]["name"]
     assert "收到" in body["reply"]
+
+
+def test_seller_chat_reply_is_not_stringified_response_object(client, monkeypatch):
+    """核心回归:orch.chat() 返回**真实的 CustomerServiceResponse pydantic 对象**
+    (SellerOrchestrator.chat() 的真实契约,不是 dict、不是临时凑的桩),端点必须
+    把它的 `.reply` 字段原样透出,而不是把整个对象 `str()` 成一坨 repr 发给店主。
+
+    这与买家侧 streaming.py 的 `result.reply` 读法必须一致——同一个类,同一种
+    读法。falsify 时把端点临时改回
+    `result.get("reply", "") if isinstance(result, dict) else str(result)`
+    应能让本测试失败(reply 会变成 "intent=<IntentType...> confidence=1.0 reply=..."
+    这种 repr 串)。
+    """
+    from app.api import app as appmod
+
+    real_reply = "结论：近 7 天退款率高达 26.1%，建议核实商品详情页描述是否与实物一致。"
+
+    class RealOrch:
+        last_agent_key = "analyst"
+        def chat(self, text):
+            return CustomerServiceResponse(
+                intent=IntentType.PRODUCT_CONSULT, confidence=1.0,
+                reply=real_reply, requires_human=False, follow_up_question="")
+        def save(self):
+            pass
+
+    monkeypatch.setattr(appmod.seller_sessions, "get_or_create",
+                        lambda sid, user_id=None: RealOrch())
+    r = client.post("/api/seller/chat",
+                    json={"session_id": "s1", "message": "P001 退款率怎么样"}, headers=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["reply"] == real_reply
+    for scaffold in ("intent=", "confidence=", "requires_human=", "IntentType"):
+        assert scaffold not in body["reply"], (
+            f"回复里混入了 CustomerServiceResponse 的 repr 片段 {scaffold!r}: {body['reply']!r}")
 
 
 def test_seller_chat_404_when_console_disabled(client, monkeypatch):

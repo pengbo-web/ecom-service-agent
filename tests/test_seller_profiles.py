@@ -93,6 +93,22 @@ def test_analyst_prompt_forbids_fabrication():
     assert "只读" in p
 
 
+def test_analyst_prompt_states_no_per_variant_breakdown():
+    """prompt 必须写死"本店数据没有按尺码/颜色/规格拆分的库存或销量"这条约束。
+
+    背景:一次真实回答里,参谋在"没编造 GMV/退款率"之外,编出了一句
+    "43/44/45 码共 12 双"——系统里 `products.stock` 只是一个整体数字,压根没有
+    这张细分表。旧的 _NO_FABRICATION 只笼统禁止"编数字",没有点名"规格细分"
+    这个具体缺口,才会在一处与真实数据相邻的细节上失守。
+
+    本测试只能钉住"prompt 里写没写这条约束"这一件事,不能证明模型今后真的
+    不会编——那要靠真实/回归对话去验证,prompt 文本测试保证不了行为。
+    """
+    p = SELLER_AGENT_CONFIGS["analyst"]["prompt"]
+    assert "尺码" in p and "规格" in p
+    assert "没有" in p and ("细分" in p or "拆分" in p)
+
+
 def test_growth_prompt_states_draft_only():
     """营销 Agent 的 prompt 必须写死"只出草稿、不发送"。"""
     p = SELLER_AGENT_CONFIGS["growth"]["prompt"]
