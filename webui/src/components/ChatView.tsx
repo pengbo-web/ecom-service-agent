@@ -109,7 +109,10 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
       }
       else if (["thought", "tool_call", "tool_result", "guard", "route", "select", "evaluate", "polish", "recall", "faq_cache"].includes(e.type)) patch((t) => ({ ...t, activity: [...t.activity, e] }));
       else if (e.type === "reply") patch((t) => ({ ...t, reply: e.content }));
-      else if (e.type === "metadata") patch((t) => ({ ...t, meta: { intent: e.intent, confidence: e.confidence, requires_human: e.requires_human, follow_up_question: e.follow_up_question } }));
+      else if (e.type === "metadata") patch((t) => ({ ...t, meta: { intent: e.intent, confidence: e.confidence, requires_human: e.requires_human, follow_up_question: e.follow_up_question,
+        // N2:情绪信号是附加字段,老后端/规则快筛轮次可能不带——同任务其余
+        // 各处一致地按 neutral/0 兜底,不是留 undefined 让下游各自猜。
+        emotion: e.emotion ?? "neutral", emotion_level: e.emotion_level ?? 0 } }));
       else if (e.type === "handoff") patch((t) => ({ ...t, handoff: e.reasons || [] }));
       else if (e.type === "error") {
         if (e.status === 401) { clearToken(); location.reload(); return; }

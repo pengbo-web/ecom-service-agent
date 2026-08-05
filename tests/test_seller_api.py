@@ -39,6 +39,22 @@ def test_seller_overview_returns_metrics_and_anomalies(client):
     assert body["overview"]["success"] is True
 
 
+def test_seller_overview_carries_emotion_section(client):
+    """N2 回归:情绪分布必须真正跨过 HTTP 边界到达控制台,不能只是
+    service_quality() 这个 Python 函数自己测过、端点却没转发。空库场景下
+    total 应为 0、angry_rate 为 0.0(除零安全,不是 None)。"""
+    r = client.get("/api/seller/overview?window_days=7", headers=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert "quality" in body
+    emotion = body["quality"]["emotion"]
+    assert emotion["total"] == 0
+    assert emotion["angry_rate"] == 0.0
+    assert set(emotion["counts"]) == {"neutral", "unhappy", "angry"}
+    # 既有键必须原样还在——新增是附加的,不是替换
+    assert "overview" in body and "products" in body and "anomalies" in body
+
+
 def test_seller_chat_returns_agent_key(client, monkeypatch):
     """本轮由哪个画像作答,必须**读编排器的真实结果**,不能是端点兜底猜的。
 

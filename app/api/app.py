@@ -1052,14 +1052,21 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.get("/api/seller/overview", dependencies=[Depends(admin_auth)])
     def seller_overview(window_days: int = 7):
-        """控制台首屏:经营总览 + 商品诊断 + 当前异常。全只读,不调用 LLM,可高频轮询刷新。"""
+        """控制台首屏:经营总览 + 商品诊断 + 当前异常 + 服务质量(含情绪分布)。
+
+        全只读,不调用 LLM,可高频轮询刷新。`quality` 是 N2 新增的附加键
+        (不动既有 overview/products/anomalies),前端「经营诊断」的情绪分布卡
+        靠它拿到 service_quality() 里的 emotion 段。
+        """
         _require_seller_console()
         from app.agent.tools.anomaly import anomaly_scan
-        from app.agent.tools.shop_analytics import product_diagnostics, shop_overview
+        from app.agent.tools.shop_analytics import (
+            product_diagnostics, service_quality, shop_overview)
         return {
             "overview": shop_overview(window_days=window_days),
             "products": product_diagnostics(window_days=window_days, top_n=5),
             "anomalies": anomaly_scan(window_days=window_days)["anomalies"],
+            "quality": service_quality(window_days=window_days),
         }
 
     @app.get("/api/admin/shop/profile", dependencies=[Depends(admin_auth)])
