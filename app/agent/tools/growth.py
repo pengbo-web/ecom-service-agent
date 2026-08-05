@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from app.agent.tools.user_orders import STATUS_LABELS
 from app.db import get_db
 
 # 支持的商机类型。未知 kind **拒绝**而不是猜一个,否则模型写错一个词就静默取错人群。
@@ -84,7 +85,7 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
     try:
         if kind == "stale_pending_order":
             rows = conn.execute(
-                f"SELECT o.order_id, o.user AS user_id, o.total, o.created_at, "
+                f"SELECT o.order_id, o.user AS user_id, o.status, o.total, o.created_at, "
                 f"       GROUP_CONCAT(oi.name, '、') AS items "
                 f"FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.order_id "
                 f"WHERE o.status = ? "
@@ -92,7 +93,15 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
                 f"  AND o.created_at >= datetime('now', '-{days} days') "
                 f"GROUP BY o.order_id ORDER BY o.created_at DESC LIMIT ?",
                 (_STALE_PENDING_STATUS, lim)).fetchall()
-            items = [{"kind": kind, "order_id": r["order_id"], "user_id": r["user_id"],
+            # situation_label/order_status(_label) 是把"这是什么商机、订单现在
+            # 到底是什么状态"下沉到每一条 item 里,而不是只留在顶层 kind_label——
+            # handle_insight 传给 _llm_draft 的只有单条 opportunity dict,顶层
+            # 字段它根本看不到。order_status_label 复用 user_orders.STATUS_LABELS
+            # 这份唯一口径,不在这里另起一份映射,避免两处措辞后续走岔。
+            items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
+                      "order_id": r["order_id"], "user_id": r["user_id"],
+                      "order_status": r["status"],
+                      "order_status_label": STATUS_LABELS.get(r["status"], r["status"]),
                       "amount": float(r["total"] or 0.0), "created_at": r["created_at"],
                       "items": r["items"] or ""} for r in rows]
 
@@ -110,7 +119,8 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
                 f"JOIN conversations c ON c.conversation_id = b.session_id "
                 f"WHERE b.updated_at >= datetime('now', '-{days} days') AND b.rounds > 0 "
                 f"ORDER BY b.updated_at DESC LIMIT ?", (lim,)).fetchall()
-            items = [{"kind": kind, "order_id": "", "user_id": r["buyer_id"],
+            items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
+                      "order_id": "", "user_id": r["buyer_id"],
                       "session_id": r["session_id"], "product_id": r["product_id"],
                       "rounds": int(r["rounds"] or 0), "last_offer": r["last_offer"],
                       "created_at": r["updated_at"]} for r in rows]
@@ -125,7 +135,8 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
                 f"WHERE c.created_at >= datetime('now', '-{days} days') "
                 f"  AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.user = c.user_id) "
                 f"GROUP BY c.user_id ORDER BY convs DESC LIMIT ?", (lim,)).fetchall()
-            items = [{"kind": kind, "order_id": "", "user_id": r["user_id"],
+            items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
+                      "order_id": "", "user_id": r["user_id"],
                       "conversations": int(r["convs"] or 0), "created_at": r["last_at"]}
                      for r in rows]
 

@@ -1,5 +1,6 @@
 """协作链路:信号→诊断→草稿的串联、correlation 贯通、LLM 失败降级、不给投诉用户推销。"""
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -45,6 +46,73 @@ def _signal(d, corr="C1", kind="refund_rate_high", subject="P001"):
         "value": 0.3, "threshold": 0.15,
         "detail": {"orders": 20, "refunds": 6, "top_reason": "尺码不准"},
     }, bus.AGENT_SERVICE, bus.AGENT_ANALYST, corr)
+
+
+class _FakeMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, content):
+        self.message = _FakeMessage(content)
+
+
+class _FakeResponse:
+    def __init__(self, content):
+        self.choices = [_FakeChoice(content)]
+
+
+class _FakeCompletions:
+    def __init__(self):
+        self.calls = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        return _FakeResponse("已生成")
+
+
+class _FakeChat:
+    def __init__(self):
+        self.completions = _FakeCompletions()
+
+
+class _FakeClient:
+    def __init__(self):
+        self.chat = _FakeChat()
+
+
+def test_draft_prompt_states_real_situation_not_bare_kind(monkeypatch):
+    """回归测试:_llm_draft 拼给模型的 prompt 必须包含中文情境说明与订单真实
+    状态,而不能让模型只看到一个裸的英文 kind 去自己猜——这正是"待支付"
+    误写事故的根因。同时验证数据段改用 JSON 序列化(而不是 Python repr),
+    否则中文会被转成 \\uXXXX 转义,模型读到的就不是真人能看懂的中文。"""
+    fake_client = _FakeClient()
+    monkeypatch.setattr(collab, "_collab_client", lambda: fake_client)
+
+    opportunity = {
+        "kind": "stale_pending_order",
+        "situation_label": "下单后久未推进",
+        "order_id": "O1", "user_id": "u1",
+        "order_status": "pending", "order_status_label": "待发货",
+        "amount": 199.0, "created_at": "2026-01-01 00:00:00", "items": "跑鞋",
+    }
+    diagnosis = {"conclusion": "尺码问题"}
+
+    collab._llm_draft(diagnosis, opportunity)
+
+    assert len(fake_client.chat.completions.calls) == 1
+    prompt = fake_client.chat.completions.calls[0]["messages"][0]["content"]
+
+    # 情境必须落在 prompt 里,写手不用再靠猜的
+    assert "下单后久未推进" in prompt
+    assert "待发货" in prompt
+    # 数据段确实是 JSON(ensure_ascii=False),而不是 f"{opportunity}" 的 repr——
+    # repr 里的中文会被转义成 \uXXXX,不会原样出现在 prompt 文本里。
+    assert json.dumps(opportunity, ensure_ascii=False) in prompt
+    # 裸的英文 kind 值不能是对这个情境的唯一描述——它可以仍然出现在 JSON
+    # 数据里,但必须同时伴有中文情境说明,不能是模型唯一能看到的线索。
+    assert "situation_label" in prompt or "下单后久未推进" in prompt
 
 
 def test_analyst_writes_diagnosis_and_forwards(db):

@@ -77,6 +77,22 @@ def test_find_stale_pending_orders(db):
     assert out["opportunities"][0]["user_id"] == "u1"
 
 
+def test_stale_pending_item_carries_situation_and_real_order_status(db):
+    """回归测试:商机 item 必须自带中文情境说明与订单真实状态,不能只剩一个
+    裸的英文 kind——这正是"草稿把已付款订单写成还在待支付"那个 bug 的根因,
+    handle_insight 传给 _llm_draft 的只有单条 opportunity dict,顶层
+    kind_label 它根本看不到,模型只能靠 "pending" 这个词自己脑补。"""
+    _order(db, "O1", "u1", "pending", days_ago=3)        # 72h,超过 48h 阈值,算商机
+    out = growth.find_opportunities(kind="stale_pending_order", window_days=14)
+    assert out["success"] is True
+    opp = out["opportunities"][0]
+    assert opp["situation_label"] == "下单后久未推进"
+    # pending 在这个项目里的真实语义是"待发货"(已付款),不是"待支付"——
+    # 直接断言这个真实状态与其中文展示,防止有人把口径悄悄改回错的那个。
+    assert opp["order_status"] == "pending"
+    assert opp["order_status_label"] == "待发货"
+
+
 def test_find_respects_window(db):
     _order(db, "O1", "u1", "pending", days_ago=90)
     assert growth.find_opportunities(
