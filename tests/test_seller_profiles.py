@@ -61,6 +61,32 @@ def test_all_declared_tools_are_registered():
         assert missing == set(), f"{key} 声明了未注册的工具: {missing}"
 
 
+def test_eval_sandbox_agent_gets_no_seller_tools(tmp_path):
+    """【I4】边界不能只在**画像配置**上成立——还有第二条构造路径。
+
+    评估沙箱的单 Agent 模式直接 `EcomAgent(...)`,不经过任何画像,拿到的是
+    **全量注册表**:`shop_overview`(全店营收进评测轨迹)、以及
+    `draft_outreach` —— 这条路径上唯一一个不在 admin 鉴权后面的卖家**写**工具。
+    上面那几条只断言 AGENT_CONFIGS / SELLER_AGENT_CONFIGS,对它完全看不见。
+
+    所以这里断言的是真正构造出来的 ToolManager 暴露了什么,而不是配置里写了什么。
+    """
+    from app.evaluation.sandbox import Sandbox
+
+    agent = Sandbox(tmp_root=str(tmp_path))._build_agent(str(tmp_path / "s.json"))
+    try:
+        exposed = {d["function"]["name"] for d in agent.tool_manager.tool_definitions}
+        assert exposed & SELLER_ONLY_TOOLS == set(), \
+            f"评估沙箱把 B 端工具交给了买家 Agent: {exposed & SELLER_ONLY_TOOLS}"
+        # 同时确认没有把买家工具也一起关掉(否则测试"通过"只是因为工具全空)
+        assert "query_order" in exposed and "apply_refund" in exposed
+    finally:
+        try:
+            agent.tool_manager.close()
+        except Exception:
+            pass
+
+
 def test_analyst_prompt_forbids_fabrication():
     p = SELLER_AGENT_CONFIGS["analyst"]["prompt"]
     assert "不要编造" in p or "不得编造" in p

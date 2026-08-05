@@ -20,6 +20,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from app.agent.tools.manager import ToolManager
 from app.config.settings import settings
 from app.evaluation.dataset import EvalCase
 from app.evaluation.trace import LLMCallRecord, RunTrace, ToolObservation
@@ -36,6 +37,20 @@ class Sandbox:
     def session_path_for(self, case_id: str) -> str:
         return str(self.tmp_root / f"{case_id}.json")
 
+    @staticmethod
+    def buyer_tool_names() -> set:
+        """被测买家 Agent 允许看到的工具全集 = 三副买家画像工具子集的并集。
+
+        **从 AGENT_CONFIGS 派生,不手抄名单**:手抄的名单只在"当时没漏"时成立,
+        新加一个 B 端工具就会悄悄漏进来(这正是 draft_outreach 踩过的坑)。派生
+        之后,新增买家工具自动纳入、新增卖家工具自动排除,名单不会和事实分家。
+        """
+        from app.multi_agent.agents import AGENT_CONFIGS
+        allowed: set = set()
+        for cfg in AGENT_CONFIGS.values():
+            allowed |= set(cfg["tools"])
+        return allowed
+
     def _build_agent(self, session_path: str):
         """在隔离配置下构建被测 Agent。"""
         # 关闭记忆读写与 MCP，保证可复现（agent.__init__ 直接读全局 settings）
@@ -46,7 +61,24 @@ class Sandbox:
             from app.multi_agent.orchestrator import MultiAgentOrchestrator
             return MultiAgentOrchestrator(session_path=session_path)
         from app.agent.chat import EcomAgent
-        return EcomAgent(session_path=session_path)
+        agent = EcomAgent(session_path=session_path)
+        # 单 Agent 模式下 EcomAgent 自带的 ToolManager 是**全量注册表**,里面含
+        # 只属于店主侧的 shop_overview（全店营收）/ product_diagnostics 等只读
+        # 工具,以及 draft_outreach —— 后者是一个**写**工具,而且是这条构造路径上
+        # 唯一一个不在 admin 鉴权后面的卖家写工具。被测的是买家会话,评测记录会被
+        # 完整落进 RunTrace,没有任何理由让它们出现在这里。
+        # 换成买家画像并集的受限 ToolManager(与多 Agent 模式下每副画像的做法同
+        # 一手法:orchestrator 也是构造后把 engine.tool_manager 换成受限的那个)。
+        old_tm = agent.tool_manager
+        agent.tool_manager = ToolManager(
+            use_mcp=False,                     # 上面刚关掉,显式写出避免被误读
+            allowed_tools=self.buyer_tool_names(),
+        )
+        try:
+            old_tm.close()                     # 换掉的那个要关,否则本身就是泄漏
+        except Exception:  # noqa: BLE001 关不掉不该让整条用例跑不起来
+            pass
+        return agent
 
     def run(self, case: EvalCase) -> RunTrace:
         """跑一条用例，返回采集到的运行轨迹。"""

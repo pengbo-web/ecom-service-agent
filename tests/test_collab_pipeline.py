@@ -127,6 +127,99 @@ def test_disabled_switch_is_a_no_op(db, monkeypatch):
     monkeypatch.setattr(st.settings, "collab_enabled", False)
     stats = collab.run_once()
     assert stats["analyst"]["claimed"] == 0
+    assert stats["reclaimed"] == 0   # 开关关掉时回收也必须静默,不能悄悄改库
+
+
+def test_worker_cycle_reclaims_stranded_events(db):
+    """【I1】worker 崩在 claim 与 finish 之间留下的事件,必须能经 **worker 路径**
+    自己回到队列。
+
+    `reclaim_stale_events` 一直存在,但在这次修复前**只有测试调它**:
+    `run_once()` 没调、CLI 的 cycle() 没调、启动路径也没调。于是
+    `bus._finish_and_count` 的 docstring 里那句"交给 reclaim_stale_events 或人工
+    决定"实际上只剩"人工"——被认领后遇上进程被杀的事件永久停在 processing。
+
+    这条测试刻意**不直接调 db.reclaim_stale_events**(那样只会重新验证数据层,
+    正是修复前就已经绿着的那部分),而是模拟崩溃后走 `collab.run_once()`,
+    断言事件真的被本轮重新认领并处理掉。
+    """
+    _signal(db)
+    # 模拟"认领后 worker 就挂了":claim 把行置成 processing,finish 永远没发生
+    claimed = db.claim_events(bus.AGENT_ANALYST)
+    assert len(claimed) == 1
+    stranded_id = claimed[0]["id"]
+    conn = db.connect()
+    try:   # 把 consumed_at 拨老,越过回收阈值
+        conn.execute("UPDATE agent_events SET consumed_at = datetime('now','-1 hours') "
+                     "WHERE id = ?", (stranded_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    assert [e for e in db.list_events() if e["id"] == stranded_id][0]["status"] == "processing"
+
+    with patch.object(collab, "_llm_explain", return_value="尺码问题"):
+        stats = collab.run_once()
+
+    assert stats["reclaimed"] == 1
+    assert stats["analyst"]["claimed"] == 1, "回收必须发生在消费之前,本轮就该被重新认领"
+    assert [e for e in db.list_events() if e["id"] == stranded_id][0]["status"] == "done"
+
+
+def test_fresh_processing_event_is_not_stolen_by_reclaim(db):
+    """回收不得把**刚刚**被认领、还在正常处理中的事件抢回来(否则会重复处理)。"""
+    _signal(db)
+    claimed = db.claim_events(bus.AGENT_ANALYST)
+    assert len(claimed) == 1
+    stats = collab.run_once()          # consumed_at 是刚才,远没到 300 秒阈值
+    assert stats["reclaimed"] == 0
+    assert stats["analyst"]["claimed"] == 0
+
+
+def test_two_insights_on_one_chain_do_not_double_queue_the_same_buyer(db):
+    """【I3】一次扫描判定多个 SKU 异常 → 多条 insight.diagnosis → 同一批商机被
+    重复起草,同一个买家在审批队列里躺着好几条几乎相同的草稿。
+
+    人工闸挡得住"自动发出",挡不住审批队列被灌满——而店主是挨个批下去的,
+    批完就等于给同一个买家连发了好几条。所以起草侧要跳过"该买家/该订单已经
+    有一条待审草稿"的商机。
+    """
+    _unpaid(db, "O1", "u1")
+    _signal(db, corr="C9", subject="P001")
+    _signal(db, corr="C9", subject="P002")   # 同一条链上的第二个跨线商品
+
+    with patch.object(collab, "_llm_explain", return_value="尺码问题"), \
+         patch.object(collab, "_llm_draft", return_value="尺码建议已更新"):
+        collab.run_once()
+
+    drafts = db.list_outreach_drafts(status="draft")
+    assert len(drafts) == 1, f"同一买家同一订单被排了 {len(drafts)} 次队"
+    assert drafts[0]["user_id"] == "u1" and drafts[0]["order_id"] == "O1"
+
+
+def test_dedupe_key_is_per_order_not_per_buyer(db):
+    """去重键是 (user_id, order_id):同一个买家名下**两笔不同**的滞留订单是两件
+    真事,合并掉会让其中一笔永远得不到触达。"""
+    _unpaid(db, "O1", "u1")
+    _unpaid(db, "O2", "u1")   # 同一个买家,另一笔订单
+    _signal(db, corr="C10")
+    with patch.object(collab, "_llm_explain", return_value="尺码问题"), \
+         patch.object(collab, "_llm_draft", return_value="话术"):
+        collab.run_once()
+    drafts = db.list_outreach_drafts(status="draft")
+    assert {d["order_id"] for d in drafts} == {"O1", "O2"}
+
+
+def test_dedupe_ignores_already_reviewed_drafts(db):
+    """只有**还在待审**的草稿参与去重:店主处理过的历史不该永久封杀再次触达。"""
+    _unpaid(db, "O1", "u1")
+    did = db.create_outreach_draft("stale_pending_order", "u1", "O1", "旧的", {},
+                                   "r", "C0", "growth")
+    db.review_outreach_draft(did, "rejected", "admin")   # 已驳回 → 不再挡新草稿
+    _signal(db, corr="C11")
+    with patch.object(collab, "_llm_explain", return_value="尺码问题"), \
+         patch.object(collab, "_llm_draft", return_value="新话术"):
+        collab.run_once()
+    assert len(db.list_outreach_drafts(status="draft")) == 1
 
 
 def test_degraded_diagnosis_is_not_forwarded_to_marketing(db):

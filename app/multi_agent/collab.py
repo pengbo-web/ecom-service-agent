@@ -27,13 +27,29 @@ logger = logging.getLogger(__name__)
 MARKETING_WORTHY = {"refund_rate_high"}
 
 
-def _llm_explain(anomaly: dict, facts: dict) -> str:
-    """让模型基于**已给定的事实**做归因与建议。判定权不在这里。"""
+def _collab_client():
+    """协作 worker 专用的 OpenAI 客户端:**带超时与重试上限**。
+
+    买家热路径用的是容错客户端(主备熔断 + 明确超时),而这里原本是一个裸
+    `OpenAI(...)`,连超时都没给。worker 是单线程串行的,`--loop` 也没有看门狗:
+    一次挂死的 completion 会把整个协作循环无限期停在那里,既不报错也没人知道。
+    所以给一个明确的上限——超时抛出后,归因侧走既有的"降级为纯统计"分支、起草侧
+    走"跳过这个商机"分支,两条路都已经写好了,这一轮降级远好过永久卡死。
+    """
     from openai import OpenAI
 
     from app.config.settings import settings
 
-    client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+    return OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url,
+                  timeout=settings.collab_llm_timeout_s,
+                  max_retries=settings.collab_llm_max_retries)
+
+
+def _llm_explain(anomaly: dict, facts: dict) -> str:
+    """让模型基于**已给定的事实**做归因与建议。判定权不在这里。"""
+    from app.config.settings import settings
+
+    client = _collab_client()
     prompt = (
         "你是电商店铺的经营参谋。下面是系统按确定性阈值扫出的一条异常，以及相关统计事实。\n"
         "请用 2-3 句中文给出：最可能的原因 + 1 条可落地的动作建议。\n"
@@ -57,11 +73,9 @@ def _llm_explain(anomaly: dict, facts: dict) -> str:
 
 def _llm_draft(diagnosis: dict, opportunity: dict) -> str:
     """基于诊断与单个商机起草一条触达话术。"""
-    from openai import OpenAI
-
     from app.config.settings import settings
 
-    client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+    client = _collab_client()
     prompt = (
         "你是电商店铺的营销助手。请为下面这位买家写一条触达话术。\n"
         "要求：中文、口语、不超过 3 句；点出他的具体情境；"
@@ -127,8 +141,31 @@ def handle_insight(event: dict) -> dict:
 
     found = find_opportunities(kind="stale_pending_order", window_days=14, limit=20)
     opportunities = found.get("opportunities", []) if found.get("success") else []
+
+    # 去重闸:一次扫描可能同时判定多个 SKU 异常,于是发出多条 insight.diagnosis,
+    # 而本处理器**不按诊断对象取商机**——它每次都重新查同一份全局商机集合。
+    # 不去重的话,3 个跨线商品 = 每个滞留订单 3 条几乎相同的草稿挂在同一条链上。
+    # 人工闸挡得住"发出去",挡不住审批队列被灌满,而店主是挨个批的:批完就等于
+    # 给同一个买家连发了 3 条。
+    # 去重键选 (user_id, order_id) 而不是只看 user_id:草稿正文点的是**这一单**
+    # 卡在哪一步,同一个买家名下两笔不同的滞留订单是两件真事,合并掉会让其中一笔
+    # 永远得不到触达。而 stalled_bargain / consulted_no_order 这两类商机的
+    # order_id 恒为空串,键自然退化成 (user_id, ""),对它们正好就是"每个买家一条",
+    # 也是对的口径——同一个键表达的始终是"同一件要跟买家说的事"。
+    skipped_duplicate = 0
+    try:
+        seen = get_db().pending_outreach_targets()
+    except Exception:  # noqa: BLE001 读不到待审队列就退化成不去重(fail-open):
+        # 宁可多排一条给人工看,也不能因为一次读库抖动就把整批商机全丢掉。
+        logger.warning("读取待审草稿去重集合失败,本轮不做去重", exc_info=True)
+        seen = set()
+
     drafted = 0
     for opp in opportunities:
+        dedupe_key = (str(opp.get("user_id") or ""), str(opp.get("order_id") or ""))
+        if dedupe_key in seen:
+            skipped_duplicate += 1
+            continue
         try:
             content = _llm_draft(diagnosis, opp)
         except Exception:  # noqa: BLE001 单个话术失败跳过,不拖垮整批
@@ -146,13 +183,20 @@ def handle_insight(event: dict) -> dict:
             # 把草稿挂到本条协作链上,时间线才串得起来;挂链失败/被状态守卫
             # 拒绝都不影响这条草稿已经落库的事实,详见 _attach_correlation。
             _attach_correlation(int(res["draft_id"]), corr)
+            # 同一次调用里后面的商机不会再撞上这一条(理论上 find_opportunities
+            # 已按订单去重),更重要的是让本轮的新草稿对**下一条 insight 事件**
+            # 立刻可见——同一次 run_once 里第二条诊断走的是新的 seen 快照。
+            seen.add(dedupe_key)
             drafted += 1
 
+    if skipped_duplicate:
+        logger.info("跳过 %s 个已有待审草稿的商机(同一买家/订单不重复排队) corr=%s",
+                    skipped_duplicate, corr)
     if drafted:
         bus.publish(bus.EV_DRAFTS_READY,
                     {"drafted": drafted, "diagnosis": diagnosis.get("conclusion", "")},
                     bus.AGENT_GROWTH, bus.AGENT_HUMAN, correlation_id=corr)
-    return {"drafted": drafted}
+    return {"drafted": drafted, "skipped_duplicate": skipped_duplicate}
 
 
 def _attach_correlation(draft_id: int, correlation_id: str) -> bool:
@@ -188,8 +232,42 @@ def _attach_correlation(draft_id: int, correlation_id: str) -> bool:
         return False
 
 
-def run_once(limit: int = 20) -> dict:
+#: worker 每轮先回收滞留多久的 processing 事件。取 300 秒:比任何一次正常处理
+#: (最慢的一段是两次 LLM 调用,有超时兜底)都长得多,不会把还在跑的事件抢回去;
+#: 又远短于人来发现"worker 死了"的时间。
+RECLAIM_AFTER_SECONDS = 300
+
+
+def _reclaim_stale(older_than_seconds: int) -> int:
+    """把崩溃 worker 遗留在 processing 的事件放回队列,返回回收条数。
+
+    `Database.reclaim_stale_events` 一直存在,却从来没有生产调用方——只有测试在
+    调它。于是 `bus._finish_and_count` 的 docstring 里"交给 reclaim_stale_events
+    或人工决定"其实只剩"人工":worker 在 claim 之后、finish 之前挂掉(进程被杀、
+    机器重启、SQLite 抛锁),那条事件就永久停在 processing,新 worker 再也捞不到。
+    把它接进 worker 的每轮开头,恢复才真的会发生。
+
+    fail-soft:回收本身失败绝不能让这一轮消费跑不起来——回收是"锦上添花的恢复",
+    而正常的新事件消费比恢复旧事件更要紧。开关关掉时与总线的其它入口一样完全静默。
+    """
+    from app.config.settings import settings
+
+    if not getattr(settings, "collab_enabled", True):
+        return 0
+    try:
+        return get_db().reclaim_stale_events(older_than_seconds=older_than_seconds)
+    except Exception as exc:  # noqa: BLE001 恢复失败不该让本轮消费跑不起来
+        logger.warning("回收滞留事件失败(本轮跳过恢复): %s", exc)
+        return 0
+
+
+def run_once(limit: int = 20,
+             reclaim_after_seconds: int = RECLAIM_AFTER_SECONDS) -> dict:
     """跑一轮协作,**一次调用即可跑完整条 signal→diagnosis→drafts 链路**。
+
+    每轮开头先回收滞留的 processing 事件(见 `_reclaim_stale`),再消费——顺序
+    是刻意的:回收在前,被放回 pending 的事件在**本轮**就能被重新认领,而不用等
+    到下一轮。
 
     本函数在同一次调用里顺序做两件事:先 `bus.consume(AGENT_ANALYST, ...)`
     认领并处理参谋段事件——`handle_signal` 对值得营销的诊断会同步
@@ -201,9 +279,12 @@ def run_once(limit: int = 20) -> dict:
     也就是说:对一条新到的 signal.anomaly,调用一次 `run_once()` 就足以
     走完全链路,不需要连续调两次去"分段推进";再调一次只会看到队列已空
     (`claimed == 0`),这正是幂等消费的体现,不代表还有下一段要跑。
-    返回两段各自的消费统计 {claimed, done, failed[, persist_failed]}。
+    返回两段各自的消费统计 {claimed, done, failed[, persist_failed]},外加本轮
+    回收的滞留事件条数 `reclaimed`。
     """
+    reclaimed = _reclaim_stale(reclaim_after_seconds)
     return {
+        "reclaimed": reclaimed,
         "analyst": bus.consume(bus.AGENT_ANALYST, handle_signal, limit=limit),
         "growth": bus.consume(bus.AGENT_GROWTH, handle_insight, limit=limit),
     }

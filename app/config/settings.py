@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     # ---- 多 Agent 协作(总线/参谋/营销);关=完全回到单客服 Agent 现状 ----
     collab_enabled: bool = True
     seller_console_enabled: bool = True     # B 端经营控制台入口
+    # 协作 worker 里两次 LLM 调用(参谋归因 / 营销起草)的超时与重试上限。
+    # worker 是单线程串行的,--loop 也没有看门狗:一次挂死的 completion 会把整个
+    # 协作循环停在那里,而且没有任何人会收到通知。给一个明确上限,宁可这一轮降级
+    # (归因失败会走纯统计降级路径,起草失败会跳过该商机)也不要无限期卡住。
+    collab_llm_timeout_s: float = 30.0
+    collab_llm_max_retries: int = 1
 
     # 异常扫描阈值(确定性判定,不经 LLM);min_samples 防"1 单退 1 单=100%"的假警报
     anomaly_refund_rate: float = 0.15        # 商品退款率告警线

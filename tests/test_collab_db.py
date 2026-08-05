@@ -1,4 +1,10 @@
-"""协作总线/共享上下文/触达草稿的数据层测试。"""
+"""协作总线/共享上下文/触达草稿的数据层测试。
+
+草稿夹具的 opportunity_type 一律用 `stale_pending_order` —— 生产真正产得出来的
+那个值。原先用的 `unpaid_order` 早在 M9 就被证伪并删掉了(这个项目的订单表根本
+没有"未支付"状态,催付款是个伪需求),留着它就是又一次"夹具用了生产永远不会产生
+的值"——本特性已经被这个模式咬过好几回,不再留第二现场。
+"""
 
 import json
 
@@ -177,9 +183,9 @@ def test_shared_context_overwrites_same_key(db):
 
 def test_outreach_draft_lifecycle(db):
     did = db.create_outreach_draft(
-        opportunity_type="unpaid_order", user_id="u1", order_id="ORD-1",
+        opportunity_type="stale_pending_order", user_id="u1", order_id="ORD-1",
         content="亲,这款鞋我们已更新尺码建议", offer={"coupon": "9折"},
-        reason="尺码疑虑导致未付款", correlation_id="C1", created_by="growth")
+        reason="尺码疑虑导致下单后一直没推进", correlation_id="C1", created_by="growth")
     assert did > 0
     drafts = db.list_outreach_drafts(status="draft")
     assert len(drafts) == 1
@@ -191,13 +197,13 @@ def test_outreach_draft_lifecycle(db):
 
 def test_review_only_applies_to_draft_state(db):
     """已审的草稿不能被再审一次——防止重复发送。"""
-    did = db.create_outreach_draft("unpaid_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
+    did = db.create_outreach_draft("stale_pending_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
     assert db.review_outreach_draft(did, "approved", "admin") is True
     assert db.review_outreach_draft(did, "rejected", "admin2") is False
 
 
 def test_mark_outreach_sent_transitions_approved_to_sent(db):
-    did = db.create_outreach_draft("unpaid_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
+    did = db.create_outreach_draft("stale_pending_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
     db.review_outreach_draft(did, "approved", "admin")
     assert db.mark_outreach_sent(did) is True
     assert db.get_outreach_draft(did)["status"] == "sent"
@@ -205,7 +211,7 @@ def test_mark_outreach_sent_transitions_approved_to_sent(db):
 
 def test_mark_outreach_sent_is_not_idempotent_twice(db):
     """这是拦住"同一条消息发给真实买家两遍"的最后一道闸——必须只成功一次。"""
-    did = db.create_outreach_draft("unpaid_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
+    did = db.create_outreach_draft("stale_pending_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
     db.review_outreach_draft(did, "approved", "admin")
     assert db.mark_outreach_sent(did) is True
     assert db.mark_outreach_sent(did) is False
@@ -213,13 +219,13 @@ def test_mark_outreach_sent_is_not_idempotent_twice(db):
 
 def test_mark_outreach_sent_rejects_draft_state(db):
     """草稿没经过批准,不能直接跳到已发送。"""
-    did = db.create_outreach_draft("unpaid_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
+    did = db.create_outreach_draft("stale_pending_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
     assert db.mark_outreach_sent(did) is False
     assert db.get_outreach_draft(did)["status"] == "draft"
 
 
 def test_mark_outreach_sent_rejects_rejected_state(db):
-    did = db.create_outreach_draft("unpaid_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
+    did = db.create_outreach_draft("stale_pending_order", "u1", "ORD-1", "x", {}, "r", "C1", "growth")
     db.review_outreach_draft(did, "rejected", "admin")
     assert db.mark_outreach_sent(did) is False
     assert db.get_outreach_draft(did)["status"] == "rejected"

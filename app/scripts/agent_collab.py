@@ -36,7 +36,10 @@ def main(argv=None) -> int:
                   f"corr={s['correlation_id']}", flush=True)
         if args.once or args.loop:
             stats = run_once()
-            print(f"[consume] analyst={stats['analyst']} growth={stats['growth']}", flush=True)
+            # reclaimed 单独打出来:它是"上一个 worker 崩在半路"的唯一可见信号,
+            # 混在两段消费统计里会被忽略掉。
+            print(f"[consume] reclaimed={stats['reclaimed']} "
+                  f"analyst={stats['analyst']} growth={stats['growth']}", flush=True)
 
     if args.loop:
         while True:
