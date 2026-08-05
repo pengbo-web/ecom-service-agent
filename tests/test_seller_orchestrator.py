@@ -73,16 +73,31 @@ class FakeRouter:
 
 
 @pytest.fixture()
-def orch(monkeypatch):
-    """真实构造的 SellerOrchestrator,三处外部依赖(引擎/工具管理器/路由器)打桩。"""
+def orch(monkeypatch, tmp_path):
+    """真实构造的 SellerOrchestrator,三处外部依赖(引擎/工具管理器/路由器)打桩。
+
+    另外隔离数据库:SellerOrchestrator.chat() 会经 `_shared_context_block()` →
+    `shared_context.recent_entries()` 读全局单例 get_db(),默认指向进程级的
+    `app/sessions/ecom.db`——这张本地开发用的 scratch 库会跨次真实运行累积
+    diagnosis 行。不隔离的话,下面对 engine.system_prompt 的断言就会随"这台
+    机器之前有没有真的跑过 app"而变(报告里记录过一次真实的失败)。改成每个
+    测试各自一份 tmp_path 下的临时 sqlite 文件,测试结束后把单例复位——
+    与 tests/test_growth_api.py 的 client fixture 同一手法。
+    """
     monkeypatch.setattr("app.agent.chat.EcomAgent", FakeEngine)
     monkeypatch.setattr("app.multi_agent.agents.SELLER_AGENT_CONFIGS", FAKE_SELLER_PROFILES)
     monkeypatch.setattr("app.multi_agent.orchestrator.ToolManager", FakeToolManager)
     monkeypatch.setattr("app.multi_agent.seller_router.SellerRouter", FakeRouter)
 
+    from app.db import Database, set_db
+    db = Database(db_path=str(tmp_path / "seller_orchestrator_test.db"))
+    db.init_schema()
+    set_db(db)
+
     from app.multi_agent.orchestrator import SellerOrchestrator
     o = SellerOrchestrator()
-    return o
+    yield o
+    set_db(None)
 
 
 def test_seller_orchestrator_exposes_same_surface():
@@ -99,24 +114,38 @@ def test_buyer_orchestrator_profiles_unchanged():
 
 
 def test_chat_routes_to_analyst_installs_its_profile_on_engine(orch):
-    """路由到 analyst:engine 最终携带 analyst 的 prompt + 专属 tool_manager。"""
+    """路由到 analyst:engine 最终携带 analyst 的 prompt + 专属 tool_manager。
+
+    顺带用测试自己种的一条共享上下文(不借别的会话/别的测试真的留在磁盘上的
+    行),证明"注入到 prompt"这件事确实发生。断言 prompt 以画像正文开头而不是
+    整串相等——这样不论 shared_context 里有没有行,这条断言都成立,不再靠
+    "本机之前有没有真的跑过 app"这种运气。
+    """
+    from app.multi_agent import shared_context as sc
+    sc.share(sc.KEY_DIAGNOSIS, "P001", {"conclusion": "退款率偏高"}, "analyst", "C-test")
+
     orch.router.forced_key = "analyst"
     reply = orch.chat("这周退款率怎么样")
 
     assert reply == "reply:这周退款率怎么样"
-    assert orch.engine.system_prompt == "ANALYST_PROMPT"
+    assert orch.engine.system_prompt.startswith("ANALYST_PROMPT")
+    assert "【共享上下文开始】" in orch.engine.system_prompt   # 自己种的那条确实注入了
     assert orch.engine.tool_manager is orch.profiles["analyst"]["tool_manager"]
     assert orch.engine.tool_manager.allowed_tools == {"shop_overview"}
     assert orch.last_agent_key == "analyst"
 
 
 def test_chat_routes_to_growth_installs_its_profile_on_engine(orch):
-    """路由到 growth:engine 换成 growth 的 prompt + 专属(写能力)tool_manager。"""
+    """路由到 growth:engine 换成 growth 的 prompt + 专属(写能力)tool_manager。
+
+    这条刻意不种共享上下文,覆盖"没有行"这条路径。同样断言 prompt 以画像正文
+    开头而非整串相等——不依赖 shared_context 是否为空。
+    """
     orch.router.forced_key = "growth"
     reply = orch.chat("帮我给沉默下单的人写条触达文案")
 
     assert reply == "reply:帮我给沉默下单的人写条触达文案"
-    assert orch.engine.system_prompt == "GROWTH_PROMPT"
+    assert orch.engine.system_prompt.startswith("GROWTH_PROMPT")
     assert orch.engine.tool_manager is orch.profiles["growth"]["tool_manager"]
     assert orch.engine.tool_manager.allowed_tools == {"draft_outreach"}
     assert orch.last_agent_key == "growth"
