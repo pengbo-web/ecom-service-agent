@@ -1204,6 +1204,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
         if draft is None:
             raise HTTPException(status_code=404, detail="草稿不存在")
 
+        # 冲突仲裁:人已经点了批准,但该买家此刻可能正等人工处理——
+        # 必须在**认领之前**判,否则会出现"认领成功→仲裁拒绝→退回"的多余翻转,
+        # 白白消耗掉这条草稿的一次幂等机会。
+        from app.multi_agent.arbitration import check_outreach_allowed
+        allowed, arb_reason = check_outreach_allowed(
+            draft.get("user_id", ""), hitl=hitl)
+        if not allowed:
+            return {"success": False, "sent": False, "reason": arb_reason}
+
         # 条件更新认领:只有把 draft→approved 改成功的那一次才继续投递
         if not db.review_outreach_draft(draft_id, "approved", reviewed_by="admin"):
             return {"success": True, "sent": False, "reason": "该草稿已被处理过"}

@@ -346,3 +346,25 @@ def test_opportunities_endpoint(client):
 def test_unknown_kind_is_400(client):
     assert client.get("/api/admin/growth/opportunities?kind=zzz",
                       headers=AUTH).status_code == 400
+
+
+def test_approve_blocked_when_buyer_in_manual_takeover(client, draft, monkeypatch):
+    """端点级:仲裁拒绝时不投递、不改草稿状态,草稿仍留在待审列表可重试。
+
+    注:投递函数挂在这个 app 实例的 app.state 上(与本文件其它测试一致,
+    见 test_approve_sends_once 的注释),而非模块级的 `_deliver_outreach`
+    ——后者是 create_app() 内部的闭包函数,app.api.app 模块本身没有这个名字。
+    """
+    from app.db import get_db
+    sent = []
+    monkeypatch.setattr(client.app.state, "deliver_outreach",
+                        lambda d: sent.append(1) or True)
+    monkeypatch.setattr("app.multi_agent.arbitration.check_outreach_allowed",
+                        lambda user_id, hitl=None, db=None: (False, "该买家的会话正由人工客服接管中"))
+    r = client.post(f"/api/admin/growth/drafts/{draft}/approve", headers=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["sent"] is False
+    assert "人工" in body["reason"]
+    assert sent == []                                        # 没投递
+    assert get_db().get_outreach_draft(draft)["status"] == "draft"   # 状态没被消耗
