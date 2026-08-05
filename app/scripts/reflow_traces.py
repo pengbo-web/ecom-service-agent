@@ -3,8 +3,10 @@
 用法：python -m app.scripts.reflow_traces [--limit 200] [--out app/sessions/reflow_cases.json]
      [--merge-into app/evaluation/cases.json]
 
---merge-into 可选：不传时行为与之前完全一致（只写独立文件）。传了则额外把回流
-用例按 id 去重合并进目标回归集文件（不覆盖已有的人工维护用例），原子写回。
+--merge-into 可选：不传时行为与之前完全一致（只写独立文件，不接 Database、不
+带 expected_keywords）。传了则改用带人工回复关键词的一次 collect_reflow_cases
+结果——同时写 --out 与合并进目标回归集文件（不覆盖已有的人工维护用例），后者
+原子写回。
 """
 
 import argparse
@@ -47,8 +49,15 @@ def main():
     args = ap.parse_args()
 
     store = TraceStore()
-    # 不带 db 的原始调用:与改造前完全同路径,保证 --merge-into 缺省时字节级不变。
-    cases = collect_reflow_cases(store, limit=args.limit)
+    if args.merge_into:
+        # 只有走合并这条路径才接 Database、补人工回复关键词;--out 与
+        # --merge-into 共用同一份结果,collect_reflow_cases 只对 store 扫一遍,
+        # 不再各扫一次(改造前是两次,一次带 db 一次不带,重复扫了同一批 trace)。
+        from app.db import get_db
+        cases = collect_reflow_cases(store, limit=args.limit, db=get_db())
+    else:
+        # 不带 db 的原始调用:与改造前完全同路径,保证 --merge-into 缺省时字节级不变。
+        cases = collect_reflow_cases(store, limit=args.limit)
 
     out = ROOT / args.out if not Path(args.out).is_absolute() else Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -57,17 +66,12 @@ def main():
     print(f"回流 {len(cases)} 条问题用例 → {out}")
 
     if args.merge_into:
-        # 只有走合并这条新路径时才接 Database、补人工回复关键词:
-        # --merge-into 缺省时上面的 --out 写入不受影响,行为字节级不变。
-        from app.db import get_db
-        merge_source_cases = collect_reflow_cases(store, limit=args.limit, db=get_db())
-
         target = ROOT / args.merge_into if not Path(args.merge_into).is_absolute() \
             else Path(args.merge_into)
         existing_cases = []
         if target.exists():
             existing_cases = json.loads(target.read_text(encoding="utf-8")).get("cases", [])
-        merged, added = merge_cases(existing_cases, merge_source_cases)
+        merged, added = merge_cases(existing_cases, cases)
         _atomic_write_json(target, {"cases": merged})
         print(f"合并进回归集 {target}: 新增 {added} 条(共 {len(merged)} 条)")
 
