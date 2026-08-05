@@ -34,10 +34,13 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
@@ -59,6 +62,25 @@ ARCHIVE_DIR = "app/agent/skills/definitions/_archive"
 
 def _now_stamp() -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _write_version_nonfatal(live_dir: Path, new_version: int) -> None:
+    """把新版本号写进 live_dir/.version;写失败只记日志,绝不让转正/回滚本身失败。
+
+    finding 3:版本号是**归因**用的元数据,不是控制流的一部分——promote()/
+    rollback() 之前是替换完树之后直接一句不设防的 write_text,而无人值守的
+    watchdog 是逐 skill 循环调它们、循环体外没有 try/except,一个 skill 因为
+    磁盘只读/权限问题写 .version 失败,就会把异常甩出整个循环,连累后面排队
+    的其他 skill 一个都转正不了。安装/回滚这两个动作本身此时已经成功(整目录
+    已经换好了),不该被"顺手记一笔版本号"这种次要动作拖累。
+    """
+    try:
+        (live_dir / VERSION_FILE).write_text(str(new_version), encoding="utf-8")
+    except OSError as exc:
+        logger.warning(
+            "写入版本号失败(不影响本次转正/回滚结果): live_dir=%s version=%s error=%s",
+            live_dir, new_version, exc,
+        )
 
 
 def _replace_tree(src: Path, dest: Path) -> None:
@@ -315,7 +337,7 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
         # 整目录替换,且**装的就是刚校验过的那份快照**(候选可能带 references 等
         # 附带资料;直接从 _candidates 重读会重新打开那扇 TOCTOU 窗口)
         _replace_tree(snapshot, live_dir)
-        (live_dir / VERSION_FILE).write_text(str(old_version + 1), encoding="utf-8")
+        _write_version_nonfatal(live_dir, old_version + 1)
 
         return {"promoted": True,
                 "reason": "已转正" + ("(--force 跳过门禁)" if force else ""),
@@ -349,7 +371,7 @@ def rollback(skill_name: str, definitions_dir: str, archive_dir: str) -> dict:
     old_version = read_version(live_dir)
     # 整目录还原:备份里含当时的全部附带资料,只还原 SKILL.md 会留下上一版的残余附件
     _replace_tree(newest, live_dir)
-    (live_dir / VERSION_FILE).write_text(str(old_version + 1), encoding="utf-8")
+    _write_version_nonfatal(live_dir, old_version + 1)
     return {"rolled_back": True, "reason": f"已回滚到 {newest.name}",
             "restored_from": str(newest / "SKILL.md")}
 

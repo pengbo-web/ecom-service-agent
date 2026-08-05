@@ -84,6 +84,25 @@ def _loaded_version(result_str: str) -> int:
         return 0
 
 
+def _loaded_fingerprint(result_str: str) -> str:
+    """从 load_skill 返回里取本轮实际加载的**内容指纹**;缺失/坏数据按 "unknown"。
+
+    与 `_loaded_version` 同一条纪律:取的是加载那一刻返回值里带的字符串,不在
+    落库时重新对磁盘现算——中途若发生转正,现算就会算出下一版的指纹,那就不是
+    "这一轮实际执行的是哪棵树"了。
+    """
+    from app.agent.skills.versioning import UNKNOWN_FINGERPRINT
+
+    try:
+        data = json.loads(result_str)
+    except (ValueError, TypeError):
+        return UNKNOWN_FINGERPRINT
+    if not isinstance(data, dict):
+        return UNKNOWN_FINGERPRINT
+    fp = data.get("skill_fingerprint")
+    return str(fp).strip() if fp else UNKNOWN_FINGERPRINT
+
+
 @dataclass
 class SkillTurn:
     """单轮对话的 skill 执行轨迹。未加载 skill 的轮次不会被落库(has_skill=False)。"""
@@ -93,6 +112,7 @@ class SkillTurn:
     tool_calls: list[dict] = field(default_factory=list)
     variant: str = "live"   # 本轮实际加载的版本(灰度期可能是 canary)
     skill_version: int = 0   # 本轮加载那一刻的技能目录版本号,0=未知(见 set_version)
+    skill_fingerprint: str = "unknown"   # 本轮加载那一刻的内容指纹,见 set_fingerprint
 
     def note_tool_call(self, name: str, result_str: str, args: dict | None = None) -> None:
         """记录一次工具调用。若是成功的 load_skill,同时记下 skill 名与加载的版本。
@@ -106,6 +126,7 @@ class SkillTurn:
                 self.skill_name = loaded
                 self.variant = _loaded_variant(result_str)
                 self.set_version(_loaded_version(result_str))
+                self.set_fingerprint(_loaded_fingerprint(result_str))
                 if loaded not in self.loaded_skills:
                     self.loaded_skills.append(loaded)
         self.tool_calls.append({"name": name, "ok": ok, "error": error,
@@ -131,6 +152,17 @@ class SkillTurn:
         磁盘上的版本号,中间可能已经发生转正,那样记下的就是错的版本。
         """
         self.skill_version = v or 0
+
+    def set_fingerprint(self, fp: str) -> None:
+        """记下本轮加载 skill 时的内容指纹(加载那一刻的值)。
+
+        与 set_version 同一条纪律:必须在加载发生的那一刻带着走,不能等落库时
+        再现算——现算不仅慢(重新遍历目录哈希全部文件),中途还可能已经转正/
+        灰度切换,现算出来的就不是这一轮实际执行的那棵树的指纹了。
+        """
+        from app.agent.skills.versioning import UNKNOWN_FINGERPRINT
+
+        self.skill_fingerprint = fp or UNKNOWN_FINGERPRINT
 
     def note_blocked(self, name: str, args: dict | None, reason: str) -> None:
         """记录一次被工作流守卫拦下的调用(未执行)。

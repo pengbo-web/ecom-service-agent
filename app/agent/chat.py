@@ -214,6 +214,7 @@ class EcomAgent:
                 skill_name=turn.skill_name, tool_calls=turn.tool_calls,
                 outcome=turn.outcome(result.requires_human),
                 variant=turn.variant, skill_version=turn.skill_version,
+                skill_fingerprint=turn.skill_fingerprint,
             )
         except Exception:  # noqa: BLE001 埋点失败绝不影响本轮回复
             pass
@@ -541,6 +542,7 @@ class EcomAgent:
             if turn is not None:
                 turn.note_preloaded(name, variant)
                 turn.set_version(loaded.get("version") or 0)   # 加载那一刻的版本,带着走
+                turn.set_fingerprint(loaded.get("skill_fingerprint") or "unknown")  # 同上,内容指纹
             self._emit({"type": "skill_preloaded", "name": name, "variant": variant})
         except Exception:  # noqa: BLE001 预加载是增强,失败退回原行为
             pass

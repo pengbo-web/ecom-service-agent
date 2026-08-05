@@ -213,6 +213,20 @@ class Database:
                 conn.execute("ALTER TABLE skill_traces ADD COLUMN skill_version INTEGER DEFAULT 0")
                 conn.execute("UPDATE skill_traces SET skill_version = 0 WHERE skill_version IS NULL")
                 conn.commit()
+            # 兼容旧库：skill_traces 补 skill_fingerprint 列("unknown"=未知,历史行
+            # 无从考证)。与 skill_version 并存而非取代它:整数版本号只在正式(live)
+            # 目录转正/回滚时才递增,候选目录从不带 .version,灰度期读到的版本号
+            # 因此永远是"文件不存在→1"——两批不同候选的轨迹无法靠版本号区分。
+            # 指纹是被服务那棵树的内容哈希,不依赖任何人在候选创建时打标,天然
+            # 覆盖 live/candidate 两种情况。
+            stcols = {r[1] for r in conn.execute("PRAGMA table_info(skill_traces)")}
+            if "skill_fingerprint" not in stcols:
+                conn.execute(
+                    "ALTER TABLE skill_traces ADD COLUMN skill_fingerprint TEXT DEFAULT 'unknown'")
+                conn.execute(
+                    "UPDATE skill_traces SET skill_fingerprint = 'unknown' "
+                    "WHERE skill_fingerprint IS NULL")
+                conn.commit()
             conn.commit()
         finally:
             conn.close()
@@ -422,20 +436,28 @@ class Database:
     # ---------- Skill 执行轨迹(G2:每轮"加载了哪个 skill/调了哪些工具/结局如何") ----------
     def record_skill_trace(self, session_id: str, user_id: str, skill_name: str,
                            tool_calls: list[dict], outcome: str,
-                           variant: str = "live", skill_version: int = 0) -> None:
+                           variant: str = "live", skill_version: int = 0,
+                           skill_fingerprint: str = "unknown") -> None:
         """记录一轮 skill 执行轨迹。variant 区分现行版/灰度候选,供 A/B 判定。
 
         skill_version:本轮**加载那一刻**的技能目录版本号,0=未知(老调用方/历史行
         不传即落 0,不假装是第 1 版——同一 skill 转正两次后仍要能按版本分开归因)。
+
+        skill_fingerprint:本轮**加载那一刻**被服务的那棵树的内容指纹,"unknown"=
+        未知(老调用方/历史行不传即落 unknown,同样不瞎猜)。与 skill_version 互补:
+        version 只在正式目录转正/回滚时递增,候选目录从不带 .version,灰度期永远
+        读到"1"——指纹不依赖任何创建候选的地方打标,直接对被服务的树现算内容哈希,
+        天然能把两批不同候选的轨迹分开归因(这正是本列存在的理由)。
         """
         conn = self.connect()
         try:
             conn.execute(
                 "INSERT INTO skill_traces (session_id, user_id, skill_name, tool_calls, "
-                "outcome, created_at, variant, skill_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "outcome, created_at, variant, skill_version, skill_fingerprint) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (session_id, user_id, skill_name,
                  json.dumps(tool_calls or [], ensure_ascii=False), outcome,
-                 self._now(), variant, skill_version),
+                 self._now(), variant, skill_version, skill_fingerprint or "unknown"),
             )
             conn.commit()
         finally:

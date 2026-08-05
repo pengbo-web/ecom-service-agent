@@ -15,7 +15,7 @@ from pathlib import Path
 
 import yaml
 
-from app.agent.skills.versioning import VERSION_FILE, read_version
+from app.agent.skills.versioning import VERSION_FILE, fingerprint_skill_dir, read_version
 
 # 单个附带文件注入上下文的字符上限(防一份大文档把上下文顶爆)
 MAX_SKILL_FILE_CHARS = 20000
@@ -347,7 +347,13 @@ class SkillManager:
 
         # 版本取**本次实际服务的 root**:灰度期是候选目录,平时是正式目录——
         # 与上面正文/文件清单同源,保证"加载那一刻"的版本与实际执行的树一致。
-        version = read_version(root) if root is not None else read_version(skill.path.parent)
+        actual_root = root if root is not None else skill.path.parent
+        version = read_version(actual_root)
+        # 内容指纹同样取自 actual_root:候选目录从不带 .version(见 versioning.py
+        # 顶部说明),整数版本号在灰度期因此永远读到"1",无法区分两批不同候选——
+        # 指纹不依赖任何人在候选创建时打标,直接对被服务的这棵树现算,天然覆盖
+        # live/candidate 两种情况,且不同内容绝不会算出同一个指纹。
+        fingerprint = fingerprint_skill_dir(actual_root)
 
         return {
             "success": True,
@@ -355,4 +361,5 @@ class SkillManager:
             "instructions": body + render_constraints(skill.workflow) + files_block,
             "variant": variant,
             "version": version,
+            "skill_fingerprint": fingerprint,
         }
