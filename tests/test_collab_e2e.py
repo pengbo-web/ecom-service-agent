@@ -110,12 +110,17 @@ def test_full_collaboration_closes_the_loop(client):
     assert r.status_code == 200 and r.json()["sent"] is True
 
     # ⑤ 全链路按 correlation_id 可回溯:时间线端点应能重构这一条协作链的
-    # 全部四个阶段——扫描信号、参谋诊断、营销草稿就绪、共享上下文里的诊断结论。
+    # 全部四个阶段——扫描信号、参谋诊断、营销草稿就绪、**人工批准发出**,
+    # 外加共享上下文里的诊断结论。
     tl = client.get(f"/api/admin/collab/timeline?correlation_id={corr}", headers=AUTH).json()
     kinds = {e["event_type"] for e in tl["events"]}
     assert bus.EV_SIGNAL_ANOMALY in kinds
     assert bus.EV_INSIGHT_DIAGNOSIS in kinds
     assert bus.EV_DRAFTS_READY in kinds
+    # 闭环的最后一跳:没有这一条,"人工批准发出"这一段就只在审批端点的响应里
+    # 出现过,时间线上看不到——而它恰恰是唯一能抓住 correlation_id 在审批那步
+    # 断链的断言(approve_draft 是从草稿行上读 corr 再发布的)。
+    assert bus.EV_OUTREACH_SENT in kinds, "人工批准发出这一段没出现在时间线上"
     assert any(s["key"].startswith("diagnosis:") for s in tl["shared"])
 
 
@@ -131,14 +136,10 @@ def test_no_llm_is_called_without_patching_in_scan(client):
         assert anomaly_scan(window_days=7)["anomalies"]
 
 
-def test_buyer_chat_never_exposes_seller_tools(client):
-    """买家画像不得拿到任何 B 端工具(经营数据泄漏红线)。"""
-    from app.multi_agent.agents import AGENT_CONFIGS
-    seller_only = {"shop_overview", "product_diagnostics", "service_quality",
-                   "anomaly_scan", "find_opportunities", "draft_outreach",
-                   "list_outreach_drafts"}
-    for cfg in AGENT_CONFIGS.values():
-        assert cfg["tools"] & seller_only == set()
+# 买卖两侧工具不互穿这条红线由 tests/test_seller_profiles.py 覆盖,而且是从
+# app.agent.tools.registry 的 SELLER_ONLY_TOOLS **派生**的——本文件里原先那份
+# 手抄名单已删除:手抄只在"当时没漏"时成立,新加一个 B 端工具不在名单里就等于
+# 这条断言对本特性引入的风险视而不见(draft_outreach 正是这么漏过一次的)。
 
 
 def test_collab_disabled_leaves_buyer_path_untouched(client, monkeypatch):
@@ -152,6 +153,43 @@ def test_collab_disabled_leaves_buyer_path_untouched(client, monkeypatch):
     stats = collab.run_once()
     assert stats["analyst"]["claimed"] == 0 and stats["growth"]["claimed"] == 0
     assert len(get_db().list_events()) == before
+
+
+def test_timeline_keeps_shared_context_after_the_store_outgrows_the_limit(client):
+    """【I2】共享上下文一旦超过 limit,老链路的 shared 列表不能变空。
+
+    修复前:端点先取最近 limit 行(ORDER BY updated_at DESC)再在 Python 里按
+    correlation_id 过滤。shared_context 每个被升级的会话、每个异常商品都写一行,
+    很快就越过 100 行;此后查任何稍旧一点的协作链,shared 都是空的——而那些行
+    **还好好躺在库里**。时间线是"协作到底发生了什么"唯一的出口,它给出的空列表
+    与"这条链真的没共享过东西"无法区分。
+
+    这里先写目标链的一条,再写 limit 之外的一大堆更新的行把它挤出窗口。
+    """
+    from app.db import get_db
+    db = get_db()
+    db.set_shared_context("diagnosis:P-OLD", {"conclusion": "老链路的诊断"},
+                          "analyst", "C-OLD")
+    for i in range(30):
+        db.set_shared_context(f"diagnosis:P-NEW-{i}", {"conclusion": "新"},
+                              "analyst", f"C-NEW-{i}")
+    # updated_at 是秒级的:31 行在同一秒写完时 ORDER BY updated_at DESC 的次序
+    # 不确定,那样这条测试会时红时绿、甚至在修复前"碰巧"通过(实测确实通过过)。
+    # 把目标行明确拨老一天,让它**确定地**落在 limit=10 的窗口之外。
+    conn = db.connect()
+    try:
+        conn.execute("UPDATE shared_context SET updated_at = datetime('now','-1 day') "
+                     "WHERE key = 'diagnosis:P-OLD'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    r = client.get("/api/admin/collab/timeline?correlation_id=C-OLD&limit=10",
+                   headers=AUTH).json()
+    keys = [s["key"] for s in r["shared"]]
+    assert keys == ["diagnosis:P-OLD"], f"老链路的共享上下文被 LIMIT 挤没了: {keys}"
+    # 顺带钉住过滤真的生效(没有把别的链的行也带出来)
+    assert all(s["correlation_id"] == "C-OLD" for s in r["shared"])
 
 
 def test_timeline_requires_auth(client):

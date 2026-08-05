@@ -68,7 +68,8 @@ seller_sessions = SessionManager(agent_factory=_seller_factory,
                                  base_dir="app/sessions/seller")
 
 
-def _append_agent_reply(agent, text: str, intent: str = "human_agent") -> bool:
+def _append_agent_reply(agent, text: str, intent: str = "human_agent",
+                        strict_persist: bool = False) -> bool:
     """给某个已取到的会话 agent 追加一条结构化 assistant 回复并落盘。
 
     与 `POST /api/admin/session/{id}/reply` 共用的落地写法:reply 包一层与模型
@@ -76,20 +77,50 @@ def _append_agent_reply(agent, text: str, intent: str = "human_agent") -> bool:
     字段,纯文本 assistant 消息会被当中间思考跳过,买家侧就看不到。调用方需
     已持有该会话的 session_lock 再调用本函数。返回是否真的追加成功
     (agent 没有 raw_messages 列表视为异常结构,返回 False,由调用方决定重试)。
+
+    `strict_persist` 决定**落盘失败算不算失败**,两条路径的取舍刻意不同:
+
+    - `False`(默认,坐席 `POST /api/admin/session/{id}/reply` 走这条):落盘
+      失败静默吞掉,照旧返回 True。这在那条路径上是可接受的——响应体里回的是
+      `reconstruct_bubbles(agent.raw_messages)`,坐席当场就能看见自己那条回复
+      有没有进气泡流,而且他还坐在屏幕前,发现不对可以立刻重发。
+    - `True`(触达投递走这条):落盘失败必须算失败,并且**把刚追加的那条消息
+      从内存里撤回**。原因是触达没有人盯着:save() 失败时消息只活在内存里的
+      agent 上,一旦会话被 idle reaper 淘汰或进程重启就彻底消失;而调用方
+      (approve_draft)会据此把草稿标成 sent,`review_outreach_draft` 又只认
+      还在 draft 的行 —— 于是这条消息既没送到、也永远重试不了,是静默的永久
+      丢失。撤回内存里那条是为了让"失败"是干净的:调用方退回草稿后重试时,
+      买家会话里不会残留一条半截的消息,重试也就不会变成发两遍。
     """
     msgs = getattr(agent, "raw_messages", None)
     if not isinstance(msgs, list):
         return False
-    msgs.append({"role": "assistant", "content": json.dumps({
+    entry = {"role": "assistant", "content": json.dumps({
         "intent": intent, "confidence": 1.0, "reply": text,
         "requires_human": False, "follow_up_question": None,
-    }, ensure_ascii=False)})
+    }, ensure_ascii=False)}
+    msgs.append(entry)
     save = getattr(agent, "save", None)
-    if callable(save):
-        try:
-            save()
-        except Exception:  # noqa: BLE001 与既有 /reply 端点行为一致:落盘失败静默,
-            pass           # 内存里的消息已追加,不因落盘异常打断响应
+    if not callable(save):
+        # 严格模式下"根本没有落盘能力"与"落盘失败"是同一件事:这条消息不会被
+        # 持久化,不能报成功。宽松模式保持既有行为(直接 True)。
+        if strict_persist:
+            if msgs and msgs[-1] is entry:
+                msgs.pop()
+            logger.error("触达投递:会话对象没有可调用的 save(),无法保证持久化,已撤回追加")
+            return False
+        return True
+    try:
+        save()
+    except Exception:  # noqa: BLE001
+        if not strict_persist:
+            pass           # 与既有 /reply 端点行为一致:落盘失败静默,
+                           # 内存里的消息已追加,不因落盘异常打断响应
+        else:
+            if msgs and msgs[-1] is entry:
+                msgs.pop()
+            logger.exception("触达投递落盘失败,已撤回内存中的追加(本次投递按失败处理)")
+            return False
     return True
 
 
@@ -1026,36 +1057,90 @@ def create_app(session_manager: Optional[SessionManager] = None,
             "anomalies": anomaly_scan(window_days=window_days)["anomalies"],
         }
 
-    def _deliver_outreach(draft: dict) -> bool:
-        """把一条已批准的触达草稿投递给买家。成功 True,失败 False(**绝不抛**,
-        交给调用方把草稿退回可重试)。
+    def _deliver_outreach(draft: dict) -> dict:
+        """把一条已批准的触达草稿投递给买家。**绝不抛**。
+
+        返回 `{"delivered": bool, "warning": str}`:
+        - `delivered=False`:消息**没有**进买家的会话,调用方可以放心退回草稿重试;
+        - `delivered=True, warning=""`:干净成功;
+        - `delivered=True, warning=非空`:消息**已经**进了买家的会话(不可撤销),
+          但之后某个记账动作失败了,操作者需要知道,但**绝不能据此重试**。
+
+        为什么必须区分后两者:`_append_agent_reply` 一旦返回 True,这条消息就已经
+        在买家的聊天记录里了。此后再发生的任何异常(例如 `touch_conversation` 撞上
+        SQLite 的 5 秒 busy timeout —— 协作 worker 正在写同一个库文件时完全可能)
+        如果被折算成"投递失败",approve_draft 就会把草稿退回 draft"以便重试",
+        而操作者的重试会给同一个买家**再追加一条一模一样的消息**。分支承诺的是
+        "没有人工不发,发也绝不发两遍",所以这里的纪律是:**追加成功之后的每一步
+        都不得改变 delivered 的取值**,只能往 warning 里记。这与 approve_draft 对
+        `mark_outreach_sent` 的处理(已投递 + 账本没对上 = success:false / sent:true)
+        是同一套口径,只是那一层在下游,这一层不能把信息提前塌掉。
 
         复用 `POST /api/admin/session/{id}/reply` 的落地路径:同一把
         session_lock、同一个（本 app 实例的）session_manager 里取 agent、用
         `_append_agent_reply` 追加同构的 assistant 回复并落盘——买家在自己的
         聊天里看到这条消息,与坐席人工回复走同一条通道,不新造一套没人审的
-        消息出口。用 latest_conversation 找该买家的规范会话;找不到会话或抢不到
-        锁都视为失败,由 approve 端点退回 draft 状态,可重试。
+        消息出口。这里传 `strict_persist=True`:触达没人盯着,落盘失败必须算失败
+        (理由见 `_append_agent_reply` 的 docstring)。用 latest_conversation 找该
+        买家的规范会话;找不到会话或抢不到锁都视为失败,由 approve 端点退回 draft
+        状态,可重试。
         """
+        # 这个标志就是上面那条纪律的代码形态:一旦置 True,本函数**任何**出口都
+        # 必须报 delivered=True。不靠"把危险的语句摆在 try 之外"来保证——那种写法
+        # 只对当时想到的那一句有效,而 `with session_lock.guard(...)` 的退出
+        # (Redis 后端释放锁)同样可能抛,它就在 try 内、且在追加**之后**。
+        appended = False
+        sid = ""
+        db = None
         try:
             db = get_db()
             user_id = draft.get("user_id", "")
             conv = db.latest_conversation(user_id)
             if not conv:
-                return False
+                return {"delivered": False, "warning": ""}
             sid = conv["conversation_id"]
             with session_lock.guard(sid) as got:
                 if not got:
-                    return False   # 抢不到锁:上层退回待审,可重试
+                    # 抢不到锁:上层退回待审,可重试
+                    return {"delivered": False, "warning": ""}
                 agent = manager.get_or_create(sid, user_id)
                 if not _append_agent_reply(agent, draft.get("content", ""),
-                                            intent="growth_outreach"):
-                    return False
-            db.touch_conversation(sid)
-            return True
+                                            intent="growth_outreach",
+                                            strict_persist=True):
+                    return {"delivered": False, "warning": ""}
+                appended = True
         except Exception:  # noqa: BLE001 投递失败要能被上层退回重试,不能炸成 500
-            logger.exception("触达投递失败 draft=%s", draft.get("id"))
-            return False
+            logger.exception("触达投递失败 draft=%s(已追加=%s)",
+                             draft.get("id"), appended)
+            if not appended:
+                return {"delivered": False, "warning": ""}
+            return {"delivered": True,
+                    "warning": (f"消息已投递给买家(会话 {sid}),但投递收尾时发生异常;"
+                                "买家已收到的消息不受影响,**请勿重试**,请查日志核实")}
+
+        # ↓↓↓ 这条线以下,消息已经在买家会话里了。下面每一步都必须是**非致命**的:
+        # 只能把问题写进 warning,不能让 delivered 变回 False。
+        warning = ""
+        try:
+            db.touch_conversation(sid)
+        except Exception:  # noqa: BLE001 记账失败不得反转"已投递"这个事实
+            logger.exception(
+                "触达消息已投递给买家,但刷新会话活跃时间失败 draft=%s sid=%s"
+                "(不影响投递结果,不得据此重试)", draft.get("id"), sid)
+            warning = (f"消息已投递给买家,但刷新会话活跃时间(conversation {sid})失败;"
+                       "这只影响会话列表的排序,不影响买家已收到的消息,**请勿重试**")
+        return {"delivered": True, "warning": warning}
+
+    def _delivery_result(raw) -> tuple[bool, str]:
+        """把投递函数的返回值归一成 (delivered, warning)。
+
+        `app.state.deliver_outreach` 是一个可替换的注入点(测试打桩、未来别的
+        投递通道),历史签名返回裸 bool。裸 bool 只表达"送没送到",没有"送到了但
+        记账有问题"这一档,按 warning 为空处理即可,语义无损且不会误判成失败。
+        """
+        if isinstance(raw, dict):
+            return bool(raw.get("delivered")), str(raw.get("warning") or "")
+        return bool(raw), ""
 
     # 挂到 app.state,而不是靠 `global` 改写模块级名字:这里闭包住的是**这个**
     # app 实例的 manager/session_lock,与买家侧 session_manager 同样挂
@@ -1106,7 +1191,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
         if not db.review_outreach_draft(draft_id, "approved", reviewed_by="admin"):
             return {"success": True, "sent": False, "reason": "该草稿已被处理过"}
 
-        if not app.state.deliver_outreach(draft):
+        delivered, deliver_warning = _delivery_result(app.state.deliver_outreach(draft))
+        if not delivered:
             # 退回 draft,让店主可以重试;绝不停在"已批准但没发"的悬空态。
             # 这一步本身也要能失败(revert_outreach_to_pending 是条件更新,
             # rowcount 可能为 0),而且它可能直接抛异常(比如数据库这时刚好
@@ -1145,9 +1231,17 @@ def create_app(session_manager: Optional[SessionManager] = None,
             # 返回值),就不能谎报一次"干净的成功",必须如实告知需要人工核查。
             logger.error("投递成功但标记已发送失败(状态非 approved?) draft_id=%s",
                         draft_id)
-            return {"success": False, "sent": True,
-                    "reason": f"消息已投递给买家,但标记为已发送时失败;请人工核查草稿 "
-                              f"{draft_id} 的状态"}
+            reason = (f"消息已投递给买家,但标记为已发送时失败;请人工核查草稿 "
+                      f"{draft_id} 的状态")
+            if deliver_warning:
+                reason = f"{reason};另:{deliver_warning}"
+            return {"success": False, "sent": True, "reason": reason}
+        if deliver_warning:
+            # 消息真的发出去了、账本也对上了,只是投递过程中某个善后动作失败。
+            # 这不是失败(绝不能让操作者去重试,那会发第二条),但也不是"干净的
+            # 成功",所以照 mark_outreach_sent 那一档的口径:sent=True 如实反映
+            # 不可撤销的事实,success=False 提示这里有需要人看一眼的东西。
+            return {"success": False, "sent": True, "reason": deliver_warning}
         return {"success": True, "sent": True, "reason": ""}
 
     @app.post("/api/admin/growth/drafts/{draft_id}/reject",
@@ -1172,8 +1266,11 @@ def create_app(session_manager: Optional[SessionManager] = None,
         _require_seller_console()
         db = get_db()
         events = db.list_events(correlation_id=correlation_id or None, limit=limit)
-        shared = [s for s in db.list_shared_context(limit=limit)
-                  if not correlation_id or s.get("correlation_id") == correlation_id]
+        # 按链过滤必须发生在 SQL 里(而不是取回最近 limit 行再在 Python 里筛):
+        # shared_context 的行数随会话/异常商品增长,先 LIMIT 后过滤会让稍旧的
+        # 协作链读出空的 shared 列表,而那些行明明还在库里。见 list_shared_context。
+        shared = db.list_shared_context(limit=limit,
+                                        correlation_id=correlation_id or None)
         return {"success": True, "events": events, "shared": shared}
 
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])

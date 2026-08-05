@@ -937,14 +937,27 @@ class Database:
         finally:
             conn.close()
 
-    def list_shared_context(self, prefix: str = "", limit: int = 50) -> list[dict]:
-        """按 key 前缀列未过期的共享上下文(供控制台展示"当前共享了什么")。"""
+    def list_shared_context(self, prefix: str = "", limit: int = 50,
+                            correlation_id: Optional[str] = None) -> list[dict]:
+        """按 key 前缀列未过期的共享上下文(供控制台展示"当前共享了什么")。
+
+        `correlation_id` 非空时**在 SQL 里**过滤到那一条协作链。这不是可有可无的
+        优化:LIMIT 作用在 `ORDER BY updated_at DESC` 之上,而 shared_context 每
+        条被升级的会话、每个异常商品都会写一行,很快就超过 limit;若先取最近
+        limit 行再在 Python 里筛链路,稍旧一点的协作链就会拿到空的 shared 列表
+        ——行还在库里,时间线却说"这条链没共享过任何上下文"。
+        """
         conn = self.connect()
+        sql = ("SELECT * FROM shared_context WHERE key LIKE ? AND "
+               "(expires_at IS NULL OR expires_at > ?)")
+        params: list = [f"{prefix}%", self._now()]
+        if correlation_id:
+            sql += " AND correlation_id = ?"
+            params.append(correlation_id)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        params.append(limit)
         try:
-            rows = conn.execute(
-                "SELECT * FROM shared_context WHERE key LIKE ? AND "
-                "(expires_at IS NULL OR expires_at > ?) ORDER BY updated_at DESC LIMIT ?",
-                (f"{prefix}%", self._now(), limit)).fetchall()
+            rows = conn.execute(sql, tuple(params)).fetchall()
             results = []
             for row in rows:
                 item = dict(row)
@@ -1002,6 +1015,26 @@ class Database:
         try:
             rows = conn.execute(sql, tuple(params)).fetchall()
             return [d for d in (self._draft_from_row(r) for r in rows) if d]
+        finally:
+            conn.close()
+
+    def pending_outreach_targets(self) -> set:
+        """当前还挂在待审队列里的触达对象集合 `{(user_id, order_id)}`。
+
+        给起草侧做去重用:同一个买家、同一个订单已经躺着一条等人审的草稿时,
+        再排一条近乎重复的进去没有任何新增信息,只会稀释审批队列——而店主的
+        注意力正是这条链上最稀缺的资源,他挨个批下去就等于给同一个人连发几条。
+
+        只看 `status='draft'`(等人看的那些)。已 approved/sent 的不在其中:那是
+        "已经处理过的历史",不该永久封杀对同一个订单的再次触达;rejected 同理,
+        店主明确驳回过的内容,下一轮换个说法重新排队是合理的。
+        """
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT user_id, order_id FROM outreach_drafts WHERE status = 'draft'"
+            ).fetchall()
+            return {((r["user_id"] or ""), (r["order_id"] or "")) for r in rows}
         finally:
             conn.close()
 
