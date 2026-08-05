@@ -31,6 +31,18 @@ def test_build_tool_hint_lists_real_tools():
     assert "只能使用" in hint
 
 
+def test_build_tool_hint_excludes_seller_only_tools():
+    """提示词里不能出现卖家专属工具名,否则等于诱导 LLM 写出买家 Agent 摸不到的工具。
+
+    卖家工具集从 registry 派生(不手抄),新增卖家工具会自动被本测试覆盖到。
+    """
+    from app.agent.tools.registry import SELLER_ONLY_TOOLS
+
+    hint = build_tool_hint()
+    for tool_name in SELLER_ONLY_TOOLS:
+        assert tool_name not in hint, f"提示词泄漏了卖家专属工具: {tool_name}"
+
+
 def test_synthesize_one_injects_tool_hint_into_prompt():
     client = FakeClient([GOOD_TOOLS_MD])
     synthesize_one(client, "test-model", REFUND_SAMPLES)

@@ -28,15 +28,26 @@ def is_safe_skill_name(skill_name: str) -> bool:
 
 
 def known_tool_names() -> set[str]:
-    """registry 中真实注册的工具名全集(含按开关动态追加的工具)。"""
-    from app.agent.tools.registry import TOOL_DEFINITIONS
+    """买家客服 Agent 实际可调的工具名集合(含按开关动态追加的工具)。
+
+    Skill 是**买家客服 Agent**加载执行的,它的"工具是否存在"必须以买家侧
+    能摸到的工具为准——不是整张 registry。registry 里还登记着仅供卖家侧
+    (店铺参谋/营销 Agent)使用的工具(如 `product_diagnostics`),这些工具
+    不在任何买家画像的工具集里;若把它们也算作"已知",候选会顺利通过校验、
+    转正后却在买家会话里调不到,造成「未知工具」运行时错误。
+
+    `SELLER_ONLY_TOOLS` 由 registry.py 的 `TOOL_TRAITS` 派生,且有穷尽性测试
+    (`test_all_tool_map_entries_are_classified`)兜底每个注册工具都打过标签,
+    因此"全集减去卖家专属"就是买家可用集,无需在此另抄一份名单。
+    """
+    from app.agent.tools.registry import SELLER_ONLY_TOOLS, TOOL_DEFINITIONS
 
     names = set()
     for item in TOOL_DEFINITIONS:
         name = (item.get("function") or {}).get("name")
         if name:
             names.add(str(name))
-    return names
+    return names - SELLER_ONLY_TOOLS
 
 
 def referenced_tools(content: str) -> set[str]:

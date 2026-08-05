@@ -60,7 +60,11 @@ description: <一句话描述适用场景与关键词，供路由匹配>
 """
 
 def build_tool_hint(known: set[str] | None = None) -> str:
-    """把真实工具清单拼成 prompt 片段,防 LLM 凭空编工具名(实测编过 order_list)。"""
+    """把工具清单拼成 prompt 片段,防 LLM 凭空编工具名(实测编过 order_list)。
+
+    默认清单来自 `known_tool_names()`——已经是买家客服 Agent 可调的子集
+    (卖家专属工具已被排除),不会诱导 LLM 写出买家 Agent 根本调不到的工具名。
+    """
     names = sorted(known if known is not None else known_tool_names())
     return (
         "\n可用工具清单(**只能使用**下列工具名,禁止编造其它工具):\n"

@@ -39,6 +39,52 @@ def test_known_tool_names_contains_real_tools():
     assert "order_list" not in names
 
 
+# ---------- 回归:skill 工具词表必须只含买家侧工具,卖家专属工具不算"已知" ----------
+#
+# 背景:店铺参谋/营销 Agent 上线后,registry 里多了一批 SELLER_ONLY_TOOLS
+# (shop_overview/product_diagnostics/...),但买家客服 Agent 摸不到它们。
+# 若 known_tool_names() 仍返回整张 registry,候选引用这些工具会"校验通过、
+# 运行时未知工具"——本文件下面几条测试就是钉死这个回归的复现与修复。
+#
+# 卖家工具集从 registry 派生,不在测试里手抄:新增卖家工具会自动被这里覆盖到。
+from app.agent.tools.registry import SELLER_ONLY_TOOLS
+
+SELLER_TOOL_CANDIDATE_MD = """---
+name: return-and-exchange-handling
+description: 处理退换货请求。
+---
+第一步：调用 `list_user_orders` 确认订单。
+第二步：调用 `product_diagnostics` 判断是否属于质量问题。
+"""
+
+BUYER_TOOL_CANDIDATE_MD = """---
+name: return-and-exchange-handling
+description: 处理退换货请求。
+---
+第一步：调用 `list_user_orders` 确认订单。
+第二步：调用 `apply_refund` 办理退款。
+"""
+
+
+def test_known_tool_names_excludes_seller_only_tools():
+    names = known_tool_names()
+    assert names.isdisjoint(SELLER_ONLY_TOOLS)
+
+
+def test_validate_candidate_rejects_seller_only_tool_reference():
+    """买家 skill 引用卖家专属工具(如 product_diagnostics)必须判无效。"""
+    result = validate_candidate(SELLER_TOOL_CANDIDATE_MD)
+    assert result["valid"] is False
+    assert "product_diagnostics" in result["unknown_tools"]
+
+
+def test_validate_candidate_accepts_ordinary_buyer_tool_reference():
+    """普通买家工具(apply_refund)不受这条边界影响,照常通过。"""
+    result = validate_candidate(BUYER_TOOL_CANDIDATE_MD)
+    assert result["valid"] is True
+    assert result["unknown_tools"] == []
+
+
 def test_referenced_tools_extracts_backticked_snake_case():
     refs = referenced_tools(GOOD)
     assert refs == {"list_user_orders", "query_order"}
