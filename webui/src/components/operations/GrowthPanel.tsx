@@ -208,7 +208,7 @@ export function GrowthPanel() {
                     <span className="text-xs text-muted-foreground">关联订单 {d.order_id}</span>
                   )}
                   <span className="rounded bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                    {oppKindLabel(d.opportunity_type)}
+                    {d.opportunity_label || oppKindLabel(d.opportunity_type)}
                   </span>
                 </div>
 

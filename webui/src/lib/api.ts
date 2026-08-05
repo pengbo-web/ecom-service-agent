@@ -281,7 +281,8 @@ export async function sellerChat(sessionId: string, message: string): Promise<Se
 
 // ---- 增长子区(商机与草稿审批):后端主动生成的触达草稿,批准即真实发给买家 ----
 export type OutreachDraft = {
-  id: number; opportunity_type: string; user_id: string; order_id: string;
+  id: number; opportunity_type: string; opportunity_label?: string;
+  user_id: string; order_id: string;
   content: string; offer: Record<string, unknown>; reason: string;
   correlation_id: string; status: string; needs_review_reason: string;
   created_by: string; reviewed_by: string | null; created_at: string;

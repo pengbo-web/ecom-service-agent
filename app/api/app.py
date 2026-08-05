@@ -1157,10 +1157,22 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.get("/api/admin/growth/drafts", dependencies=[Depends(admin_auth)])
     def growth_drafts(status: str = "draft", limit: int = 50):
-        """列触达草稿(默认只看待审的)。供人工审批控制台使用。"""
+        """列触达草稿(默认只看待审的)。供人工审批控制台使用。
+
+        每条附上 opportunity_label:商机类型的中文名由**后端唯一持有**
+        (app/agent/tools/growth.py 的 OPPORTUNITY_KINDS),前端只负责显示。
+        否则前端得自己抄一份映射表——本特性里 kind 已经改名过一次
+        (unpaid_order → stale_pending_order),抄的那份不同步就会静默退回
+        给店主显示英文标识符。未知类型回落原始 kind,不留空白。
+        """
         _require_seller_console()
-        return {"success": True,
-                "drafts": get_db().list_outreach_drafts(status=status or None, limit=limit)}
+        from app.agent.tools.growth import OPPORTUNITY_KINDS
+
+        rows = get_db().list_outreach_drafts(status=status or None, limit=limit)
+        for r in rows:
+            kind = r.get("opportunity_type") or ""
+            r["opportunity_label"] = OPPORTUNITY_KINDS.get(kind, kind)
+        return {"success": True, "drafts": rows}
 
     @app.get("/api/admin/growth/opportunities", dependencies=[Depends(admin_auth)])
     def growth_opportunities(kind: str = "stale_pending_order", window_days: int = 14):
