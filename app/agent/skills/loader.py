@@ -15,6 +15,8 @@ from pathlib import Path
 
 import yaml
 
+from app.agent.skills.versioning import VERSION_FILE, read_version
+
 # 单个附带文件注入上下文的字符上限(防一份大文档把上下文顶爆)
 MAX_SKILL_FILE_CHARS = 20000
 
@@ -170,6 +172,10 @@ class SkillManager:
                 # 只排除技能自身的顶层 SKILL.md;嵌套的同名文件是正常附带资料
                 if rel.as_posix() == "SKILL.md":
                     continue
+                # 版本号是内部归因用的元数据,不是给模型看的参考资料——不列出
+                # (同样只排除顶层的 .version,理由与上面 SKILL.md 一致)
+                if rel.as_posix() == VERSION_FILE:
+                    continue
                 try:
                     p.resolve().relative_to(root_resolved)
                 except ValueError:
@@ -201,6 +207,8 @@ class SkillManager:
             return {"success": False, "error": "只接受技能目录内的相对路径"}
         if Path(rel).name == "SKILL.md":
             return {"success": False, "error": "SKILL.md 已随技能加载,无需再读"}
+        if rel == VERSION_FILE:
+            return {"success": False, "error": "版本号是内部归因元数据,不是参考资料"}
 
         if root is None:
             root, _ = self._resolve_root(skill_name)
@@ -337,9 +345,14 @@ class SkillManager:
                   "file=\"上面的相对路径\")` 取内容。\n"
             )
 
+        # 版本取**本次实际服务的 root**:灰度期是候选目录,平时是正式目录——
+        # 与上面正文/文件清单同源,保证"加载那一刻"的版本与实际执行的树一致。
+        version = read_version(root) if root is not None else read_version(skill.path.parent)
+
         return {
             "success": True,
             "skill_name": skill.name,
             "instructions": body + render_constraints(skill.workflow) + files_block,
             "variant": variant,
+            "version": version,
         }

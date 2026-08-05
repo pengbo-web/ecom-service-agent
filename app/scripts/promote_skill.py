@@ -49,6 +49,7 @@ from app.agent.skills.tree_text import (  # noqa: E402
     has_escaping_symlink,
     validate_skill_tree,
 )
+from app.agent.skills.versioning import VERSION_FILE, read_version  # noqa: E402
 from app.utils.console import enable_utf8_stdout  # noqa: E402
 
 DEFINITIONS_DIR = "app/agent/skills/definitions"
@@ -301,11 +302,20 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
                               f"需人工执行: python -m app.scripts.promote_skill {skill_name}",
                     "backup": None, "risk": risk}
 
+        # 版本递增:转正前先读**现行 live 目录**当前的版本号——候选快照本身
+        # 通常不带 .version(合成器/人工编写都不关心这个),若换成目录替换后再读,
+        # 读到的是候选那份(默认 1),会让每次转正都"重置"成 2,两次转正就分不清了。
+        # 故在替换之前锁定旧版本,替换之后把 旧版本+1 写回新 live 目录——版本号因此
+        # 跟着"这个 skill 名字的转正历史"单调递增,而不是跟着某一次候选内容的内容。
+        live_dir = Path(definitions_dir) / skill_name
+        old_version = read_version(live_dir)
+
         backup = backup_current(definitions_dir, skill_name, archive_dir, timestamp)
 
         # 整目录替换,且**装的就是刚校验过的那份快照**(候选可能带 references 等
         # 附带资料;直接从 _candidates 重读会重新打开那扇 TOCTOU 窗口)
-        _replace_tree(snapshot, Path(definitions_dir) / skill_name)
+        _replace_tree(snapshot, live_dir)
+        (live_dir / VERSION_FILE).write_text(str(old_version + 1), encoding="utf-8")
 
         return {"promoted": True,
                 "reason": "已转正" + ("(--force 跳过门禁)" if force else ""),
@@ -331,8 +341,15 @@ def rollback(skill_name: str, definitions_dir: str, archive_dir: str) -> dict:
         return {"rolled_back": False, "reason": f"无备份可回滚: {skill_archive}", "restored_from": None}
 
     newest = stamps[-1]
+    live_dir = Path(definitions_dir) / skill_name
+    # 回滚**不递减**:备份里可能带着当时那份更早的 .version(数值更小),但直接
+    # 用它会让"版本 2"先后指向两份不同内容——不诚实。回滚产出的是一份新的 live
+    # 状态,理应拿到一个新版本号:锁定回滚前(即将被替换掉)的版本,新版本恒为
+    # 该值 +1,与 promote() 用同一套单调递增规则,不管内容来自候选还是旧备份。
+    old_version = read_version(live_dir)
     # 整目录还原:备份里含当时的全部附带资料,只还原 SKILL.md 会留下上一版的残余附件
-    _replace_tree(newest, Path(definitions_dir) / skill_name)
+    _replace_tree(newest, live_dir)
+    (live_dir / VERSION_FILE).write_text(str(old_version + 1), encoding="utf-8")
     return {"rolled_back": True, "reason": f"已回滚到 {newest.name}",
             "restored_from": str(newest / "SKILL.md")}
 

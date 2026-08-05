@@ -66,6 +66,24 @@ def _loaded_variant(result_str: str) -> str:
     return str(data.get("variant") or VARIANT_LIVE)
 
 
+def _loaded_version(result_str: str) -> int:
+    """从 load_skill 返回里取本轮实际加载的**技能目录版本号**;缺失/坏数据按 0(未知)。
+
+    这是加载那一刻读到的值,随 tool_call 结果一起进轨迹——绝不在落库时重新读磁盘
+    (中间可能已经转正,那样记的就是错的版本)。
+    """
+    try:
+        data = json.loads(result_str)
+    except (ValueError, TypeError):
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    try:
+        return int(data.get("version") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass
 class SkillTurn:
     """单轮对话的 skill 执行轨迹。未加载 skill 的轮次不会被落库(has_skill=False)。"""
@@ -74,6 +92,7 @@ class SkillTurn:
     loaded_skills: list[str] = field(default_factory=list)   # 本轮加载过的**全部** skill(守卫要对每个都判)
     tool_calls: list[dict] = field(default_factory=list)
     variant: str = "live"   # 本轮实际加载的版本(灰度期可能是 canary)
+    skill_version: int = 0   # 本轮加载那一刻的技能目录版本号,0=未知(见 set_version)
 
     def note_tool_call(self, name: str, result_str: str, args: dict | None = None) -> None:
         """记录一次工具调用。若是成功的 load_skill,同时记下 skill 名与加载的版本。
@@ -86,6 +105,7 @@ class SkillTurn:
             if loaded:
                 self.skill_name = loaded
                 self.variant = _loaded_variant(result_str)
+                self.set_version(_loaded_version(result_str))
                 if loaded not in self.loaded_skills:
                     self.loaded_skills.append(loaded)
         self.tool_calls.append({"name": name, "ok": ok, "error": error,
@@ -103,6 +123,14 @@ class SkillTurn:
         if skill_name not in self.loaded_skills:
             self.loaded_skills.append(skill_name)
         self.variant = variant or "live"
+
+    def set_version(self, v: int) -> None:
+        """记下本轮加载 skill 时的版本号(加载那一刻的值)。
+
+        必须在加载发生的那一刻调用、把结果**带着走**——绝不能等到落库时才现读
+        磁盘上的版本号,中间可能已经发生转正,那样记下的就是错的版本。
+        """
+        self.skill_version = v or 0
 
     def note_blocked(self, name: str, args: dict | None, reason: str) -> None:
         """记录一次被工作流守卫拦下的调用(未执行)。

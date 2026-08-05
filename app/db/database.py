@@ -207,6 +207,12 @@ class Database:
                 conn.execute("ALTER TABLE skill_traces ADD COLUMN variant TEXT DEFAULT 'live'")
                 conn.execute("UPDATE skill_traces SET variant = 'live' WHERE variant IS NULL")
                 conn.commit()
+            # 兼容旧库：skill_traces 补 skill_version 列(0=未知,历史行无从考证)
+            stcols = {r[1] for r in conn.execute("PRAGMA table_info(skill_traces)")}
+            if "skill_version" not in stcols:
+                conn.execute("ALTER TABLE skill_traces ADD COLUMN skill_version INTEGER DEFAULT 0")
+                conn.execute("UPDATE skill_traces SET skill_version = 0 WHERE skill_version IS NULL")
+                conn.commit()
             conn.commit()
         finally:
             conn.close()
@@ -416,16 +422,20 @@ class Database:
     # ---------- Skill 执行轨迹(G2:每轮"加载了哪个 skill/调了哪些工具/结局如何") ----------
     def record_skill_trace(self, session_id: str, user_id: str, skill_name: str,
                            tool_calls: list[dict], outcome: str,
-                           variant: str = "live") -> None:
-        """记录一轮 skill 执行轨迹。variant 区分现行版/灰度候选,供 A/B 判定。"""
+                           variant: str = "live", skill_version: int = 0) -> None:
+        """记录一轮 skill 执行轨迹。variant 区分现行版/灰度候选,供 A/B 判定。
+
+        skill_version:本轮**加载那一刻**的技能目录版本号,0=未知(老调用方/历史行
+        不传即落 0,不假装是第 1 版——同一 skill 转正两次后仍要能按版本分开归因)。
+        """
         conn = self.connect()
         try:
             conn.execute(
                 "INSERT INTO skill_traces (session_id, user_id, skill_name, tool_calls, "
-                "outcome, created_at, variant) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "outcome, created_at, variant, skill_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (session_id, user_id, skill_name,
                  json.dumps(tool_calls or [], ensure_ascii=False), outcome,
-                 self._now(), variant),
+                 self._now(), variant, skill_version),
             )
             conn.commit()
         finally:
