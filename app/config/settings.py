@@ -246,6 +246,10 @@ class Settings(BaseSettings):
     unpaid_stale_hours: int = 24       # 下单后超过多久仍未支付才算"催付款"商机
     cart_stale_hours: int = 48         # 购物车超过多久未转化(下单)才算"弃单"商机
 
+    # 触达转化归因(N3):发送后等多久才判定有没有效果——刚发出去就判定对买家
+    # 不公平,要给反应时间;窗口内(sent_at 早于 -N 小时)才进入可判定队列。
+    outreach_attribution_window_hours: int = 24
+
     @property
     def is_production(self) -> bool:
         return (self.environment or "").strip().lower() in ("production", "prod")

@@ -1,9 +1,16 @@
 import { useEffect, useState } from "react";
-import { getGrowthDrafts, approveDraft, rejectDraft, getOpportunities,
-  type OutreachDraft } from "@/lib/api";
+import { getGrowthDrafts, approveDraft, rejectDraft, getOpportunities, getOutreachStats,
+  type OutreachDraft, type OutreachStats } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RotateCcw } from "lucide-react";
+
+// 与 OperationsView 同款格式化:后端给的是 0~1 的小数分数,统一转成 1 位小数
+// 的百分比字符串。两处各自定义而不是共享一份导出——GrowthPanel 是独立卡片,
+// 没有必要为一个三行函数在两个组件之间建耦合。
+function pct(x: number | undefined, digits = 1): string {
+  return ((x ?? 0) * 100).toFixed(digits) + "%";
+}
 
 const OPPORTUNITY_KINDS: { kind: string; label: string }[] = [
   { kind: "stale_pending_order", label: "下单后久未推进" },
@@ -52,6 +59,11 @@ export function GrowthPanel() {
   const [oppCounts, setOppCounts] = useState<Record<string, number | undefined> | null>(null);
   const [oppErr, setOppErr] = useState("");
 
+  // 「触达效果」卡:发送时记基线、到期按订单状态推进判定的转化率(N3)。
+  // 同样独立成自己的 busy/error,拉取失败不该连累草稿列表或商机概览。
+  const [outreachStats, setOutreachStats] = useState<OutreachStats | null>(null);
+  const [outreachErr, setOutreachErr] = useState("");
+
   async function load() {
     setBusy(true);
     try {
@@ -77,9 +89,19 @@ export function GrowthPanel() {
     }
   }
 
+  async function loadOutreachStats() {
+    try {
+      setOutreachStats(await getOutreachStats());
+      setOutreachErr("");
+    } catch (e) {
+      setOutreachErr(String(e));
+    }
+  }
+
   useEffect(() => {
     load();
     loadOpportunities();
+    loadOutreachStats();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -148,6 +170,38 @@ export function GrowthPanel() {
 
   return (
     <div className="flex flex-col gap-6">
+      {/* 触达效果:发出去的消息到底有没有让买家往前走(N3)。转化率没有测量
+          窗口和"转化"定义就是一句空话——这两条口径必须钉在界面上,不能只靠
+          店主自己脑补,否则这张卡片比不展示更容易误导人。 */}
+      <section>
+        <h3 className="mb-2 text-sm font-semibold">触达效果</h3>
+        {outreachErr && (
+          <div className="mb-2 text-xs text-destructive">触达效果读取失败：{outreachErr}</div>
+        )}
+        <Card className="p-3" data-testid="outreach-stats">
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <div className="text-xs text-muted-foreground">已发送</div>
+              <div className="mt-1 text-lg font-semibold">{outreachStats?.sent ?? "—"}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground">已转化</div>
+              <div className="mt-1 text-lg font-semibold">{outreachStats?.converted ?? "—"}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground">转化率</div>
+              <div className="mt-1 text-lg font-semibold">{pct(outreachStats?.conversion_rate)}</div>
+            </div>
+          </div>
+          <div className="mt-2 text-[11px] text-muted-foreground">
+            统计窗口：近 {outreachStats?.window_days ?? "—"} 天发出的消息 ·
+            归因窗口：发出满 {outreachStats?.window_hours ?? "—"} 小时后才判定 ·
+            口径：只认目标订单状态<b>向前推进</b>
+            （待支付→待发货→已发货→已签收），退款等其它变化不算转化
+          </div>
+        </Card>
+      </section>
+
       {/* 商机概览:只读,帮店主判断值不值得主动挖一批新草稿,不落任何写操作 */}
       <section>
         <h3 className="mb-2 text-sm font-semibold">商机概览</h3>

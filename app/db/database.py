@@ -176,7 +176,10 @@ class Database:
                     reviewed_by TEXT,
                     created_at TEXT NOT NULL,
                     reviewed_at TEXT,
-                    sent_at TEXT
+                    sent_at TEXT,
+                    status_at_send TEXT,
+                    outcome TEXT NOT NULL DEFAULT 'pending',
+                    outcome_checked_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_outreach_status
                     ON outreach_drafts(status, id);
@@ -269,6 +272,21 @@ class Database:
                     "UPDATE skill_traces SET skill_fingerprint = 'unknown' "
                     "WHERE skill_fingerprint IS NULL")
                 conn.commit()
+            # 兼容旧库:outreach_drafts 补触达归因三列(N3:发送基线/判定结果/判定
+            # 时间)。outcome 老行补 'pending'——它们从未被判定过,不能默认成
+            # 任何一个具体结论,而 pending_attribution 只挑 outcome='pending' 的
+            # 行,老行因此天然会被下一轮 worker 捞到重新走一遍判定。
+            odcols = {r[1] for r in conn.execute(
+                "PRAGMA table_info(outreach_drafts)").fetchall()}
+            if "status_at_send" not in odcols:
+                conn.execute("ALTER TABLE outreach_drafts ADD COLUMN status_at_send TEXT")
+            if "outcome" not in odcols:
+                conn.execute(
+                    "ALTER TABLE outreach_drafts ADD COLUMN outcome TEXT DEFAULT 'pending'")
+                conn.execute(
+                    "UPDATE outreach_drafts SET outcome = 'pending' WHERE outcome IS NULL")
+            if "outcome_checked_at" not in odcols:
+                conn.execute("ALTER TABLE outreach_drafts ADD COLUMN outcome_checked_at TEXT")
             conn.commit()
         finally:
             conn.close()
@@ -1168,6 +1186,91 @@ class Database:
                 (draft_id,))
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # ---------- 触达转化归因(N3:发送记基线,到期判定有没有推进) ----------
+    def set_outreach_baseline(self, draft_id: int, status_at_send: str) -> bool:
+        """记基线:发送那一刻目标订单的状态(无关联订单的商机传空串)。
+
+        调用方(approve_draft)只应在消息**真正投递成功**之后调用一次——一条
+        被 revert 回 draft 的草稿从未真正发出,不该带任何基线,这条规矩由
+        调用时机保证,而不是这里加状态守卫:草稿此刻是否已经是 sent 不是本方法
+        关心的事,它只管"把这个值写进这一行"。
+        """
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE outreach_drafts SET status_at_send = ? WHERE id = ?",
+                (status_at_send or "", draft_id))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def pending_attribution(self, older_than_hours: int, limit: int = 100) -> list[dict]:
+        """到期可判定的已发送触达:`status='sent'` 且 `outcome` 仍是 `'pending'`、
+        发送时间早于 `older_than_hours` 之前。
+
+        `outcome='pending'` 这个过滤条件本身就是"归因只跑一次"的数据层保证:
+        一旦某一行被判过(outcome 变成 converted/no_change),它就再也不会出现
+        在这个查询结果里——幂等是数据的属性,不依赖 worker 有没有额外记"这条
+        处理过没有"。
+        """
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM outreach_drafts WHERE status = 'sent' AND outcome = 'pending' "
+                "AND sent_at IS NOT NULL AND sent_at <= datetime('now', ?) "
+                "ORDER BY id ASC LIMIT ?",
+                (f"-{max(1, int(older_than_hours))} hours", max(1, int(limit)))
+            ).fetchall()
+            return [d for d in (self._draft_from_row(r) for r in rows) if d]
+        finally:
+            conn.close()
+
+    def set_outreach_outcome(self, draft_id: int, outcome: str) -> bool:
+        """写归因判定结果(outcome: converted / no_change)。**只对仍是 pending 的
+        行生效**——与 review_outreach_draft/mark_outreach_sent 同一套条件更新
+        纪律:第二次对同一行调用(重跑 worker、并发 worker)拿到 rowcount=0,
+        `pending_attribution` 从此也查不到它,保证一条草稿只被计入一次统计。
+        """
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE outreach_drafts SET outcome = ?, outcome_checked_at = ? "
+                "WHERE id = ? AND outcome = 'pending'",
+                (outcome, self._now(), draft_id))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def outreach_stats(self, window_days: int) -> dict:
+        """窗口内触达转化统计:已发送数 / 已转化数 / 转化率。
+
+        分母是**已发送**(status='sent')的草稿数,不区分 outcome 是否已判定——
+        还没到判定窗口的草稿也算"发过"，只是还不知道有没有效果，不能从分母里
+        悄悄抹掉（否则窗口刚开始的一段时间转化率会被人为拉高）。除零返回 0.0
+        而非 None——与 review_stats/emotion_distribution 同口径，消费方是前端
+        展示，null 会诱导误读成"没数据"以外的东西。
+        """
+        conn = self.connect()
+        try:
+            w = f"datetime('now', '-{max(1, int(window_days))} days')"
+            row = conn.execute(
+                f"SELECT COUNT(*) AS sent, "
+                f"SUM(CASE WHEN outcome = 'converted' THEN 1 ELSE 0 END) AS converted "
+                f"FROM outreach_drafts WHERE status = 'sent' AND sent_at >= {w}"
+            ).fetchone()
+            sent = int(row["sent"] or 0)
+            converted = int(row["converted"] or 0)
+            return {
+                "window_days": int(window_days),
+                "sent": sent,
+                "converted": converted,
+                "conversion_rate": (converted / sent) if sent else 0.0,
+            }
         finally:
             conn.close()
 

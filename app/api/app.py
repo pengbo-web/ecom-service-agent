@@ -1314,6 +1314,20 @@ def create_app(session_manager: Optional[SessionManager] = None,
             raise HTTPException(status_code=400, detail=out.get("error", "参数错误"))
         return out
 
+    @app.get("/api/admin/growth/outreach-stats", dependencies=[Depends(admin_auth)])
+    def growth_outreach_stats(window_days: int = 30):
+        """触达转化归因统计(N3):已发送 / 已转化 / 转化率,供工作台「触达效果」卡。
+
+        附带 `window_hours`(等到期才判定的窗口)——前端必须把它和口径一起
+        展示在界面上,一个不说清楚测量窗口、不说清楚"转化"指什么的转化率
+        就是一句空话,店主没法用它做任何判断。
+        """
+        _require_seller_console()
+        from app.config.settings import settings
+        stats = get_db().outreach_stats(window_days=window_days)
+        stats["window_hours"] = settings.outreach_attribution_window_hours
+        return {"success": True, **stats}
+
     @app.post("/api/admin/growth/drafts/{draft_id}/approve",
               dependencies=[Depends(admin_auth)])
     def approve_draft(draft_id: int):
@@ -1381,6 +1395,25 @@ def create_app(session_manager: Optional[SessionManager] = None,
         # 消息已经真实投递给买家(不可撤销)。下游(如营销 Analyst)据此了解
         # 触达已发生,不因"标记已发送"这一步的成败而改变——那只是本地账本。
         marked = db.mark_outreach_sent(draft_id)
+
+        # 记触达归因基线(N3):**只在走到这里**才记,因为只有走到这里才代表
+        # 消息真的到了买家面前——`if not delivered` 分支已经在上面提前 return,
+        # 一条被退回 draft 重试的草稿永远不会执行到这一行,天然不会带上基线。
+        # status_at_send 取该 order **此刻**的真实状态;无关联订单的商机
+        # (弃单/咨询未下单,order_id 恒为空串)写空串,归因侧据此改用"发送后
+        # 有没有新建订单"的判法。基线记录失败不该推翻"已经真实发生"的投递,
+        # 只记日志(与 touch_conversation 的 fail-soft 同一姿态)。
+        try:
+            order_id = (draft.get("order_id") or "").strip()
+            status_at_send = ""
+            if order_id:
+                order = db.get_order(order_id)
+                if order is not None:
+                    status_at_send = order.get("status") or ""
+            db.set_outreach_baseline(draft_id, status_at_send)
+        except Exception:  # noqa: BLE001 基线记录失败不得推翻已发生的投递
+            logger.exception("触达基线记录失败(不影响已投递的消息) draft_id=%s", draft_id)
+
         bus.publish(bus.EV_OUTREACH_SENT,
                     {"draft_id": draft_id, "user_id": draft.get("user_id")},
                     bus.AGENT_HUMAN, bus.AGENT_ANALYST,

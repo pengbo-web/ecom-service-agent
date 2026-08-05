@@ -434,6 +434,18 @@ export async function getOpportunities(
   return r.json();
 }
 
+// ---- 触达转化归因(N3):发送时记基线,到期按订单状态是否推进判定 ----
+export type OutreachStats = {
+  success: boolean; window_days: number; window_hours: number;
+  sent: number; converted: number; conversion_rate: number;
+};
+
+export async function getOutreachStats(windowDays = 30): Promise<OutreachStats> {
+  const r = await adminFetch(`/api/admin/growth/outreach-stats?window_days=${windowDays}`);
+  if (!r.ok) throw new Error(`加载触达效果失败 (${r.status})`);
+  return r.json();
+}
+
 // ---- 店铺人格(N1:品牌语气可配置)----
 export type ShopProfile = { shop_name: string; tone: string; banned_words: string };
 export type ShopProfileResult = {
