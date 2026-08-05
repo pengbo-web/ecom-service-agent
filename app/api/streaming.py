@@ -179,7 +179,11 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         _sink({"type": "metadata", "intent": intent_out,
                "confidence": result.confidence,
                "requires_human": requires_human_out,
-               "follow_up_question": result.follow_up_question})
+               "follow_up_question": result.follow_up_question,
+               # N2:情绪信号附加字段(不动既有键);无 QU 注入/qu 不带该属性(如
+               # 测试用 SimpleNamespace 桩)时按 neutral 呈现,不硬取属性炸掉主流程
+               "emotion": getattr(qu, "emotion", "neutral") if qu is not None else "neutral",
+               "emotion_level": getattr(qu, "emotion_level", 0) if qu is not None else 0})
         return intent_out   # P1:trace.intent(消费本返回值)与 metadata 用同一覆盖后意图,消除三面漂移
 
     def _replay_flow(_sink) -> str:

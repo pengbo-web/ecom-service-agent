@@ -23,7 +23,9 @@ from app.config.settings import settings
 logger = logging.getLogger(__name__)
 
 VALID_DOMAINS = {"presale", "midsale", "aftersale"}
+VALID_EMOTIONS = {"neutral", "unhappy", "angry"}
 _RULE_MAX_CHARS = 20
+_EMOTION_LEVEL_MAX = 3
 
 
 @dataclass
@@ -33,6 +35,8 @@ class QueryUnderstanding:
     need_kb: bool = True           # 检索门控:False=本轮跳过 KB 预召回
     kb_query: str | None = None    # need_kb 时的自包含检索查询(已消解指代/省略)
     source: str = "llm"            # rule/llm/fallback,供 route 事件与观测
+    emotion: str = "neutral"       # neutral/unhappy/angry;非法/缺失一律 neutral,不硬猜
+    emotion_level: int = 0         # 0..3,0=中性,3=激烈;与 emotion 同步回落
 
 
 # (意图, 判定正则, 规则可确定的 domain——None=交给粘性路由)
@@ -45,7 +49,7 @@ _RULE_TABLE = [
 ]
 
 _QU_PROMPT = """你是电商客服的查询理解模块。分析用户最新消息,输出严格 JSON(不要任何解释、不要代码块):
-{{"domain": "presale|midsale|aftersale", "intent": "政策咨询|商品咨询|订单事务|闲聊寒暄|投诉|其他", "need_kb": true或false, "kb_query": "自包含检索查询或null"}}
+{{"domain": "presale|midsale|aftersale", "intent": "政策咨询|商品咨询|订单事务|闲聊寒暄|投诉|其他", "need_kb": true或false, "kb_query": "自包含检索查询或null", "emotion": "neutral|unhappy|angry", "emotion_level": 0到3的整数}}
 
 domain(路由,选最主要的):
 - presale: 下单前——商品推荐/商品信息/价格/库存/活动优惠/优惠券/议价
@@ -59,10 +63,31 @@ need_kb(是否需要检索平台知识库):
 kb_query(need_kb=true 时必填):结合最近对话把指代和省略补全成自包含查询,
 如上文聊退货、用户问"那运费呢?"→"退货运费谁承担";need_kb=false 时为 null。
 
+emotion/emotion_level(判定用户情绪,不是意图):
+- neutral 平静(level 0):正常咨询/闲聊,没有不满情绪
+- unhappy 不满(level 1-2):抱怨、催促、语气不耐烦,但未失控
+- angry 激烈(level 3):咒骂、威胁投诉/曝光、情绪失控
+只描述用户当下语气,不要因为话题是投诉就自动判高;语气平和的投诉仍是 neutral/低 level。
+
 最近对话(用户侧):
 {context}
 
 用户最新消息:{user_input}"""
+
+
+def _parse_emotion(data: dict) -> tuple[str, int]:
+    """从 LLM JSON 里取 emotion/emotion_level,白名单校验;任一非法则整体回落
+    neutral/0——不硬猜,与既有 domain 非法即 None 同口径(不去猜"多半是不满")。"""
+    emotion = data.get("emotion")
+    if emotion not in VALID_EMOTIONS:
+        return "neutral", 0
+    try:
+        level = int(data.get("emotion_level", 0))
+    except (TypeError, ValueError):
+        return "neutral", 0
+    if not (0 <= level <= _EMOTION_LEVEL_MAX):
+        return "neutral", 0
+    return emotion, level
 
 
 def understand(user_input: str, history: list[dict], client, model: str) -> QueryUnderstanding:
@@ -77,7 +102,7 @@ def understand(user_input: str, history: list[dict], client, model: str) -> Quer
     users = [m.get("content", "") for m in (history or []) if m.get("role") == "user"]
     context = "\n".join(f"- {u}" for u in users[-5:] if u) or "(无)"
     req = dict(
-        model=model, temperature=0.0, max_tokens=150,
+        model=model, temperature=0.0, max_tokens=200,   # 多两个字段(emotion/emotion_level)
         messages=[{"role": "user",
                    "content": _QU_PROMPT.format(context=context, user_input=text)}],
     )
@@ -98,9 +123,11 @@ def understand(user_input: str, history: list[dict], client, model: str) -> Quer
         kb_query = (str(data.get("kb_query") or "")).strip() or None
         if need_kb and not kb_query:
             kb_query = text        # 说要检索但没给查询 → 原句兜底
+        emotion, emotion_level = _parse_emotion(data)
         return QueryUnderstanding(
             domain=domain, intent=str(data.get("intent") or "其他"),
-            need_kb=need_kb, kb_query=kb_query if need_kb else None, source="llm")
+            need_kb=need_kb, kb_query=kb_query if need_kb else None, source="llm",
+            emotion=emotion, emotion_level=emotion_level)
     except Exception:
         logger.warning("query understanding failed, fallback to need_kb=True", exc_info=True)
         return QueryUnderstanding(source="fallback", kb_query=text or None)

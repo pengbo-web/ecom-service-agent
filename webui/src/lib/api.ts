@@ -244,6 +244,17 @@ export type SellerAnomaly = {
   value: number; threshold: number; detail?: Record<string, unknown>;
 };
 
+// N2:情绪分布(neutral/unhappy/angry 计数 + 激烈占比),来自
+// shop_analytics.service_quality 的 emotion 段。`quality` 目前是可选字段——
+// 后端 /api/seller/overview 尚未把 service_quality() 并进响应体(该端点在
+// app/api/app.py,超出本任务允许改动的文件范围),故先按"可能缺失"处理,
+// 缺失时卡片走空态,不假装有数据。
+export type EmotionDistribution = {
+  window_days: number; total: number;
+  counts: { neutral: number; unhappy: number; angry: number };
+  angry_rate: number;
+};
+
 export type SellerOverview = {
   overview: {
     success: boolean; window_days: number; orders: number; gmv: number;
@@ -257,6 +268,7 @@ export type SellerOverview = {
     refund_reasons: Array<{ reason: string; count: number }>;
   }> };
   anomalies: SellerAnomaly[];
+  quality?: { success: boolean; window_days: number; emotion: EmotionDistribution };
 };
 
 export type SellerChatReply = {

@@ -195,7 +195,31 @@ class EcomAgent:
         self.store.save(self.session_path, self._session_state())   # 回合结束:完整落盘(必落)
         self._write_snapshot()
         self._record_skill_turn(result)
+        self._record_turn_signal(result)
         return result
+
+    def _record_turn_signal(self, result: CustomerServiceResponse) -> None:
+        """N2:旁路埋点,按每一轮记录意图/情绪信号(供参谋统计与告警)。
+
+        与 _record_skill_turn 同姿态:开关关闭或落库失败都直接返回,绝不影响
+        回复。与 skill_traces 分表而单独落 turn_signals——skill_traces 只在
+        本轮加载过 skill 时才有行,而情绪要按每一轮统计,塞进去会让分母失真。
+        情绪取 self._turn_qu;引擎独立运行(无 QU 注入)时按 neutral 记,不漏字段。
+        """
+        if not settings.emotion_trace_enabled:
+            return
+        qu = self._turn_qu
+        try:
+            from app.db import get_db
+            get_db().record_turn_signal(
+                session_id=self.session_id, user_id=self.user_id,
+                intent=getattr(qu, "intent", "其他") if qu is not None else "其他",
+                emotion=getattr(qu, "emotion", "neutral") if qu is not None else "neutral",
+                emotion_level=getattr(qu, "emotion_level", 0) if qu is not None else 0,
+                requires_human=result.requires_human,
+            )
+        except Exception:  # noqa: BLE001 埋点失败绝不影响本轮回复
+            pass
 
     def _record_skill_turn(self, result: CustomerServiceResponse) -> None:
         """G2:本轮若加载过 skill,把执行轨迹落库(供 G3 失败采集 / G4 门禁分析)。

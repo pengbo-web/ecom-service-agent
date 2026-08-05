@@ -134,6 +134,11 @@ def service_quality(window_days: int = 7) -> dict:
     文档里说明,未来新增/拼错的 outcome 会悄悄从三个 rate 里消失、不体现
     在任何数字上,和"这个 skill 一直很健康"长得一模一样,等于把异常藏起来
     了;`other` 让这种情况在返回值里可见,便于告警侧决定要不要单独关注。
+
+    `emotion`(N2):按每一轮统计的情绪分布(neutral/unhappy/angry 计数 + 激烈
+    占比),来自 `turn_signals`(与 skill_traces 分表——skill_traces 只在加载
+    过 skill 时才有行,当分母会失真)。是否"有情绪问题"由 anomaly.py 按阈值
+    判定,本方法只负责把统计口径摆出来,不下结论。
     """
     conn = get_db().connect()
     try:
@@ -160,6 +165,8 @@ def service_quality(window_days: int = 7) -> dict:
                 "human_rate": _rate(human, total),
                 "other": total - ok - tool_error - human,
             })
-        return {"success": True, "window_days": int(window_days), "skills": skills}
+        emotion = get_db().emotion_distribution(window_days=window_days)
+        return {"success": True, "window_days": int(window_days), "skills": skills,
+                "emotion": emotion}
     finally:
         conn.close()

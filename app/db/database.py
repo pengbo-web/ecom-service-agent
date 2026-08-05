@@ -188,6 +188,18 @@ class Database:
                     updated_by TEXT,
                     updated_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS turn_signals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    user_id TEXT,
+                    intent TEXT,
+                    emotion TEXT NOT NULL DEFAULT 'neutral',
+                    emotion_level INTEGER NOT NULL DEFAULT 0,
+                    requires_human INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_turn_signals_created
+                    ON turn_signals(created_at);
                 """
             )
             # 兼容旧库：products 补 floor_price 列
@@ -1166,5 +1178,59 @@ class Database:
                 "updated_by = excluded.updated_by, updated_at = excluded.updated_at",
                 (shop_name, tone, banned_words, updated_by, self._now()))
             conn.commit()
+        finally:
+            conn.close()
+
+    # ---------- 情绪信号(N2:按每一轮落库,与 skill_traces 分表——skill_traces
+    # 只在本轮加载过 skill 时才有行,而情绪要按每一轮统计,塞进去会让分母失真) ----------
+    def record_turn_signal(self, session_id: str, user_id: str, intent: str,
+                           emotion: str, emotion_level: int,
+                           requires_human: bool) -> None:
+        """记录一轮的意图/情绪信号。旁路埋点:调用方(chat.py)负责 fail-soft,
+        本方法本身只管写入,不做兜底判断。"""
+        conn = self.connect()
+        try:
+            conn.execute(
+                "INSERT INTO turn_signals (session_id, user_id, intent, emotion, "
+                "emotion_level, requires_human, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (session_id, user_id, intent, emotion, int(emotion_level),
+                 1 if requires_human else 0, self._now()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def list_turn_signals(self, limit: int = 200) -> list[dict]:
+        """按 id DESC 取最近若干轮信号(测试/排查用)。"""
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM turn_signals ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def emotion_distribution(self, window_days: int = 7) -> dict:
+        """窗口内情绪分布:三档计数 + 激烈(angry)占比。
+
+        除零返回 0.0 而非 None——与 shop_analytics._rate 同口径,消费方是 LLM,
+        null 会诱导模型现编数字。
+        """
+        conn = self.connect()
+        try:
+            w = f"datetime('now', '-{max(1, int(window_days))} days')"
+            rows = conn.execute(
+                f"SELECT emotion, COUNT(*) AS n FROM turn_signals "
+                f"WHERE created_at >= {w} GROUP BY emotion"
+            ).fetchall()
+            counts = {"neutral": 0, "unhappy": 0, "angry": 0}
+            for r in rows:
+                if r["emotion"] in counts:
+                    counts[r["emotion"]] = int(r["n"])
+            total = sum(counts.values())
+            angry_rate = (counts["angry"] / total) if total else 0.0
+            return {"window_days": int(window_days), "total": total,
+                    "counts": counts, "angry_rate": angry_rate}
         finally:
             conn.close()

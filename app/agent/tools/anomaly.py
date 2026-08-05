@@ -25,6 +25,7 @@ def _thresholds() -> dict:
         "tool_error_rate": float(getattr(settings, "anomaly_tool_error_rate", 0.30)),
         "human_rate": float(getattr(settings, "anomaly_human_rate", 0.40)),
         "min_samples": int(getattr(settings, "anomaly_min_samples", 5)),
+        "angry_rate": float(getattr(settings, "anomaly_angry_rate", 0.20)),
     }
 
 
@@ -106,6 +107,16 @@ def anomaly_scan(window_days: int = 7) -> dict:
                 s["human_rate"], t["human_rate"],
                 {"total": s["total"]},
             ))
+
+    # 情绪信号:是否"有情绪问题"由阈值判定,不问模型——判定权归确定性规则,
+    # 与其余三类异常同一套口径(跨线才报、min_samples 兜底)。
+    emo = svc.get("emotion", {})
+    if emo.get("total", 0) >= t["min_samples"] and emo.get("angry_rate", 0.0) >= t["angry_rate"]:
+        anomalies.append(_finding(
+            "angry_rate_high", "shop", "全店",
+            emo["angry_rate"], t["angry_rate"],
+            {"total": emo["total"], "counts": emo.get("counts", {})},
+        ))
 
     return {"success": True, "window_days": int(window_days),
             "thresholds": t, "anomalies": anomalies,

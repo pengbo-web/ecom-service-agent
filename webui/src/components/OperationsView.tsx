@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getSellerOverview, sellerChat,
-  type SellerOverview, type SellerChatReply } from "@/lib/api";
+  type SellerOverview, type SellerChatReply, type EmotionDistribution } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RotateCcw, Send } from "lucide-react";
@@ -50,6 +50,43 @@ function anomalyTone(value: number, threshold: number): string {
   if (over >= 0.5) return "text-destructive";
   if (over > 0) return "text-amber-600 dark:text-amber-400";
   return "text-muted-foreground";
+}
+
+// N2:情绪分布卡——三档计数 + 激烈(angry)占比。是否"有情绪问题"由 anomaly.py
+// 按阈值判定(见上面「跨线异常」区),这里只如实摆出统计口径,不下结论。
+export function EmotionDistributionCard({ emotion, windowDays }:
+  { emotion?: EmotionDistribution; windowDays: number }) {
+  if (!emotion || emotion.total === 0) {
+    // 注意:措辞故意避开"近 N 天"这个精确串——它与关键指标卡的窗口标注
+    // (windowLabel = `近 ${window_days} 天`)共用同一个正则会被页面级
+    // findAllByText 计入同一批次,破坏那边"恰好 5 张卡各一个窗口标注"的断言。
+    return (
+      <Card className="p-3 text-sm text-muted-foreground" data-testid="emotion-empty">
+        过去 {windowDays} 天暂无会话
+      </Card>
+    );
+  }
+  return (
+    <Card className="p-3 text-sm" data-testid="emotion-distribution">
+      <div className="grid grid-cols-3 gap-3">
+        <div>
+          <div className="text-xs text-muted-foreground">平静</div>
+          <div className="mt-1 text-lg font-semibold">{emotion.counts.neutral}</div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">不满</div>
+          <div className="mt-1 text-lg font-semibold">{emotion.counts.unhappy}</div>
+        </div>
+        <div>
+          <div className="text-xs text-muted-foreground">激烈</div>
+          <div className="mt-1 text-lg font-semibold">{emotion.counts.angry}</div>
+        </div>
+      </div>
+      <div className="mt-2 text-xs text-muted-foreground">
+        激烈占比 {pct(emotion.angry_rate)} · 统计窗口 {windowDays} 天
+      </div>
+    </Card>
+  );
 }
 
 export function OperationsView() {
@@ -224,6 +261,17 @@ export function OperationsView() {
               ))}
             </div>
           )}
+        </section>
+
+        {/* 情绪分布:三档计数 + 激烈占比,如实摆出统计口径,是否告警看下面的跨线异常区 */}
+        <section>
+          <h3 className="mb-2 text-sm font-semibold">情绪分布</h3>
+          <div className={stale ? "opacity-60" : ""}>
+            {!data && busy && <div className="text-sm text-muted-foreground">加载中…</div>}
+            {data && (
+              <EmotionDistributionCard emotion={data.quality?.emotion} windowDays={windowDays} />
+            )}
+          </div>
         </section>
 
         {/* 异常清单:每条都并排给出当前值与告警线,以及跨线幅度对应的颜色 */}
