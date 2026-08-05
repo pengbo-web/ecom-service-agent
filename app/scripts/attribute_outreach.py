@@ -30,12 +30,6 @@ logger = logging.getLogger(__name__)
 # 不需要为开关状态另起一份序。
 STATUS_ORDER = ["unpaid", "pending", "shipped", "delivered"]
 
-# 归因结果回写总线的事件类型。不放进 app/multi_agent/bus.py(本任务未被授权
-# 改动那个文件),但字符串取值刻意与 bus.py 里 EV_* 常量同一套命名风格
-# (result.xxx),消费方(时间线端点)按事件类型字符串过滤,不关心它定义在哪。
-EV_OUTREACH_CONVERTED = "result.outreach_converted"
-EV_OUTREACH_NO_CHANGE = "result.outreach_no_change"
-
 
 def _progressed(before: str, after: str) -> bool:
     """判定 after 相对 before 是否**向前推进**(而不仅仅是"不同")。
@@ -106,7 +100,9 @@ def attribute_once(window_hours: Optional[int] = None, db: Optional[Database] = 
         stats["checked"] += 1
         stats[outcome] += 1
 
-        event_type = EV_OUTREACH_CONVERTED if outcome == "converted" else EV_OUTREACH_NO_CHANGE
+        # 事件类型常量归 app/multi_agent/bus.py 唯一持有(与 EV_SIGNAL_ANOMALY
+        # 等其它事件类型同放一处),这里只取用,不再另起一份。
+        event_type = bus.EV_OUTREACH_CONVERTED if outcome == "converted" else bus.EV_OUTREACH_NO_CHANGE
         bus.publish(
             event_type,
             {"draft_id": draft["id"], "user_id": draft.get("user_id"),

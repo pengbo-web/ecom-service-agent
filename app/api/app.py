@@ -1304,6 +1304,20 @@ def create_app(session_manager: Optional[SessionManager] = None,
             r["opportunity_label"] = OPPORTUNITY_KINDS.get(kind, kind)
         return {"success": True, "drafts": rows}
 
+    @app.get("/api/admin/growth/opportunity-kinds", dependencies=[Depends(admin_auth)])
+    def growth_opportunity_kinds():
+        """商机类型全集及其中文标签,供「商机概览」卡片渲染。
+
+        唯一口径同样是 app/agent/tools/growth.py 的 OPPORTUNITY_KINDS——前端
+        不再另抄一份 kind→label 的表:那份手抄表已经在这个代码库里因为漏同步
+        坑过三次(草稿卡标签、校验器工具清单、以及这张商机概览卡本身),这个
+        端点就是让"新增一个 kind"只需要改这一处,前端零改动就能显示出来。
+        """
+        _require_seller_console()
+        from app.agent.tools.growth import OPPORTUNITY_KINDS
+        kinds = [{"kind": k, "label": v} for k, v in OPPORTUNITY_KINDS.items()]
+        return {"success": True, "kinds": kinds}
+
     @app.get("/api/admin/growth/opportunities", dependencies=[Depends(admin_auth)])
     def growth_opportunities(kind: str = "stale_pending_order", window_days: int = 14):
         """只读地找一批增长商机(不落草稿),供人工/营销 Agent 参考。"""

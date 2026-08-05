@@ -153,12 +153,14 @@ describe("GrowthPanel", () => {
     expect(await screen.findByText(/暂无待审草稿/)).toBeInTheDocument();
   });
 
-  it("草稿卡片显示商机类型的中文标签,而不是原始标识符", async () => {
-    stub([DRAFT]);
+  it("草稿卡片显示商机类型的中文标签(后端给出),而不是原始标识符", async () => {
+    // opportunity_label 由后端(growth_drafts 端点,与 OPPORTUNITY_KINDS 同源)
+    // 附带给出——前端不再自己维护一份 kind→label 映射表去猜。
+    const labeled = { ...DRAFT, opportunity_label: "下单后久未推进(已付款待发货)" };
+    stub([labeled]);
     render(<GrowthPanel />);
     const card = await screen.findByTestId("draft-1");
-    // 中文标签(与后端 OPPORTUNITY_KINDS 同源)必须出现
-    expect(within(card).getByText("下单后久未推进")).toBeInTheDocument();
+    expect(within(card).getByText("下单后久未推进(已付款待发货)")).toBeInTheDocument();
     // 原始标识符不该再原样展示给店主
     expect(within(card).queryByText("stale_pending_order")).not.toBeInTheDocument();
   });
@@ -202,5 +204,44 @@ describe("GrowthPanel", () => {
     const card = await screen.findByTestId("draft-7");
     expect(within(card).getByText(/未付款/)).toBeInTheDocument();
     expect(within(card).queryByTestId("reason-toggle-7")).not.toBeInTheDocument();
+  });
+
+  it("商机概览的分类与文案完全来自后端接口,前端不能再抄一份固定列表", async () => {
+    // 后端下发一个前端从未见过、代码里任何地方都不会硬编码的 kind——
+    // 如果前端又倒退回一份写死的 OPPORTUNITY_KINDS 列表,这里必然渲染不出来。
+    const NEW_KIND = "brand_new_kind_6";
+    const NEW_LABEL = "全新第六类商机(后端刚加的)";
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (init?.method === "POST") return { ok: true, json: async () => ({ success: true, sent: true, reason: "" }) };
+      const u = String(url);
+      if (u.includes("opportunity-kinds")) {
+        return { ok: true, json: async () => ({ success: true, kinds: [{ kind: NEW_KIND, label: NEW_LABEL }] }) };
+      }
+      if (u.includes("/opportunities")) {
+        return {
+          ok: true,
+          json: async () => ({
+            success: true, kind: NEW_KIND, kind_label: NEW_LABEL, window_days: 14,
+            count: 7, opportunities: [],
+          }),
+        };
+      }
+      if (u.includes("outreach-stats")) {
+        return {
+          ok: true,
+          json: async () => ({ success: true, window_days: 30, window_hours: 24, sent: 0, converted: 0, conversion_rate: 0 }),
+        };
+      }
+      return { ok: true, json: async () => ({ success: true, drafts: [] }) };
+    }));
+
+    render(<GrowthPanel />);
+
+    // 服务端下发的中文标签必须原样出现——不是从任何前端映射表拼出来的
+    expect(await screen.findByText(NEW_LABEL)).toBeInTheDocument();
+    // 对应计数(来自 /opportunities 的 count)也要渲染出来
+    expect(await screen.findByText("7")).toBeInTheDocument();
+    // 标识符本身不该直接展示给店主
+    expect(screen.queryByText(NEW_KIND)).not.toBeInTheDocument();
   });
 });

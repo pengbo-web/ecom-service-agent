@@ -419,6 +419,17 @@ export async function rejectDraft(id: number): Promise<{ success: boolean; chang
   return r.json();
 }
 
+// 商机类型全集(kind + 中文标签),唯一口径在后端 app/agent/tools/growth.py
+// 的 OPPORTUNITY_KINDS——前端不再自己抄一份,新增一个 kind 后端一改,这里
+// 就跟着长出来,不需要同步改前端。
+export type OpportunityKind = { kind: string; label: string };
+
+export async function getOpportunityKinds(): Promise<{ success: boolean; kinds: OpportunityKind[] }> {
+  const r = await adminFetch("/api/admin/growth/opportunity-kinds");
+  if (!r.ok) throw new Error(`加载商机类型失败 (${r.status})`);
+  return r.json();
+}
+
 export type GrowthOpportunity = Record<string, unknown>;
 export type GrowthOpportunityList = {
   success: boolean; kind: string; kind_label: string; window_days: number;

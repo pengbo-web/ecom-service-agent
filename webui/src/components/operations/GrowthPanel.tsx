@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { getGrowthDrafts, approveDraft, rejectDraft, getOpportunities, getOutreachStats,
-  type OutreachDraft, type OutreachStats } from "@/lib/api";
+import { getGrowthDrafts, approveDraft, rejectDraft, getOpportunities, getOpportunityKinds,
+  getOutreachStats, type OpportunityKind, type OutreachDraft, type OutreachStats } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RotateCcw } from "lucide-react";
@@ -12,20 +12,7 @@ function pct(x: number | undefined, digits = 1): string {
   return ((x ?? 0) * 100).toFixed(digits) + "%";
 }
 
-const OPPORTUNITY_KINDS: { kind: string; label: string }[] = [
-  { kind: "stale_pending_order", label: "下单后久未推进" },
-  { kind: "stalled_bargain", label: "议价未成交" },
-  { kind: "consulted_no_order", label: "咨询过但没下单" },
-];
-
 type SentWarning = { id: number; user_id: string; reason: string };
-
-// 商机类型是内部标识符,不该直接展示给店主——复用 OPPORTUNITY_KINDS 里已有的
-// 中文映射(与后端 app/agent/tools/growth.py 的 OPPORTUNITY_KINDS 同源)。未知
-// 类型(以后端新增了这里还没同步)兜底显示原始标识符,而不是空白。
-function oppKindLabel(kind: string): string {
-  return OPPORTUNITY_KINDS.find((k) => k.kind === kind)?.label ?? kind;
-}
 
 // 「来源理由」是整段店铺诊断原文,同一批扫描生成的多张草稿会一字不差地
 // 重复这一整段——不能丢数据(理由本身是有效的每条草稿信息),但默认展开会
@@ -56,6 +43,9 @@ export function GrowthPanel() {
   const [sentWarnings, setSentWarnings] = useState<SentWarning[]>([]);
 
   // 商机概览是独立的只读小节,拉取失败不该连累草稿列表的展示与操作。
+  // 商机类型全集(kind + 中文标签)本身也来自后端,不在这里另存一份——
+  // 后端新增一个 kind,这张卡片零改动就能多出一格。
+  const [oppKinds, setOppKinds] = useState<OpportunityKind[] | null>(null);
   const [oppCounts, setOppCounts] = useState<Record<string, number | undefined> | null>(null);
   const [oppErr, setOppErr] = useState("");
 
@@ -79,9 +69,11 @@ export function GrowthPanel() {
 
   async function loadOpportunities() {
     try {
-      const results = await Promise.all(OPPORTUNITY_KINDS.map((k) => getOpportunities(k.kind)));
+      const { kinds } = await getOpportunityKinds();
+      const results = await Promise.all(kinds.map((k) => getOpportunities(k.kind)));
       const counts: Record<string, number | undefined> = {};
-      results.forEach((r, i) => { counts[OPPORTUNITY_KINDS[i].kind] = r.count; });
+      results.forEach((r, i) => { counts[kinds[i].kind] = r.count; });
+      setOppKinds(kinds);
       setOppCounts(counts);
       setOppErr("");
     } catch (e) {
@@ -207,9 +199,10 @@ export function GrowthPanel() {
         <h3 className="mb-2 text-sm font-semibold">商机概览</h3>
         {oppErr && <div className="mb-2 text-xs text-destructive">商机数据读取失败：{oppErr}</div>}
         <div className="grid grid-cols-3 gap-3">
-          {OPPORTUNITY_KINDS.map((k) => (
+          {(oppKinds || []).map((k) => (
             <Card key={k.kind} className="p-3">
-              <div className="text-xs text-muted-foreground">{k.label}</div>
+              {/* 标签完全来自后端;缺失时兜底显示原始 kind 而不是空白 */}
+              <div className="text-xs text-muted-foreground">{k.label || k.kind}</div>
               <div className="mt-1 text-lg font-semibold">
                 {oppCounts ? (oppCounts[k.kind] ?? "—") : "…"}
               </div>
@@ -262,7 +255,9 @@ export function GrowthPanel() {
                     <span className="text-xs text-muted-foreground">关联订单 {d.order_id}</span>
                   )}
                   <span className="rounded bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                    {d.opportunity_label || oppKindLabel(d.opportunity_type)}
+                    {/* 中文标签由后端(growth_drafts 端点)同源给出;字段缺失
+                        时兜底显示原始 kind,而不是自己另存一份映射表去猜 */}
+                    {d.opportunity_label || d.opportunity_type}
                   </span>
                 </div>
 

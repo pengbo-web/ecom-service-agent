@@ -348,6 +348,26 @@ def test_unknown_kind_is_400(client):
                       headers=AUTH).status_code == 400
 
 
+def test_opportunity_kinds_endpoint_matches_backend_source_of_truth(client):
+    """商机类型全集端点必须原样反映 OPPORTUNITY_KINDS——前端「商机概览」全靠
+    这个端点驱动,不再自己抄一份 kind→label 表。新增一个 kind 只改
+    growth.py 这一处,这条测试就应该跟着长出新的一条。"""
+    from app.agent.tools.growth import OPPORTUNITY_KINDS
+    r = client.get("/api/admin/growth/opportunity-kinds", headers=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True
+    assert [(k["kind"], k["label"]) for k in body["kinds"]] == list(OPPORTUNITY_KINDS.items())
+    # 两个最新分类必须出现在里面,不能被遗漏
+    kinds = {k["kind"] for k in body["kinds"]}
+    assert "unpaid_order" in kinds
+    assert "abandoned_cart" in kinds
+
+
+def test_opportunity_kinds_requires_auth(client):
+    assert client.get("/api/admin/growth/opportunity-kinds").status_code in (401, 403)
+
+
 def test_approve_blocked_when_buyer_in_manual_takeover(client, draft, monkeypatch):
     """端点级:仲裁拒绝时不投递、不改草稿状态,草稿仍留在待审列表可重试。
 

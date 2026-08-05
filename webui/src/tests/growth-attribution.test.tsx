@@ -16,6 +16,9 @@ function stub(stats: unknown = STATS, drafts: unknown[] = []) {
     if (init?.method === "POST") return { ok: true, json: async () => ({ success: true, sent: true, reason: "" }) };
     const u = String(url);
     if (u.includes("outreach-stats")) return { ok: true, json: async () => stats };
+    if (u.includes("opportunity-kinds")) {
+      return { ok: true, json: async () => ({ success: true, kinds: [{ kind: "stale_pending_order", label: "下单后久未推进(已付款待发货)" }] }) };
+    }
     if (u.includes("/opportunities")) return { ok: true, json: async () => ({ success: true, count: 0, opportunities: [] }) };
     return { ok: true, json: async () => ({ success: true, drafts }) };
   }));

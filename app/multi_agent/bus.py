@@ -29,6 +29,8 @@ EV_SIGNAL_ANOMALY = "signal.anomaly"        # 客服侧/扫描器发现异常
 EV_INSIGHT_DIAGNOSIS = "insight.diagnosis"  # 参谋出诊断结论
 EV_DRAFTS_READY = "action.drafts_ready"     # 营销出好草稿,待人工审批
 EV_OUTREACH_SENT = "result.outreach_sent"   # 人工批准并发出,闭环回写
+EV_OUTREACH_CONVERTED = "result.outreach_converted"  # 归因 worker:触达后订单状态向前推进
+EV_OUTREACH_NO_CHANGE = "result.outreach_no_change"  # 归因 worker:触达后没有向前推进
 
 
 def new_correlation_id(prefix: str = "C") -> str:
