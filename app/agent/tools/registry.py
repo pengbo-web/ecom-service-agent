@@ -25,6 +25,7 @@ from app.agent.tools.growth import (
     find_opportunities, draft_outreach, list_outreach_drafts_tool,
 )
 from app.agent.tools.reviews import review_insights
+from app.agent.tools.cart import add_to_cart, view_cart
 
 _TOOL_MAP: dict[str, Callable] = {
     "query_order": query_order,
@@ -51,6 +52,8 @@ _TOOL_MAP: dict[str, Callable] = {
     "draft_outreach": draft_outreach,
     "list_outreach_drafts": list_outreach_drafts_tool,
     "review_insights": review_insights,
+    "add_to_cart": add_to_cart,
+    "view_cart": view_cart,
 }
 
 if settings.bargain_enabled:
@@ -345,6 +348,33 @@ TOOL_DEFINITIONS.extend([
     {
         "type": "function",
         "function": {
+            "name": "add_to_cart",
+            "description": (
+                "把商品加入当前用户的购物车。同一商品重复加购会累加数量,不会产生重复行。"
+                "注意:本工具不做结算,加购完成后仍需买家自己在前端点『去下单』/『立即购买』下单——"
+                "禁止代替买家下单。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item_id": {"type": "string", "description": "要加购的商品ID/SKU"},
+                    "quantity": {"type": "integer", "description": "加购数量,默认 1", "default": 1},
+                },
+                "required": ["item_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "view_cart",
+            "description": "查看当前用户购物车里的商品与数量。只读。",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "query_coupons",
             "description": (
                 "查询当前用户【可领】的优惠券,已按其会员等级与新老客身份筛选。"
@@ -465,12 +495,13 @@ TOOL_DEFINITIONS.extend([
         "type": "function",
         "function": {
             "name": "find_opportunities",
-            "description": "【营销增长专用】按类型查找被漏掉的成交机会。kind: stale_pending_order(下单后久未推进) / stalled_bargain(议价未成交) / consulted_no_order(咨询过没下单)。只读。",
+            "description": "【营销增长专用】按类型查找被漏掉的成交机会。kind: stale_pending_order(已付款待发货,下单后久未推进) / unpaid_order(下单未支付,催付款) / abandoned_cart(加购未下单,弃单挽回) / stalled_bargain(议价未成交) / consulted_no_order(咨询过没下单)。只读。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "kind": {"type": "string",
-                             "enum": ["stale_pending_order", "stalled_bargain", "consulted_no_order"],
+                             "enum": ["stale_pending_order", "unpaid_order", "abandoned_cart",
+                                      "stalled_bargain", "consulted_no_order"],
                              "description": "商机类型"},
                     "window_days": {"type": "integer", "description": "回看天数，默认 14"},
                     "limit": {"type": "integer", "description": "最多返回条数，默认 20"},
@@ -490,7 +521,8 @@ TOOL_DEFINITIONS.extend([
                     "user_id": {"type": "string", "description": "目标买家的 user_id"},
                     "content": {"type": "string", "description": "触达话术正文，简短口语，3 句以内"},
                     "kind": {"type": "string",
-                             "enum": ["stale_pending_order", "stalled_bargain", "consulted_no_order"]},
+                             "enum": ["stale_pending_order", "unpaid_order", "abandoned_cart",
+                                      "stalled_bargain", "consulted_no_order"]},
                     "order_id": {"type": "string", "description": "相关订单号（如有）"},
                     "reason": {"type": "string", "description": "为什么触达这个人（给店主看的理由）"},
                     "offer_note": {"type": "string", "description": "建议的优惠说明（不是承诺，需店主确认）"},
@@ -540,7 +572,7 @@ TOOL_DEFINITIONS.extend([
 # 只含 {product_id, buyer_offer} 不含 rounds;若纳入,买家反复"便宜点"(args 相同)会命中
 # 首次缓存的 counter 价、bump_bargain_state 不再执行,阶梯让价被永久冻结(redis 幂等下)。
 # 议价的多轮推进本就是期望行为,不属于"需去重的副作用",故排除。
-_WRITE_TOOLS = frozenset({"apply_refund", "cancel_order", "change_address"})
+_WRITE_TOOLS = frozenset({"apply_refund", "cancel_order", "change_address", "add_to_cart"})
 
 
 # ---- 工具分类元数据:安全边界的唯一事实来源 ----
@@ -595,6 +627,10 @@ TOOL_TRAITS: dict[str, frozenset[str]] = {
     # review_insights 全只读(仅 SELECT),但暴露的是全店差评数据——买家画像
     # 绝不能拥有它,否则一句"这个店差评多不多"就能套出全店维度的数据。
     "review_insights": frozenset({"seller_only"}),
+    # add_to_cart 写 carts 表,是真实的状态变更;服务买家侧购物车流程,不带
+    # seller_only。view_cart 只读,不落任何写路径。
+    "add_to_cart": frozenset({"mutating"}),
+    "view_cart": frozenset(),
 }
 
 # 会改变持久状态/产生落地效果的注册工具(见上方 TOOL_TRAITS 说明)。

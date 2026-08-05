@@ -1,14 +1,38 @@
 import { useEffect, useState } from "react";
-import { getProducts, type Product } from "@/lib/api";
+import { addToCartApi, getProducts, type Product } from "@/lib/api";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
-export function ShopView({ onConsult, onBuy }: { onConsult: (itemId: string) => void; onBuy: (itemId: string) => void }) {
+export function ShopView({ onConsult, onBuy, showCart = false, onCartChanged }: {
+  onConsult: (itemId: string) => void;
+  onBuy: (itemId: string) => void;
+  // N5:购物车开关关闭时,商品卡退回改造前的样子(只有「咨询」「立即购买」),
+  // 不出现「加入购物车」——这是买家可见语义的一部分,不能只靠后端隐式兜底。
+  showCart?: boolean;
+  onCartChanged?: () => void;
+}) {
   const [items, setItems] = useState<Product[] | null>(null);
   const [q, setQ] = useState("");
+  // 每张商品卡各自持有加购的忙态/错误(与 SkillsView 各卡片自管状态同一惯例):
+  // 一件商品加购失败不该让别的商品卡也显示"加购中"或残留错误提示。
+  const [cartBusy, setCartBusy] = useState<Record<string, boolean>>({});
+  const [cartErr, setCartErr] = useState<Record<string, string>>({});
 
   useEffect(() => { getProducts().then(setItems); }, []);
+
+  async function onAddToCart(id: string) {
+    setCartBusy((prev) => ({ ...prev, [id]: true }));
+    setCartErr((prev) => ({ ...prev, [id]: "" }));
+    try {
+      await addToCartApi(id, 1);
+      onCartChanged?.();
+    } catch (e) {
+      setCartErr((prev) => ({ ...prev, [id]: String(e) }));
+    } finally {
+      setCartBusy((prev) => ({ ...prev, [id]: false }));
+    }
+  }
 
   const shown = (items || []).filter((p) =>
     !q.trim() || (p.title || "").toLowerCase().includes(q.trim().toLowerCase()));
@@ -44,8 +68,17 @@ export function ShopView({ onConsult, onBuy }: { onConsult: (itemId: string) => 
                   </div>
                   <div className="mt-auto flex gap-1.5 pt-1">
                     <Button size="sm" variant="outline" className="flex-1" onClick={() => onConsult(p.id)}>咨询</Button>
+                    {showCart && (
+                      <Button size="sm" variant="outline" className="flex-1" disabled={!!cartBusy[p.id]}
+                        onClick={() => onAddToCart(p.id)}>
+                        {cartBusy[p.id] ? "加购中…" : "加入购物车"}
+                      </Button>
+                    )}
                     <Button size="sm" className="flex-1 bg-red-500 hover:bg-red-600" onClick={() => onBuy(p.id)}>立即购买</Button>
                   </div>
+                  {cartErr[p.id] && (
+                    <div role="alert" className="pt-1 text-[11px] text-destructive">⚠️ {cartErr[p.id]}</div>
+                  )}
                 </div>
               </Card>
             ))}

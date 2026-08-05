@@ -11,10 +11,11 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.agent.tools.user_orders import STATUS_LABELS
 from app.api.conversations import ensure_active, open_or_reuse
-from app.api.schemas import (AgentReplyRequest, ChatRequest, CreateOrderRequest, CreateUserRequest,
-                              LoginRequest, OpenConversationRequest, ResetRequest, ReviewRequest,
-                              SellerChatRequest, ShopProfileRequest, SkillDistillRequest)
+from app.api.schemas import (AgentReplyRequest, CartAddRequest, ChatRequest, CreateOrderRequest,
+                              CreateUserRequest, LoginRequest, OpenConversationRequest, ResetRequest,
+                              ReviewRequest, SellerChatRequest, ShopProfileRequest, SkillDistillRequest)
 from app.api.session_manager import SessionManager
 from app.api.streaming import run_agent_streaming
 from app.auth.token import sign_token, verify_token
@@ -51,6 +52,15 @@ _TRACE_WINDOW = 500
 # 上传技能包的体积上限(压缩包本身,解压后另有 bundle 模块的三重上限)
 _MAX_UPLOAD_BYTES = 5_000_000
 _UPLOAD_CHUNK_BYTES = 65536   # 分块读上传体的块大小(配合上限,避免整包先进内存)
+
+
+def initial_order_status() -> str:
+    """自助下单落库的初始状态,唯一由 `settings.unpaid_flow_enabled` 决定:
+    开→`unpaid`(买家需再走一步 `pay_order` 才进入待发货);关→`pending`,
+    与本特性上线前逐字节一致。模块级函数(而非 create_app 内的闭包)是为了
+    在不起 FastAPI app 的情况下也能单独跑通开关测试。每次调用都现读
+    `settings.unpaid_flow_enabled`,不在导入期把值固化下来。"""
+    return "unpaid" if settings.unpaid_flow_enabled else "pending"
 
 
 def _seller_factory(session_path: str, user_id: str | None = None):
@@ -318,9 +328,14 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.get("/api/config")
     def public_config():
-        """前端启动读取:demo_mode 开时前端自动登录 demo_user_id、跳过登录卡片。"""
+        """前端启动读取:demo_mode 开时前端自动登录 demo_user_id、跳过登录卡片。
+
+        unpaid_flow_enabled 供前端决定购物车 Tab / 支付按钮要不要出现——开关
+        关闭时前端必须退回改造前的样子(不出现购物车入口/待支付/去支付),
+        而不是仅靠"永远不会有 unpaid 订单"这个后端事实来隐式兜底。"""
         return {"demo_mode": settings.demo_mode,
-                "demo_user_id": settings.demo_hmdp_user_id if settings.demo_mode else ""}
+                "demo_user_id": settings.demo_hmdp_user_id if settings.demo_mode else "",
+                "unpaid_flow_enabled": settings.unpaid_flow_enabled}
 
     def _map_hmdp_product(p: dict) -> dict:
         imgs = p.get("images")
@@ -367,11 +382,6 @@ def create_app(session_manager: Optional[SessionManager] = None,
         """按 id 取单个商品(结构化),供聊天窗内商品卡渲染。失败/无返回 null。"""
         return {"product": _fetch_hmdp_product(item_id)}
 
-    _ORDER_STATUS_LABELS = {
-        "unpaid": "待支付", "pending": "待发货", "shipped": "已发货",
-        "delivered": "已签收", "refund_processing": "退款中",
-    }
-
     def _hmdp_token_for_user(user: str) -> str:
         """demo 模式下把登录用户映射到其 hmdp token(与 /api/chat 同一套映射),
         用于让"我的订单"页/自助下单与 AI 读同一份 hmdp 真实订单。非 demo 返回空。"""
@@ -384,7 +394,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return {
             "order_id": o.get("order_id"),
             "status": o.get("status"),
-            "status_label": _ORDER_STATUS_LABELS.get(o.get("status"), o.get("status_text") or o.get("status")),
+            "status_label": STATUS_LABELS.get(o.get("status"), o.get("status_text") or o.get("status")),
             "items": o.get("items", []),
             "total": o.get("total"),
             "created_at": (o.get("created_at") or "").replace("T", " "),
@@ -406,8 +416,13 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.post("/api/order")
     def create_order(req: CreateOrderRequest, request: Request):
-        """自助下单:用户在商城/商品卡点『立即购买』→ 按登录身份建单。
-        demo 用户 → 建到 hmdp(与 AI/我的订单页同源,状态待支付);其它 → agent 订单库。"""
+        """自助下单:用户在商城/商品卡点『立即购买』(或购物车「去下单」)→ 按登录身份建单。
+        demo 用户 → 建到 hmdp(hmdp 自身已有真实支付流程,不受本开关影响,状态
+        恒为待支付);其它 → agent 订单库,初始状态由 initial_order_status() 按
+        settings.unpaid_flow_enabled 决定(开=unpaid 需再付款,关=pending,与
+        改造前逐字节一致)。下单成功后把该商品在本地购物车里的 active 行标记为
+        converted——不论这次下单是从购物车「去下单」发起,还是商品卡「立即购买」
+        绕开购物车直接下的单,买家事实上都已经为这件商品完成了下单。"""
         user = _resolve_user(request, None)
         p = _fetch_hmdp_product(req.item_id)
         if not p:
@@ -427,15 +442,60 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 d = r.json() if r.status_code == 200 else {}
             if not d.get("success"):
                 raise HTTPException(502, d.get("errorMsg") or "下单失败,请稍后再试")
+            try:
+                get_db().mark_cart_converted(user, [req.item_id])
+            except Exception:  # noqa: BLE001 购物车状态清理失败不影响已下单结果
+                pass
             return {"success": True, "order_id": d.get("data"), "status_label": "待支付", "total": total}
         order = get_db().create_order(
             user=user,
             items=[{"name": p["title"], "sku": f"HMDP-{req.item_id}", "quantity": qty, "price": p["price"]}],
-            total=total, status="pending", shipping_address=req.shipping_address,
+            total=total, status=initial_order_status(), shipping_address=req.shipping_address,
         )
+        try:
+            get_db().mark_cart_converted(user, [req.item_id])
+        except Exception:  # noqa: BLE001 购物车状态清理失败不影响已下单结果
+            pass
         return {"success": True, "order_id": order["order_id"],
-                "status_label": _ORDER_STATUS_LABELS.get(order["status"], order["status"]),
+                "status_label": STATUS_LABELS.get(order["status"], order["status"]),
                 "total": order["total"]}
+
+    @app.post("/api/order/{order_id}/pay")
+    def pay_order_endpoint(order_id: str, request: Request):
+        """买家为自己的未支付订单完成支付(unpaid → pending)。这是**买家自己**
+        的动作,不是 Agent 工具——与"不代客下单"同一条底线,故只做端点。归属
+        与幂等都下沉到 Database.pay_order 的条件更新里:付别人的单、或对已经
+        支付过的订单重复调用,都返回 False,不改变订单状态。"""
+        user = _resolve_user(request, None)
+        ok = get_db().pay_order(order_id, user)
+        if not ok:
+            raise HTTPException(400, "支付失败:订单不存在、不属于当前用户,或已完成支付")
+        order = get_db().get_order(order_id)
+        return {"success": True, "order_id": order_id, "status": order["status"],
+                "status_label": STATUS_LABELS.get(order["status"], order["status"])}
+
+    @app.post("/api/cart")
+    def add_to_cart_endpoint(req: CartAddRequest, request: Request):
+        """加入购物车。**不做结算**——下单仍走 POST /api/order 既有自助下单路径。"""
+        user = _resolve_user(request, None)
+        sku = (req.item_id or "").strip()
+        if not sku:
+            raise HTTPException(422, "商品ID不能为空")
+        qty = max(1, min(int(req.quantity or 1), 99))
+        get_db().add_to_cart(user, sku, qty)
+        return {"success": True}
+
+    @app.get("/api/cart")
+    def get_cart_endpoint(request: Request):
+        """当前用户的购物车(供「购物车」页)。"""
+        user = _resolve_user(request, None)
+        return {"success": True, "items": get_db().list_cart(user)}
+
+    @app.delete("/api/cart/{sku}")
+    def remove_cart_item_endpoint(sku: str, request: Request):
+        user = _resolve_user(request, None)
+        ok = get_db().remove_from_cart(user, sku)
+        return {"success": ok}
 
     @app.get("/api/orders")
     def my_orders(request: Request):

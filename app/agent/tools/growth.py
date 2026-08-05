@@ -9,13 +9,14 @@
 兜底不是"检出注入",而是**产物形态**——最坏情况也只是一条待审草稿。
 承诺类敏感词额外标红,逼人工重点看。
 
-口径说明——本项目订单表**没有"未付款"状态**:`Database.create_order` 落库时
-状态恒为 pending,而 `pending` 的语义是"已下单待发货"(付款早已完成,参见
-`app.agent.tools.user_orders.STATUS_LABELS`);线上也从未写过 unpaid /
-pending_payment 之类的取值。因此"催付款"这类商机在这份数据上根本查不到任何
-一行,本模块**刻意不建模催付款**,只做数据上真实存在的口径——"下单后久拖
-不发/久未推进"(stale_pending_order)。以后若想恢复催付款,必须先有真实的
-未付款状态落库,而不是在这里加回一个永远返回空结果的 kind。
+口径说明(N5 更新)——本项目现在**有真实的未支付态**:`Database.create_order`
+的 `status` 参数由调用方按 `settings.unpaid_flow_enabled` 传入,开关开时自助
+下单落库恒为 `unpaid`,买家须调用 `pay_order` 完成支付才会推进到 `pending`
+(待发货,付款已完成)。因此"催付款"(`unpaid_order`)与"弃单挽回"
+(`abandoned_cart`,数据来自真实的 `carts` 表)这两个商机现在都有真实数据
+支撑。旧 kind `stale_pending_order` 的语义相应**收窄**:它现在专指"已付款
+但久未发货",不再兼指未支付——两者在 pending/unpaid 是两个不同状态值之后,
+已经不会互相污染。
 """
 
 from __future__ import annotations
@@ -23,11 +24,14 @@ from __future__ import annotations
 from typing import Optional
 
 from app.agent.tools.user_orders import STATUS_LABELS
+from app.config.settings import settings
 from app.db import get_db
 
 # 支持的商机类型。未知 kind **拒绝**而不是猜一个,否则模型写错一个词就静默取错人群。
 OPPORTUNITY_KINDS = {
-    "stale_pending_order": "下单后久未推进",
+    "stale_pending_order": "下单后久未推进(已付款待发货)",
+    "unpaid_order": "下单未支付",
+    "abandoned_cart": "加购未下单",
     "stalled_bargain": "议价未成交",
     "consulted_no_order": "咨询过但没下单",
 }
@@ -124,6 +128,40 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
                       "session_id": r["session_id"], "product_id": r["product_id"],
                       "rounds": int(r["rounds"] or 0), "last_offer": r["last_offer"],
                       "created_at": r["updated_at"]} for r in rows]
+
+        elif kind == "unpaid_order":
+            # 催付款:status='unpaid' 且超过 settings.unpaid_stale_hours——刚下单
+            # 还没到催的时候(买家可能就在结账流程里),阈值以内一律不算商机。
+            # order_status(_label) 同样复用 STATUS_LABELS 这份唯一口径,让起草
+            # 模型据此判断买家真实进度是"没付钱",不是"已付款等发货"。
+            rows = conn.execute(
+                f"SELECT o.order_id, o.user AS user_id, o.status, o.total, o.created_at, "
+                f"       GROUP_CONCAT(oi.name, '、') AS items "
+                f"FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.order_id "
+                f"WHERE o.status = 'unpaid' "
+                f"  AND o.created_at <= datetime('now', '-{max(1, int(settings.unpaid_stale_hours))} hours') "
+                f"  AND o.created_at >= datetime('now', '-{days} days') "
+                f"GROUP BY o.order_id ORDER BY o.created_at DESC LIMIT ?", (lim,)).fetchall()
+            items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
+                      "order_id": r["order_id"], "user_id": r["user_id"],
+                      "order_status": r["status"],
+                      "order_status_label": STATUS_LABELS.get(r["status"], r["status"]),
+                      "amount": float(r["total"] or 0.0), "created_at": r["created_at"],
+                      "items": r["items"] or ""} for r in rows]
+
+        elif kind == "abandoned_cart":
+            # 弃单挽回:carts.status='active' 且 added_at 超过 settings.cart_stale_hours。
+            # 数据来自真实的 carts 表(N5 新增),不再是"永远查不到一行"的占位符。
+            rows = conn.execute(
+                f"SELECT user_id, sku, quantity, added_at FROM carts "
+                f"WHERE status = 'active' "
+                f"  AND added_at <= datetime('now', '-{max(1, int(settings.cart_stale_hours))} hours') "
+                f"  AND added_at >= datetime('now', '-{days} days') "
+                f"ORDER BY added_at DESC LIMIT ?", (lim,)).fetchall()
+            items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
+                      "order_id": "", "user_id": r["user_id"], "sku": r["sku"],
+                      "quantity": int(r["quantity"] or 0), "created_at": r["added_at"]}
+                     for r in rows]
 
         else:  # consulted_no_order
             # NOT EXISTS 故意不按 window 限制买家的历史订单:两个月前买过、昨天来

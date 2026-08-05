@@ -86,7 +86,9 @@ def test_stale_pending_item_carries_situation_and_real_order_status(db):
     out = growth.find_opportunities(kind="stale_pending_order", window_days=14)
     assert out["success"] is True
     opp = out["opportunities"][0]
-    assert opp["situation_label"] == "下单后久未推进"
+    # N5:pending 现在有了真正的对照组(unpaid),这条 kind 的中文名收窄成
+    # "已付款待发货"——不再是可能兼指未支付的模糊说法。
+    assert opp["situation_label"] == "下单后久未推进(已付款待发货)"
     # pending 在这个项目里的真实语义是"待发货"(已付款),不是"待支付"——
     # 直接断言这个真实状态与其中文展示,防止有人把口径悄悄改回错的那个。
     assert opp["order_status"] == "pending"

@@ -80,6 +80,48 @@ export async function getMyOrders(): Promise<MyOrder[]> {
   return r.ok ? (await r.json()).orders as MyOrder[] : [];
 }
 
+/** 待支付订单的「去支付」:unpaid → pending(待发货)。失败(越权/已支付/不存在)抛错。 */
+export async function payOrder(orderId: string): Promise<{ success: boolean; status: string; status_label: string }> {
+  const r = await fetch(`/api/order/${encodeURIComponent(orderId)}/pay`, {
+    method: "POST", headers: authHeaders(),
+  });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch { /* 忽略非 JSON 响应体 */ }
+    throw new Error(detail || `支付失败 (${r.status})`);
+  }
+  return r.json();
+}
+
+// ---- 购物车(N5:只收集意向,不做结算——下单仍走既有自助下单路径)----
+export type CartItem = {
+  id: number; user_id: string; sku: string; quantity: number; added_at: string; status: string;
+};
+
+export async function getCart(): Promise<CartItem[]> {
+  const r = await fetch("/api/cart", { headers: authHeaders() });
+  if (!r.ok) throw new Error(`加载购物车失败 (${r.status})`);
+  return (await r.json()).items as CartItem[];
+}
+
+export async function addToCartApi(itemId: string, quantity = 1): Promise<{ success: boolean }> {
+  const r = await fetch("/api/cart", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ item_id: itemId, quantity }),
+  });
+  if (!r.ok) throw new Error(`加入购物车失败 (${r.status})`);
+  return r.json();
+}
+
+export async function removeFromCartApi(sku: string): Promise<{ success: boolean }> {
+  const r = await fetch(`/api/cart/${encodeURIComponent(sku)}`, {
+    method: "DELETE", headers: authHeaders(),
+  });
+  if (!r.ok) throw new Error(`移除失败 (${r.status})`);
+  return r.json();
+}
+
 // ---- 评价(N4:买家评已签收订单;一单一 sku 只能评一次)----
 export type ReviewableItem = { order_id: string; sku: string; name: string; delivered_at: string | null };
 
@@ -110,12 +152,15 @@ export async function submitReview(
 }
 
 // demo 一键体验:后端开 DEMO_MODE 时,前端自动登录 demo_user_id、跳过登录卡片。
-export async function getConfig(): Promise<{ demo_mode: boolean; demo_user_id: string }> {
+// unpaid_flow_enabled(N5):购物车 Tab / 待支付「去支付」按钮是否出现由它决定——
+// 关闭时前端须退回改造前的样子,不能只靠"后端永远不会产生 unpaid 订单"这个
+// 事实隐式兜底(购物车本身是全新入口,不隐式消失)。
+export async function getConfig(): Promise<{ demo_mode: boolean; demo_user_id: string; unpaid_flow_enabled: boolean }> {
   try {
     const r = await fetch("/api/config");
-    return r.ok ? r.json() : { demo_mode: false, demo_user_id: "" };
+    return r.ok ? r.json() : { demo_mode: false, demo_user_id: "", unpaid_flow_enabled: false };
   } catch {
-    return { demo_mode: false, demo_user_id: "" };
+    return { demo_mode: false, demo_user_id: "", unpaid_flow_enabled: false };
   }
 }
 

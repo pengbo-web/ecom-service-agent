@@ -60,3 +60,10 @@ class ReviewRequest(BaseModel):
     sku: str
     rating: int
     content: str = ""
+
+
+class CartAddRequest(BaseModel):
+    """加入购物车。item_id 与 CreateOrderRequest 同一命名空间(hmdp 商品 id/
+    本地 sku),映射为 carts.sku;user_id 同样由服务端 _resolve_user 解析。"""
+    item_id: str
+    quantity: int = 1

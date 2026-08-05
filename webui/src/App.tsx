@@ -4,6 +4,7 @@ import { ChatView } from "@/components/ChatView";
 import { DashboardView } from "@/components/DashboardView";
 import { WorkbenchView } from "@/components/WorkbenchView";
 import { ShopView } from "@/components/ShopView";
+import { CartView } from "@/components/CartView";
 import { OrdersView } from "@/components/OrdersView";
 import { EvalView } from "@/components/EvalView";
 import { MemoryView } from "@/components/MemoryView";
@@ -11,7 +12,7 @@ import { SkillsView } from "@/components/SkillsView";
 import { OperationsView } from "@/components/OperationsView";
 import { LoginCard } from "@/components/LoginCard";
 import { adminFetch, openConversation, getUserId, setUserId, me, clearToken,
-  getConfig, getToken, setToken, createUser, login, createOrder } from "@/lib/api";
+  getConfig, getToken, setToken, createUser, login, createOrder, getCart } from "@/lib/api";
 
 export default function App() {
   const [view, setView] = useState<View>(
@@ -26,6 +27,23 @@ export default function App() {
   const [resetNonce, setResetNonce] = useState(0);   // 重置对话时自增,强制 ChatView 重挂载(会话ID不变也清屏)
   const [itemId, setItemId] = useState<string>(() =>   // 当前咨询商品:初值来自 ?item=,商城点"咨询"时更新
     typeof location !== "undefined" ? (new URLSearchParams(location.search).get("item") || "") : "");
+
+  // N5:购物车 + 真实未支付态由后端开关 unpaid_flow_enabled 决定是否出现。
+  // 关闭时退回改造前的样子——不出现购物车 Tab/加购按钮,也不拉取购物车数据。
+  const [showCart, setShowCart] = useState(false);
+  useEffect(() => { getConfig().then((cfg) => setShowCart(!!cfg.unpaid_flow_enabled)); }, []);
+
+  const [cartCount, setCartCount] = useState(0);
+  async function refreshCartCount() {
+    if (!showCart) { setCartCount(0); return; }
+    try {
+      const items = await getCart();
+      setCartCount(items.reduce((s, it) => s + it.quantity, 0));
+    } catch {
+      // 拉取失败不影响其它页面,徽标先保留上一次已知值
+    }
+  }
+  useEffect(() => { if (authedUser && showCart) refreshCartCount(); }, [authedUser, showCart]);
 
   useEffect(() => {
     (async () => {
@@ -70,6 +88,7 @@ export default function App() {
       const r = await createOrder(id, 1);
       setOrdersNonce((n) => n + 1);
       setView("orders");
+      refreshCartCount();   // 后端下单成功后会把该商品的购物车行标记为 converted
       alert(`下单成功！订单号 ${r.order_id}（${r.status_label}），实付 ¥${r.total}`);
     } catch {
       alert("下单失败，请确认已登录、商品仍在售");
@@ -103,9 +122,11 @@ export default function App() {
   if (!sessionId) return <div className="p-8 text-sm text-muted-foreground">正在建立会话…</div>;
 
   return (
-    <AppShell view={view} onView={setView} onReset={onReset}>
-      {view === "shop" && <ShopView onConsult={(id) => { setItemId(id); setView("chat"); }} onBuy={onBuy} />}
+    <AppShell view={view} onView={setView} onReset={onReset} showCart={showCart} cartCount={cartCount}>
+      {view === "shop" && <ShopView onConsult={(id) => { setItemId(id); setView("chat"); }} onBuy={onBuy}
+        showCart={showCart} onCartChanged={refreshCartCount} />}
       {view === "chat" && <ChatView key={`${sessionId}:${resetNonce}`} sessionId={sessionId} userId={userId} itemId={itemId} onUserId={onUserId} onConversation={setSessionId} onBuy={onBuy} />}
+      {view === "cart" && showCart && <CartView onShop={() => setView("shop")} onCartChanged={refreshCartCount} />}
       {view === "orders" && <OrdersView key={ordersNonce} onShop={() => setView("shop")} />}
       {view === "dash" && <DashboardView sessionId={sessionId} />}
       {view === "seat" && <WorkbenchView />}

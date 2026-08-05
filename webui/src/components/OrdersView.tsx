@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getMyOrders, getReviewableItems, type MyOrder, type ReviewableItem } from "@/lib/api";
+import { getMyOrders, getReviewableItems, payOrder, type MyOrder, type ReviewableItem } from "@/lib/api";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ReviewDialog } from "@/components/ReviewDialog";
@@ -21,6 +21,10 @@ export function OrdersView({ onShop }: { onShop: () => void }) {
   const [reviewable, setReviewable] = useState<Set<string> | null>(null);
   const [reviewItem, setReviewItem] = useState<ReviewableItem | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
+  // 「去支付」各自持有忙态/错误(与评价按钮同一惯例:一笔订单支付失败
+  // 不该影响别的订单继续可点)。
+  const [payBusy, setPayBusy] = useState<string | null>(null);
+  const [payErr, setPayErr] = useState<Record<string, string>>({});
 
   async function load() {
     setOrders(await getMyOrders());
@@ -33,6 +37,19 @@ export function OrdersView({ onShop }: { onShop: () => void }) {
     }
   }
   useEffect(() => { load(); }, []);
+
+  async function onPay(orderId: string) {
+    setPayBusy(orderId);
+    setPayErr((prev) => ({ ...prev, [orderId]: "" }));
+    try {
+      await payOrder(orderId);
+      await load();   // 刷新:状态由"待支付"变为"待发货"
+    } catch (e) {
+      setPayErr((prev) => ({ ...prev, [orderId]: String(e) }));
+    } finally {
+      setPayBusy(null);
+    }
+  }
 
   function openReview(orderId: string, sku: string, name: string) {
     setReviewItem({ order_id: orderId, sku, name, delivered_at: null });
@@ -113,8 +130,20 @@ export function OrdersView({ onShop }: { onShop: () => void }) {
                 </div>
                 <div className="flex items-center justify-between border-t pt-2 text-xs text-muted-foreground">
                   <span>{o.created_at}</span>
-                  <span>实付 <span className="text-base font-semibold text-red-500">¥{o.total}</span></span>
+                  <div className="flex items-center gap-2">
+                    <span>实付 <span className="text-base font-semibold text-red-500">¥{o.total}</span></span>
+                    {o.status === "unpaid" && (
+                      <Button size="sm" className="h-7 bg-red-500 px-3 text-xs hover:bg-red-600"
+                        disabled={payBusy === o.order_id}
+                        onClick={() => onPay(o.order_id)}>
+                        {payBusy === o.order_id ? "支付中…" : "去支付"}
+                      </Button>
+                    )}
+                  </div>
                 </div>
+                {payErr[o.order_id] && (
+                  <div role="alert" className="pt-1.5 text-[11px] text-destructive">⚠️ {payErr[o.order_id]}</div>
+                )}
               </div>
             ))}
           </div>

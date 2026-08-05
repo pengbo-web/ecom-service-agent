@@ -30,6 +30,7 @@ AGENT_CONFIGS = {
         "tools": _COMMON_TOOLS | {
             "query_product", "query_coupons", "negotiate_price", "list_user_orders",
             "place_order",   # 促成下单:创建待支付订单(不代付款)
+            "add_to_cart", "view_cart",   # 购物车:只收集意向,不做结算(不代下单)
         },
     },
     "midsale": {
@@ -40,6 +41,7 @@ AGENT_CONFIGS = {
             "query_order", "query_logistics", "expedite_shipping",
             "change_address", "cancel_order", "list_user_orders",
             "place_order",   # 创建待支付订单(不代付款)
+            "add_to_cart", "view_cart",   # 购物车:只收集意向,不做结算(不代下单)
         },
     },
     "aftersale": {

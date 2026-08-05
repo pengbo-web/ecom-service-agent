@@ -1,6 +1,7 @@
 from app.db import get_db
 
 STATUS_LABELS = {
+    "unpaid": "待支付",
     "pending": "待发货",
     "shipped": "已发货",
     "delivered": "已签收",

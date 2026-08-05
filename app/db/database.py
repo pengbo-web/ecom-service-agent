@@ -212,6 +212,16 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_reviews_sku ON reviews(sku, created_at);
                 CREATE INDEX IF NOT EXISTS idx_reviews_created ON reviews(created_at);
+                CREATE TABLE IF NOT EXISTS carts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    sku TEXT NOT NULL,
+                    quantity INTEGER NOT NULL DEFAULT 1,
+                    added_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active'
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_carts_active_unique
+                    ON carts(user_id, sku) WHERE status = 'active';
                 """
             )
             # 兼容旧库：products 补 floor_price 列
@@ -1342,5 +1352,109 @@ class Database:
                 (user_id,),
             ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ---------- 购物车(N5:真实购物车,供弃单挽回商机的数据地基) ----------
+    def add_to_cart(self, user_id: str, sku: str, quantity: int) -> None:
+        """加购:同一用户同一 sku 若已有 active 行则累加数量并刷新 added_at,
+        否则新插入一行。`idx_carts_active_unique` 这条部分索引只约束 active
+        行,允许同一 sku 在"已转化/已弃单"的历史行之外再开一条新的 active 行
+        (重新加回购物车)。加购不是"设置为某个数量"而是"再加这么多",
+        与真实购物车"多次点加购会累加"的直觉一致。"""
+        conn = self.connect()
+        try:
+            now = self._now()
+            qty = max(1, int(quantity or 1))
+            row = conn.execute(
+                "SELECT id FROM carts WHERE user_id = ? AND sku = ? AND status = 'active'",
+                (user_id, sku)).fetchone()
+            if row:
+                conn.execute(
+                    "UPDATE carts SET quantity = quantity + ?, added_at = ? WHERE id = ?",
+                    (qty, now, row["id"]))
+            else:
+                conn.execute(
+                    "INSERT INTO carts (user_id, sku, quantity, added_at, status) "
+                    "VALUES (?, ?, ?, ?, 'active')",
+                    (user_id, sku, qty, now))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def list_cart(self, user_id: str) -> list[dict]:
+        """该用户当前活跃(active)的购物车行,按最近加购时间倒序。"""
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, user_id, sku, quantity, added_at, status FROM carts "
+                "WHERE user_id = ? AND status = 'active' ORDER BY added_at DESC",
+                (user_id,)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def remove_from_cart(self, user_id: str, sku: str) -> bool:
+        """移除某个 sku 的 active 购物车行(物理删除,不是状态流转——它从未
+        转化成订单,留着历史行没有意义)。"""
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "DELETE FROM carts WHERE user_id = ? AND sku = ? AND status = 'active'",
+                (user_id, sku))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def mark_cart_converted(self, user_id: str, skus: list[str]) -> None:
+        """下单成功后,把该用户这些 sku 的 active 购物车行标记为 converted。
+
+        只改状态、不物理删除:一来这些行从此不再出现在"我的购物车"/弃单商机
+        (二者都只看 status='active'),二来保留历史行,以后想统计"购物车转化率"
+        才有数据可看。"""
+        skus = [s for s in (skus or []) if s]
+        if not skus:
+            return
+        conn = self.connect()
+        try:
+            placeholders = ",".join("?" for _ in skus)
+            conn.execute(
+                f"UPDATE carts SET status = 'converted' "
+                f"WHERE user_id = ? AND status = 'active' AND sku IN ({placeholders})",
+                (user_id, *skus))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def abandoned_carts(self, hours: int = 48, limit: int = 100) -> list[dict]:
+        """超过阈值仍处于 active 的购物车行——"加购未下单"商机的数据来源。"""
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                f"SELECT id, user_id, sku, quantity, added_at FROM carts "
+                f"WHERE status = 'active' "
+                f"  AND added_at <= datetime('now', '-{max(1, int(hours))} hours') "
+                f"ORDER BY added_at ASC LIMIT ?",
+                (max(1, int(limit)),)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ---------- 真实未支付态(N5):unpaid → pending 的条件更新 ----------
+    def pay_order(self, order_id: str, user_id: str) -> bool:
+        """买家为自己的未支付订单完成支付。**只能由订单所有者调用**,且只对
+        当前仍是 unpaid 的行生效——这条条件更新同时挡住两件事:
+        ①付别人的单(user 不匹配,rowcount=0);②重复支付(已经是 pending 之后
+        再调,status 条件不满足,rowcount=0),与 review_outreach_draft/
+        mark_outreach_sent 等既有条件更新同一套幂等纪律。"""
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE orders SET status = 'pending' "
+                "WHERE order_id = ? AND user = ? AND status = 'unpaid'",
+                (order_id, user_id))
+            conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()

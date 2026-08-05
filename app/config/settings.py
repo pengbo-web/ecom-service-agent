@@ -238,6 +238,14 @@ class Settings(BaseSettings):
     auth_secret: str = "dev-secret-change-in-prod"   # 生产必须换(env AUTH_SECRET)
     auth_token_ttl: int = 86400        # token 有效期(秒)
 
+    # 购物车 + 真实未支付态(N5):这是唯一改动买家可见下单语义的开关。
+    # 开(默认)=自助下单落库状态为 unpaid,买家需再走一步支付才进入 pending
+    # (待发货);关=下单直接落 pending,与本特性上线前的行为逐字节一致——
+    # 购物车与订单页也随之退回改造前的样子(不会出现「待支付」/「去支付」)。
+    unpaid_flow_enabled: bool = True
+    unpaid_stale_hours: int = 24       # 下单后超过多久仍未支付才算"催付款"商机
+    cart_stale_hours: int = 48         # 购物车超过多久未转化(下单)才算"弃单"商机
+
     @property
     def is_production(self) -> bool:
         return (self.environment or "").strip().lower() in ("production", "prod")
