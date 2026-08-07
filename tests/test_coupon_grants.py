@@ -22,6 +22,16 @@ def test_duplicate_grant_returns_none(db):
     assert db.grant_coupon("SHOE30", "u1", 2, "r", "admin") is None
 
 
+def test_get_grant_returns_the_row_recording_which_draft_granted_it(db):
+    db.grant_coupon("SHOE30", "u1", 7, "r", "admin")
+    row = db.get_grant("SHOE30", "u1")
+    assert row is not None and row["draft_id"] == 7
+
+
+def test_get_grant_returns_none_when_no_such_grant(db):
+    assert db.get_grant("SHOE30", "u1") is None
+
+
 def test_unknown_code_is_refused(db):
     from app.agent.coupons.grants import issue_for_draft
     ok, why = issue_for_draft({"id": 1, "user_id": "u1",
@@ -40,6 +50,39 @@ def test_draft_without_coupon_is_a_noop(db):
     from app.agent.coupons.grants import issue_for_draft
     ok, why = issue_for_draft({"id": 1, "user_id": "u1", "offer": {}}, "admin")
     assert ok is True and why == ""
+
+
+def test_retry_by_same_draft_after_grant_is_not_treated_as_duplicate(db, monkeypatch):
+    """Critical 修复:发券成功、投递失败、店主对**同一条草稿**重试——第二次
+    调用 issue_for_draft 必须放行(继续投递),而不是把自己上一次发放成功
+    的那一行误判成"重复发放"。"""
+    from app.agent.coupons import grants
+    monkeypatch.setattr(grants, "get_db", lambda: db)
+    draft = {"id": 42, "user_id": "u1", "offer": {"coupon_code": "SHOE30"}}
+
+    ok1, why1 = grants.issue_for_draft(draft, "admin")
+    assert ok1 is True and why1 == ""
+    assert len(db.list_user_grants("u1")) == 1
+
+    ok2, why2 = grants.issue_for_draft(draft, "admin")   # 模拟同一条草稿的重试
+    assert ok2 is True and why2 == ""
+    assert len(db.list_user_grants("u1")) == 1   # 没有发第二次
+
+
+def test_cross_draft_duplicate_is_still_refused(db, monkeypatch):
+    """不同草稿撞上同一张券:仍是真正的重复发放,必须拒绝——修复"同一草稿
+    可重试"不能连带放宽这条防线。"""
+    from app.agent.coupons import grants
+    monkeypatch.setattr(grants, "get_db", lambda: db)
+
+    draft_a = {"id": 1, "user_id": "u1", "offer": {"coupon_code": "SHOE30"}}
+    ok_a, _ = grants.issue_for_draft(draft_a, "admin")
+    assert ok_a is True
+
+    draft_b = {"id": 2, "user_id": "u1", "offer": {"coupon_code": "SHOE30"}}
+    ok_b, why_b = grants.issue_for_draft(draft_b, "admin")
+    assert ok_b is False and "不能重复发放" in why_b
+    assert len(db.list_user_grants("u1")) == 1   # 仍只有草稿 1 发的那一条
 
 
 def test_draft_outreach_never_grants(db, monkeypatch):

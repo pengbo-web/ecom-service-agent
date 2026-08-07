@@ -1413,14 +1413,25 @@ def create_app(session_manager: Optional[SessionManager] = None,
         if not db.review_outreach_draft(draft_id, "approved", reviewed_by="admin"):
             return {"success": True, "sent": False, "reason": "该草稿已被处理过"}
 
-        def _revert_after_failure(base_reason: str) -> dict:
-            """投递失败 / 发券失败后统一走的收尾:退回 draft 让店主可以重试;
-            绝不停在"已批准但没发/没发券"的悬空态。这一步本身也要能失败
-            (revert_outreach_to_pending 是条件更新,rowcount 可能为 0),而且
-            它可能直接抛异常(比如数据库这时刚好打不开)——两种情况都不能让
-            操作者收到一个没有任何线索的裸 500,那正是这条退回路径本应堵住的
-            "悬空 approved"以另一种方式重现。base_reason 是失败本身的原因文案
-            (已经带上"投递失败"/"发券失败:…"这类前缀)。
+        def _revert_after_failure(base_reason: str, retryable: bool = True) -> dict:
+            """投递失败 / 发券失败后统一走的收尾:退回 draft 让店主可以看到并
+            处理;绝不停在"已批准但没发/没发券"的悬空态。这一步本身也要能
+            失败(revert_outreach_to_pending 是条件更新,rowcount 可能为 0),
+            而且它可能直接抛异常(比如数据库这时刚好打不开)——两种情况都
+            不能让操作者收到一个没有任何线索的裸 500,那正是这条退回路径
+            本应堵住的"悬空 approved"以另一种方式重现。base_reason 是失败
+            本身的原因文案(已经带上"投递失败"/"发券失败:…"这类前缀)。
+
+            `retryable`:再点一次批准,这次失败是否真的可能变成成功——文案
+            必须如实反映这一点,不能不管三七二十一都说"可重试":
+              - 投递失败通常是网络抖动一类的暂时性问题,重试是有意义的
+                动作(而且发券这一步在 `issue_for_draft` 里已经能识别出
+                "这是同一条草稿的重试",不会因为券已经发过而再次判失败),
+                维持"可重试"。
+              - 发券失败的两种情形——券码本身不是本店在售的券、这张券
+                已经被别的草稿发给了这个买家——都是永久性拒绝:同样的
+                草稿再点一次批准,结果不会变,必须明确告知"重试没用,
+                需要人工处理",不能留一句会落空的"可重试"。
             """
             try:
                 reverted = db.revert_outreach_to_pending(draft_id)
@@ -1440,17 +1451,25 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 return {"success": False, "sent": False,
                         "reason": f"{base_reason},且退回待审状态未生效;草稿 {draft_id} "
                                   "状态异常,请人工核查并处理"}
-            return {"success": False, "sent": False, "reason": f"{base_reason},已退回待审,可重试"}
+            if retryable:
+                return {"success": False, "sent": False,
+                        "reason": f"{base_reason},已退回待审,可重试"}
+            return {"success": False, "sent": False,
+                    "reason": f"{base_reason},已退回待审;直接重试不会成功(原因不会变),"
+                              "需人工处理后再批准"}
 
         # N6:发券碰的是真金白银,而且不可撤销——必须在人工点过批准**之后**、
         # 消息投递**之前**发生。草稿没带 coupon_code 时 issue_for_draft 直接
-        # 放行(noop);券码未知(模型编的)或已经发过时判为失败,与投递失败
-        # 走同一条退回路径——买家绝不会收到一句"送您一张券"却背后没有真的券。
+        # 放行(noop);券码未知(模型编的)或已经被别的草稿发过时判为失败,
+        # 与投递失败走同一条退回路径,但文案不同——这两种发券失败都是永久性
+        # 拒绝(retryable=False),不能对店主说"可重试"这种会落空的话;而
+        # "这条草稿自己上一次已经发过、这次是重试"这种情况,issue_for_draft
+        # 内部已经识别出来直接放行(True, ""),根本不会走到这个分支。
         # issue_for_draft 不注册成任何 Agent 工具,只能从这里被调用。
         from app.agent.coupons.grants import issue_for_draft
         coupon_ok, coupon_reason = issue_for_draft(draft, granted_by="admin")
         if not coupon_ok:
-            return _revert_after_failure(f"发券失败:{coupon_reason}")
+            return _revert_after_failure(f"发券失败:{coupon_reason}", retryable=False)
 
         delivered, deliver_warning = _delivery_result(app.state.deliver_outreach(draft))
         if not delivered:

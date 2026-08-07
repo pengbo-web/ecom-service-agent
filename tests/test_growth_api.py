@@ -395,3 +395,115 @@ def test_approve_blocked_when_buyer_in_manual_takeover(client, draft, monkeypatc
     assert body["block_code"] == arb.BLOCK_MANUAL                # 新增字段,附加不替换
     assert sent == []                                        # 没投递
     assert get_db().get_outreach_draft(draft)["status"] == "draft"   # 状态没被消耗
+
+
+# ---------------------------------------------------------------------------
+# 发券(N6 review finding):走真实审批端点,覆盖"发券成功但投递失败后重试"
+# 这条此前只被单元测试(直接调 issue_for_draft)绕过、从未被端到端练过的死循环。
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def coupon_draft(client):
+    """带一张真实在售券(SHOE30,audience=all,任何买家都能领)的待审草稿。"""
+    from app.db import get_db
+    return get_db().create_outreach_draft(
+        "stale_pending_order", "u1", "O1", "这单还差一步,送您一张鞋类券",
+        {"coupon_code": "SHOE30"}, "未付款", "C1", "growth")
+
+
+@pytest.fixture()
+def unknown_coupon_draft(client):
+    """券码是模型编出来的,不在 order_ops._COUPONS 里。"""
+    from app.db import get_db
+    return get_db().create_outreach_draft(
+        "stale_pending_order", "u1", "O1", "送您一张券",
+        {"coupon_code": "MODEL_MADE_THIS_UP"}, "未付款", "C1", "growth")
+
+
+def test_approve_with_coupon_grants_and_delivers(client, coupon_draft, monkeypatch):
+    """happy path:带券的草稿一次批准成功,券真的发了一次,消息真的送了。"""
+    from app.db import get_db
+    sent = []
+    monkeypatch.setattr(client.app.state, "deliver_outreach",
+                        lambda d: sent.append(d["id"]) or True)
+    r = client.post(f"/api/admin/growth/drafts/{coupon_draft}/approve", headers=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["success"] is True and body["sent"] is True
+    assert sent == [coupon_draft]
+    grants = get_db().list_user_grants("u1")
+    assert len(grants) == 1 and grants[0]["code"] == "SHOE30"
+    assert get_db().get_outreach_draft(coupon_draft)["status"] == "sent"
+
+
+def test_approve_retry_after_delivery_failure_does_not_dead_end(
+        client, coupon_draft, monkeypatch):
+    """这正是本次要修的 Critical:发券成功→投递失败→退回待审→店主重试。
+
+    修复前:第二次批准时 issue_for_draft 对同一条草稿重新调用 grant_coupon,
+    撞上 UNIQUE(code, user_id) 约束返回 None,被误判成"重复发放"而拒绝——
+    这条草稿从此再也送不出去,买家却已经真的拿到了那张券。
+    修复后:issue_for_draft 认出这行发放记录是这同一条草稿发的,放行继续
+    投递,重试第二次才真正送达。全程券只发了一次。
+    """
+    from app.db import get_db
+    calls = {"n": 0}
+
+    def _deliver(d):
+        calls["n"] += 1
+        return calls["n"] > 1   # 第一次投递失败,第二次(重试)成功
+
+    monkeypatch.setattr(client.app.state, "deliver_outreach", _deliver)
+
+    r1 = client.post(f"/api/admin/growth/drafts/{coupon_draft}/approve", headers=AUTH)
+    body1 = r1.json()
+    assert body1["success"] is False and body1["sent"] is False
+    assert "投递失败" in body1["reason"] and "可重试" in body1["reason"]
+    assert get_db().get_outreach_draft(coupon_draft)["status"] == "draft"   # 退回待审
+    assert len(get_db().list_user_grants("u1")) == 1   # 钱已经花过一次,没被撤销
+
+    r2 = client.post(f"/api/admin/growth/drafts/{coupon_draft}/approve", headers=AUTH)
+    body2 = r2.json()
+    assert body2["success"] is True and body2["sent"] is True
+
+    assert calls["n"] == 2   # 投递被真正重试了一次,不是第一次失败后就没再调用
+    grants = get_db().list_user_grants("u1")
+    assert len(grants) == 1   # 重试没有让券被发第二次
+    assert get_db().get_outreach_draft(coupon_draft)["status"] == "sent"
+
+
+def test_approve_with_unknown_coupon_code_is_refused(
+        client, unknown_coupon_draft, monkeypatch):
+    """模型编的券码:拒绝发放,不投递,且这条拒绝是永久性的——不能说可重试。"""
+    from app.db import get_db
+    sent = []
+    monkeypatch.setattr(client.app.state, "deliver_outreach",
+                        lambda d: sent.append(1) or True)
+    r = client.post(f"/api/admin/growth/drafts/{unknown_coupon_draft}/approve", headers=AUTH)
+    body = r.json()
+    assert body["success"] is False and body["sent"] is False
+    assert "券码" in body["reason"]
+    assert "可重试" not in body["reason"]   # 永久性拒绝,重试结果不会变
+    assert sent == []                       # 没投递
+    assert get_db().list_user_grants("u1") == []   # 没发放
+    assert get_db().get_outreach_draft(unknown_coupon_draft)["status"] == "draft"
+
+
+def test_approve_cross_draft_duplicate_coupon_is_refused(
+        client, coupon_draft, monkeypatch):
+    """这张券已经被**另一条草稿**发给了这个买家:真正的重复,必须拒绝——
+    "同一草稿可重试"的放行不能连带把跨草稿的重复也一起放行了。"""
+    from app.db import get_db
+    get_db().grant_coupon("SHOE30", "u1", 999, "另一条草稿发的", "admin")
+
+    sent = []
+    monkeypatch.setattr(client.app.state, "deliver_outreach",
+                        lambda d: sent.append(1) or True)
+    r = client.post(f"/api/admin/growth/drafts/{coupon_draft}/approve", headers=AUTH)
+    body = r.json()
+    assert body["success"] is False and body["sent"] is False
+    assert "重复发放" in body["reason"]
+    assert "可重试" not in body["reason"]   # 同样是永久性拒绝
+    assert sent == []
+    assert len(get_db().list_user_grants("u1")) == 1   # 仍是原来那一条,没有新增
+    assert get_db().get_outreach_draft(coupon_draft)["status"] == "draft"

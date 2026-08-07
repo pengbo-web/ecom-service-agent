@@ -1651,6 +1651,24 @@ class Database:
         finally:
             conn.close()
 
+    def get_grant(self, code: str, user_id: str) -> Optional[dict]:
+        """按 `(code, user_id)` 精确取那一行发放记录(`UNIQUE(code, user_id)`
+        保证至多一行)。
+
+        `grant_coupon` 命中约束返回 `None` 后,调用方(`issue_for_draft`)靠
+        这一行里的 `draft_id` 区分"这是同一条草稿上一次已经真的发放过,这次
+        重试只是撞见了自己",还是"这张券已经被别的草稿发给了这个买家,是
+        真正的重复"——前者要放行继续投递,后者仍须拒绝。
+        """
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM coupon_grants WHERE code = ? AND user_id = ?",
+                (code, user_id)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
     # ---------- 跟进序列(N7:持续沟通=序列自动推进,不是自动发送) ----------
     # 五条终止条件里,只有"同一买家同一 kind 只能有一条 active 链"这一条由
     # 本层(数据库唯一约束)兜底——其它四条(商机消失/上次触达已转化/仲裁拒绝/

@@ -34,8 +34,16 @@ def issue_for_draft(draft: dict, granted_by: str) -> tuple[bool, str]:
     - `coupon_code` 不在 `KNOWN_CODES` 里:拒绝(False, ...)。这是模型编造
       券码、人工审批时没注意到的那个失败场景,必须在这里挡住,而不是等
       发出去了才发现店铺根本没有这张券。
-    - 已经给同一买家发过这张券:`grant_coupon` 命中 `UNIQUE(code, user_id)`
-      返回 None,同样判为失败——防止重复发放同一张券。
+    - `grant_coupon` 命中 `UNIQUE(code, user_id)` 返回 None:不能直接判为
+      失败——必须先读回那一行(`get_grant`)看它的 `draft_id` 是不是**这同一
+      条草稿**:
+        * 是 → 上一次审批已经把这张券真的发给了这个买家(典型场景:发券
+          成功、随后投递失败、草稿被退回待审、店主点了重试),钱已经花过
+          一次,这次重试不该再判成"发券失败",而是放行让流程继续走到
+          投递——否则这条草稿会在"发券失败→退回→重试→再撞发券失败"
+          之间死循环,永远送不出去,买家却已经真的拿到了那张券。
+        * 不是(或查不到)→ 这张券已经被别的草稿发给了这个买家,是真正
+          的重复发放,必须拒绝。
     """
     offer = draft.get("offer") or {}
     code = (offer.get("coupon_code") or "").strip()
@@ -47,7 +55,13 @@ def issue_for_draft(draft: dict, granted_by: str) -> tuple[bool, str]:
     user_id = draft.get("user_id", "")
     draft_id = draft.get("id")
     reason = f"营销触达赠券(草稿 {draft_id})"
-    gid = get_db().grant_coupon(code, user_id, draft_id, reason, granted_by)
-    if gid is None:
-        return False, f"买家 {user_id} 已被发放过优惠券「{code}」,不能重复发放"
-    return True, ""
+    db = get_db()
+    gid = db.grant_coupon(code, user_id, draft_id, reason, granted_by)
+    if gid is not None:
+        return True, ""
+
+    existing = db.get_grant(code, user_id)
+    if existing is not None and draft_id is not None and existing.get("draft_id") == draft_id:
+        # 同一条草稿的重试:这次撞见的是自己上一次真的发放成功的那一行。
+        return True, ""
+    return False, f"买家 {user_id} 已被发放过优惠券「{code}」,不能重复发放"

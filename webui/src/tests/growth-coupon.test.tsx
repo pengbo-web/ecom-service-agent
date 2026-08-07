@@ -90,7 +90,7 @@ describe("GrowthPanel · 优惠券发放(N6)", () => {
 
   it("发券失败(与投递失败同一处理)时,原因要显示且草稿留在待审队列", async () => {
     stub([DRAFT_WITH_COUPON],
-      { success: false, sent: false, reason: "发券失败:券码「SHOE30」不是本店在售的优惠券,已拒绝发放;已退回待审,可重试" });
+      { success: false, sent: false, reason: "发券失败:券码「SHOE30」不是本店在售的优惠券,已拒绝发放,已退回待审;直接重试不会成功(原因不会变),需人工处理后再批准" });
     vi.spyOn(window, "confirm").mockReturnValue(true);
     render(<GrowthPanel />);
     fireEvent.click(await screen.findByTestId("approve-1"));
