@@ -12,8 +12,22 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("ADMIN_TOKEN", "T")
     from app.config import settings as st
     monkeypatch.setattr(st.settings, "admin_token", "T")
+
+    # 隔离数据库:get_db() 默认是进程内单例、指向真实的 app/sessions/ecom.db。
+    # 本文件的 overview 端点会读 turn_signals/orders 等表,不隔离的话断言会被
+    # "开发机上真实跑过的会话"污染(N2 情绪分布那条就是这样翻的车:线上
+    # 真实用过之后 turn_signals 里有数据,"空库应为 0" 的断言在同一台机器上
+    # 就不成立了)。做法与 tests/test_growth_api.py 一致:每个测试各自一份
+    # tmp_path 下的临时 sqlite 文件,测试结束后把单例复位。
+    from app.db import Database, set_db
+    db = Database(db_path=str(tmp_path / "seller_api_test.db"))
+    db.init_schema()
+    set_db(db)
+
     from app.api.app import create_app
-    return TestClient(create_app())
+    c = TestClient(create_app())
+    yield c
+    set_db(None)
 
 
 # 管理鉴权走 X-Admin-Token(见 app/hardening/auth.py::make_admin_auth),不是
@@ -41,18 +55,43 @@ def test_seller_overview_returns_metrics_and_anomalies(client):
 
 def test_seller_overview_carries_emotion_section(client):
     """N2 回归:情绪分布必须真正跨过 HTTP 边界到达控制台,不能只是
-    service_quality() 这个 Python 函数自己测过、端点却没转发。空库场景下
-    total 应为 0、angry_rate 为 0.0(除零安全,不是 None)。"""
+    service_quality() 这个 Python 函数自己测过、端点却没转发。
+
+    这里改为**灌入一组已知的 turn_signals 再断言端点报出这组数据**,而不是
+    断言"空库时 total 应为 0"——后者只在没人真正用过这台机器时才成立,
+    是关于开发者本机历史的断言,不是关于端点行为的断言(client 隔离前,
+    这条测试在跑过真实对话的机器上会读到 ecom.db 里的真实行而失败,报的
+    却是 "assert 2 == 0" 这种看似端点坏了的假象)。灌入已知数据后端点必须
+    原样报出这组数据,才真正证明了"确实转发了 service_quality() 算出来的
+    情绪分布",而不仅仅是"quality.emotion 这个键存在"。
+    """
+    from app.db import get_db
+    db = get_db()
+    for emotion, level in (("neutral", 0), ("neutral", 0), ("unhappy", 2), ("angry", 3)):
+        db.record_turn_signal("s", "u", "其他", emotion, level, False)
+
     r = client.get("/api/seller/overview?window_days=7", headers=AUTH)
     assert r.status_code == 200
     body = r.json()
     assert "quality" in body
     emotion = body["quality"]["emotion"]
+    assert emotion["total"] == 4
+    assert emotion["counts"] == {"neutral": 2, "unhappy": 1, "angry": 1}
+    assert emotion["angry_rate"] == pytest.approx(0.25)
+    # 既有键必须原样还在——新增是附加的,不是替换
+    assert "overview" in body and "products" in body and "anomalies" in body
+
+
+def test_seller_overview_emotion_section_is_zero_on_empty_db(client):
+    """空库场景本身仍值得测:除零必须返回 0.0 而不是 None(消费方是 LLM,
+    None 会被渲染成 'null' 诱导模型现编数字)。这条在隔离后的临时库上
+    才是关于端点行为的断言,而不是关于开发者本机历史的断言。"""
+    r = client.get("/api/seller/overview?window_days=7", headers=AUTH)
+    assert r.status_code == 200
+    emotion = r.json()["quality"]["emotion"]
     assert emotion["total"] == 0
     assert emotion["angry_rate"] == 0.0
     assert set(emotion["counts"]) == {"neutral", "unhappy", "angry"}
-    # 既有键必须原样还在——新增是附加的,不是替换
-    assert "overview" in body and "products" in body and "anomalies" in body
 
 
 def test_seller_chat_returns_agent_key(client, monkeypatch):

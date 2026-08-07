@@ -28,9 +28,18 @@ def test_connect_uses_row_factory(tmp_path):
 
 
 def test_get_set_db_singleton(tmp_path):
+    """get_db()/set_db() 背后是进程内全局单例。此前这条测试把单例改成临时
+    库之后从未复位——同一进程里后跑的任何测试(哪怕在别的文件里)拿到的
+    get_db() 都会是这个已经跑完、随 tmp_path 一起失效的临时库,而不是它
+    自己期望的那份。用 try/finally 把改动前的单例原样还回去,保证这条
+    测试本身跑一遍前后是幂等的,不会给同进程里后跑的测试留坑。"""
+    prev = get_db()
     db = Database(str(tmp_path / "t.db"))
     set_db(db)
-    assert get_db() is db
+    try:
+        assert get_db() is db
+    finally:
+        set_db(prev)
 
 
 def test_seed_from_mock_populates_tables(tmp_path):
