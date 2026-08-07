@@ -399,6 +399,11 @@ export type OutreachDraft = {
   content: string; offer: Record<string, unknown>; reason: string;
   correlation_id: string; status: string; needs_review_reason: string;
   created_by: string; reviewed_by: string | null; created_at: string;
+  // N6:offer.coupon_code 非空时,后端附上这张券的文案(如「满300减30」),
+  // 唯一来自 app.agent.coupons.grants.COUPON_BY_CODE(再往上追溯是
+  // order_ops._COUPONS)。券码不是店铺已知券(模型编的)时为空字符串——
+  // 前端据此判断"这不是一张真实的券",而不是自己另存一份券码/文案表。
+  coupon_discount?: string;
 };
 
 export async function getGrowthDrafts(status = "draft"): Promise<{ drafts: OutreachDraft[] }> {

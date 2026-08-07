@@ -128,27 +128,50 @@ def filter_coupons(coupons: list, is_new: bool, is_member: bool):
     return ok, no
 
 
+def _granted_coupons(db, uid: str) -> list:
+    """该用户已被发放过的券(N6:coupon_grants 唯一数据源),附上券面文案。
+
+    只在 _COUPONS 里找得到对应券码时才附 name/discount——发放记录理论上
+    不该出现未知券码(issue_for_draft 已经挡在发放之前),这里兜底不让
+    找不到定义的行直接崩,而是原样带出券码本身。
+    """
+    by_code = {c["code"]: c for c in _COUPONS}
+    out = []
+    for g in db.list_user_grants(uid):
+        info = by_code.get(g["code"], {})
+        out.append({"code": g["code"], "name": info.get("name", g["code"]),
+                    "discount": info.get("discount", ""), "granted_at": g.get("created_at")})
+    return out
+
+
 def query_coupons() -> dict:
     """查询当前用户可领的优惠券(按会员等级 + 新老客身份筛选,只读)。
 
     fail-open:识别不到当前用户或查资格异常 → 返回全部券,不漏发。
+    附带 `granted`:该用户已被发放过的券(N6,数据源是 coupon_grants,只读),
+    供模型判断"这张券已经给过了,别重复承诺"。
     """
     from app.agent.runtime_context import get_current_user
     uid = get_current_user()
     if not uid:
         return {"success": True, "coupons": [{k: v for k, v in c.items() if k != "audience"}
                                              for c in _COUPONS],
-                "unavailable": [], "note": "未识别当前用户,已展示全部券。"}
+                "unavailable": [], "granted": [], "note": "未识别当前用户,已展示全部券。"}
     try:
-        from app.db import get_db
+        # 注意:这里必须用模块级的 get_db(顶部 `from app.db import get_db`),
+        # 不能在函数体内再 `from app.db import get_db` 局部重绑一份——那样会
+        # 在这个函数作用域内屏蔽掉模块级名字,导致 monkeypatch.setattr(order_ops,
+        # "get_db", ...) 这种测试打桩方式失效(打桩打的是模块属性,局部 import
+        # 完全不看它)。query_coupons_shows_granted 等测试正是靠这种打桩方式接入。
         db = get_db()
         user = db.get_user(uid)
         is_member = bool(user) and (user.get("member_level") or "normal") != "normal"
         is_new = db.count_user_orders(uid) == 0
         ok, no = filter_coupons(_COUPONS, is_new=is_new, is_member=is_member)
         return {"success": True, "coupons": ok, "unavailable": no,
+                "granted": _granted_coupons(db, uid),
                 "note": "以上为您当前可领的优惠券(已按会员等级与新老客身份筛选)。"}
     except Exception:
         return {"success": True, "coupons": [{k: v for k, v in c.items() if k != "audience"}
                                              for c in _COUPONS],
-                "unavailable": [], "note": "未识别当前用户,已展示全部券。"}
+                "unavailable": [], "granted": [], "note": "未识别当前用户,已展示全部券。"}

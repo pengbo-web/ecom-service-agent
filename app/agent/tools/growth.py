@@ -185,11 +185,18 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
 
 
 def draft_outreach(user_id: str, content: str, kind: str = "stale_pending_order",
-                   order_id: str = "", reason: str = "", offer_note: str = "") -> dict:
+                   order_id: str = "", reason: str = "", offer_note: str = "",
+                   coupon_code: str = "") -> dict:
     """为某个商机**起草**一条触达话术,落待审队列(status 恒为 draft)。
 
-    绝不发送。返回里明确带 status='draft' 与 needs_review_reason,让模型无法
-    对店主谎称"已发出"。
+    绝不发送,也绝不发券。返回里明确带 status='draft' 与 needs_review_reason,
+    让模型无法对店主谎称"已发出"。
+
+    coupon_code(N6)是**建议**:写进草稿 offer.coupon_code,是否真的有这张券、
+    要不要发,由人工在审批端点里判断——这里不校验它是否真的存在于店铺的
+    券定义(app.agent.tools.order_ops._COUPONS)里,那道校验属于发放本身
+    (见 app.agent.coupons.grants.issue_for_draft),不是起草这一步的事;
+    起草唯一的写路径是落一行草稿,不做任何会改变"这只是草稿"这个事实的事。
     """
     err = _validate_kind(kind)
     if err is not None:
@@ -202,7 +209,12 @@ def draft_outreach(user_id: str, content: str, kind: str = "stale_pending_order"
     if not clean:
         return {"success": False, "error": "话术内容为空,未生成草稿"}
 
-    offer = {"note": (offer_note or "").strip()} if offer_note else {}
+    offer: dict = {}
+    if offer_note:
+        offer["note"] = (offer_note or "").strip()
+    cc = (coupon_code or "").strip()
+    if cc:
+        offer["coupon_code"] = cc
     from app.multi_agent import bus
 
     draft_id = get_db().create_outreach_draft(

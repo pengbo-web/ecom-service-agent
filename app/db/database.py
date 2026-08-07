@@ -225,6 +225,18 @@ class Database:
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_carts_active_unique
                     ON carts(user_id, sku) WHERE status = 'active';
+                CREATE TABLE IF NOT EXISTS coupon_grants (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    draft_id INTEGER,
+                    reason TEXT,
+                    granted_by TEXT,
+                    created_at TEXT NOT NULL,
+                    used_at TEXT,
+                    UNIQUE(code, user_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_coupon_grants_user ON coupon_grants(user_id);
                 """
             )
             # 兼容旧库：products 补 floor_price 列
@@ -1582,5 +1594,42 @@ class Database:
                 (order_id, user_id))
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    # ---------- 优惠券发放(N6:发券碰真金白银且不可撤销,只能由审批端点在
+    # 人工点过批准之后调用——见 app.agent.coupons.grants.issue_for_draft) ----------
+    def grant_coupon(self, code: str, user_id: str, draft_id: Optional[int],
+                     reason: str, granted_by: str) -> Optional[int]:
+        """发放一张优惠券,返回新建发放记录 id。
+
+        同一优惠券对同一买家只能发一次,交给 `UNIQUE(code, user_id)` 约束
+        兜底判重(与 create_review 同一套姿态:并发下唯一可靠的判重方式是
+        让数据库约束顶上去,而不是先 SELECT 再 INSERT)。命中重复捕获
+        IntegrityError 返回 None,不抛——调用方(issue_for_draft)据此把
+        "重复发放"当成一次可判定的失败,而不是让异常冒泡成裸 500。
+        """
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "INSERT INTO coupon_grants (code, user_id, draft_id, reason, "
+                "granted_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (code, user_id, draft_id, reason, granted_by, self._now()))
+            conn.commit()
+            return int(cur.lastrowid)
+        except sqlite3.IntegrityError:
+            return None
+        finally:
+            conn.close()
+
+    def list_user_grants(self, user_id: str) -> list[dict]:
+        """该用户收到过的所有券发放记录(按 id DESC),供 query_coupons 的
+        `granted` 字段与审批端点/审计使用。"""
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM coupon_grants WHERE user_id = ? ORDER BY id DESC",
+                (user_id,)).fetchall()
+            return [dict(r) for r in rows]
         finally:
             conn.close()

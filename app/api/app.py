@@ -1294,14 +1294,25 @@ def create_app(session_manager: Optional[SessionManager] = None,
         否则前端得自己抄一份映射表——本特性里 kind 已经改名过一次
         (unpaid_order → stale_pending_order),抄的那份不同步就会静默退回
         给店主显示英文标识符。未知类型回落原始 kind,不留空白。
+
+        草稿带 offer.coupon_code 时同样附上 coupon_discount(N6):文案(如
+        「满300减30」)唯一来自 app.agent.coupons.grants.COUPON_BY_CODE
+        (再往上追溯就是 order_ops._COUPONS)——把"发出去要真的发一张券"这件事
+        在人工点批准**之前**摆到界面上,而不是让店主事后才知道。券码不在
+        COUPON_BY_CODE 里(模型编的)时留空,前端据此提示这不是一张真实的券。
         """
         _require_seller_console()
         from app.agent.tools.growth import OPPORTUNITY_KINDS
+        from app.agent.coupons.grants import COUPON_BY_CODE
 
         rows = get_db().list_outreach_drafts(status=status or None, limit=limit)
         for r in rows:
             kind = r.get("opportunity_type") or ""
             r["opportunity_label"] = OPPORTUNITY_KINDS.get(kind, kind)
+            code = (r.get("offer") or {}).get("coupon_code") or ""
+            if code:
+                info = COUPON_BY_CODE.get(code)
+                r["coupon_discount"] = info["discount"] if info else ""
         return {"success": True, "drafts": rows}
 
     @app.get("/api/admin/growth/opportunity-kinds", dependencies=[Depends(admin_auth)])
@@ -1379,32 +1390,48 @@ def create_app(session_manager: Optional[SessionManager] = None,
         if not db.review_outreach_draft(draft_id, "approved", reviewed_by="admin"):
             return {"success": True, "sent": False, "reason": "该草稿已被处理过"}
 
-        delivered, deliver_warning = _delivery_result(app.state.deliver_outreach(draft))
-        if not delivered:
-            # 退回 draft,让店主可以重试;绝不停在"已批准但没发"的悬空态。
-            # 这一步本身也要能失败(revert_outreach_to_pending 是条件更新,
-            # rowcount 可能为 0),而且它可能直接抛异常(比如数据库这时刚好
-            # 打不开)——两种情况都不能让操作者收到一个没有任何线索的裸 500,
-            # 那正是这条退回路径本应堵住的"悬空 approved"以另一种方式重现。
+        def _revert_after_failure(base_reason: str) -> dict:
+            """投递失败 / 发券失败后统一走的收尾:退回 draft 让店主可以重试;
+            绝不停在"已批准但没发/没发券"的悬空态。这一步本身也要能失败
+            (revert_outreach_to_pending 是条件更新,rowcount 可能为 0),而且
+            它可能直接抛异常(比如数据库这时刚好打不开)——两种情况都不能让
+            操作者收到一个没有任何线索的裸 500,那正是这条退回路径本应堵住的
+            "悬空 approved"以另一种方式重现。base_reason 是失败本身的原因文案
+            (已经带上"投递失败"/"发券失败:…"这类前缀)。
+            """
             try:
                 reverted = db.revert_outreach_to_pending(draft_id)
             except Exception:  # noqa: BLE001 退回出错也要报给操作者,不能吞掉
                 logger.exception(
-                    "投递失败后退回待审状态出错 draft_id=%s,该草稿可能悬停在 "
-                    "approved(已批准但未发送),需人工核查", draft_id)
+                    "%s后退回待审状态出错 draft_id=%s,该草稿可能悬停在 "
+                    "approved(已批准但未发送),需人工核查", base_reason, draft_id)
                 return {"success": False, "sent": False,
-                        "reason": f"投递失败,且退回待审状态时发生错误;草稿 {draft_id} "
+                        "reason": f"{base_reason},且退回待审状态时发生错误;草稿 {draft_id} "
                                   "可能停留在已批准但未发送的状态,请人工核查并处理"}
             if not reverted:
                 # 此刻状态理应必是 approved(本请求刚认领的),正常不会走到这里;
                 # 但 review_outreach_draft / mark_outreach_sent 的返回值都被认真
                 # 对待,这里也不该假装退回一定成功。
-                logger.error("投递失败后退回待审状态未生效(草稿状态异常) draft_id=%s",
-                            draft_id)
+                logger.error("%s后退回待审状态未生效(草稿状态异常) draft_id=%s",
+                            base_reason, draft_id)
                 return {"success": False, "sent": False,
-                        "reason": f"投递失败,且退回待审状态未生效;草稿 {draft_id} "
+                        "reason": f"{base_reason},且退回待审状态未生效;草稿 {draft_id} "
                                   "状态异常,请人工核查并处理"}
-            return {"success": False, "sent": False, "reason": "投递失败,已退回待审,可重试"}
+            return {"success": False, "sent": False, "reason": f"{base_reason},已退回待审,可重试"}
+
+        # N6:发券碰的是真金白银,而且不可撤销——必须在人工点过批准**之后**、
+        # 消息投递**之前**发生。草稿没带 coupon_code 时 issue_for_draft 直接
+        # 放行(noop);券码未知(模型编的)或已经发过时判为失败,与投递失败
+        # 走同一条退回路径——买家绝不会收到一句"送您一张券"却背后没有真的券。
+        # issue_for_draft 不注册成任何 Agent 工具,只能从这里被调用。
+        from app.agent.coupons.grants import issue_for_draft
+        coupon_ok, coupon_reason = issue_for_draft(draft, granted_by="admin")
+        if not coupon_ok:
+            return _revert_after_failure(f"发券失败:{coupon_reason}")
+
+        delivered, deliver_warning = _delivery_result(app.state.deliver_outreach(draft))
+        if not delivered:
+            return _revert_after_failure("投递失败")
 
         # 消息已经真实投递给买家(不可撤销)。下游(如营销 Analyst)据此了解
         # 触达已发生,不因"标记已发送"这一步的成败而改变——那只是本地账本。

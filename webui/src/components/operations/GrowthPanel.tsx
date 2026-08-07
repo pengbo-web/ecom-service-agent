@@ -115,8 +115,16 @@ export function GrowthPanel() {
 
   // 批准会真的把消息发给一个真实买家,而且发出后无法撤回——点错一下就是
   // 一条骚扰/误导信息落到买家手机上。这是任务里唯一强制要求二次确认的动作。
+  //
+  // N6:草稿带 offer.coupon_code 时,批准还会真的发放一张优惠券,同样碰钱、
+  // 同样不可撤销——必须把"会发券"这件事摆在人点下去**之前**,而不是等发完
+  // 才在结果里告知,否则这道人工闸就形同虚设。
   async function onApprove(d: OutreachDraft) {
-    if (!window.confirm(`确认把这条消息发给买家 ${d.user_id}？发出后无法撤回。`)) return;
+    const couponCode = (d.offer?.coupon_code as string | undefined) || "";
+    const confirmText = couponCode
+      ? `确认把这条消息发给买家 ${d.user_id}？并发放优惠券 ${couponCode}，发出后无法撤回。`
+      : `确认把这条消息发给买家 ${d.user_id}？发出后无法撤回。`;
+    if (!window.confirm(confirmText)) return;
     setRowBusy(d.id, true);
     setRowErr((m) => { const n = { ...m }; delete n[d.id]; return n; });
     try {
@@ -243,6 +251,12 @@ export function GrowthPanel() {
             // 什么"如实留下——所以这里必须是全链路最后一道、不可能被忽略的可见性。
             const flagged = !!d.needs_review_reason;
             const rowBusy = busyIds.has(d.id);
+            // N6:offer.coupon_code 非空 = 批准这条草稿会真的发放一张优惠券。
+            // 文案(discount)由后端(growth_drafts 端点)同源给出,不在前端
+            // 另存一份券码/文案表——券码不在后端已知券里(模型编的)时
+            // coupon_discount 是空字符串,提示这不是一张真实的券。
+            const couponCode = (d.offer?.coupon_code as string | undefined) || "";
+            const couponUnknown = !!couponCode && !d.coupon_discount;
             return (
               <Card
                 key={d.id}
@@ -260,6 +274,18 @@ export function GrowthPanel() {
                     {d.opportunity_label || d.opportunity_type}
                   </span>
                 </div>
+
+                {couponCode && (
+                  <div
+                    data-testid={`coupon-${d.id}`}
+                    className="mt-2 rounded-md border border-primary bg-primary/10
+                              p-2 text-xs font-semibold text-primary"
+                  >
+                    🎁 附带优惠券 {couponCode}
+                    {d.coupon_discount ? ` · ${d.coupon_discount}` : ""}
+                    {couponUnknown && "（非本店已知券码,批准后可能发放失败）"}
+                  </div>
+                )}
 
                 {flagged && (
                   <div className="mt-2 rounded-md border border-destructive bg-destructive/10
