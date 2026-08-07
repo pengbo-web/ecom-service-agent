@@ -1,8 +1,6 @@
 """线上 Trace 回流成评估用例（问题对话沉淀为回归测试）。"""
 
-import re
-
-_DIGIT_RE = re.compile(r"\d")
+from app.utils.keyword_match import match_known_terms
 
 
 def is_problem_trace(trace: dict) -> bool:
@@ -149,22 +147,11 @@ def keywords_from_reply(reply: str, top_n: int = 5) -> list[str]:
     (见 dataset.py 模块 docstring),所以留空安全,编造才危险。
 
     刻意用确定性词表匹配而不是 LLM:评测期望必须可复现,且不该每次回流都花钱。
-    """
-    text = (reply or "").strip()
-    if not text:
-        return []
 
-    out: list[str] = []
-    for term in _reply_vocabulary():
-        if not term or not (_MIN_KEYWORD_LEN <= len(term) <= _MAX_KEYWORD_LEN):
-            continue
-        if _DIGIT_RE.search(term):
-            continue  # 含数字:订单号/日期/金额类,不可能在下一次回复里原样复现
-        if term not in text:
-            continue
-        if any(term in o or o in term for o in out):  # 双向包含判重,避免长短词并存
-            continue
-        out.append(term)
-        if len(out) >= max(1, int(top_n)):
-            break
-    return out
+    真正的贪心最长匹配 + 数字剔除 + 双向包含判重逻辑在
+    `app.utils.keyword_match.match_known_terms` 里——与
+    `app.agent.tools.reviews._bad_terms`(差评关键词)共用同一份实现,这里只
+    负责组装"回复用"的词表(见 `_reply_vocabulary`)。
+    """
+    return match_known_terms(reply, _reply_vocabulary(), top_n=top_n,
+                             min_len=_MIN_KEYWORD_LEN, max_len=_MAX_KEYWORD_LEN)

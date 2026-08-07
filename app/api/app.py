@@ -1479,23 +1479,35 @@ def create_app(session_manager: Optional[SessionManager] = None,
         # 触达已发生,不因"标记已发送"这一步的成败而改变——那只是本地账本。
         marked = db.mark_outreach_sent(draft_id)
 
-        # 记触达归因基线(N3):**只在走到这里**才记,因为只有走到这里才代表
-        # 消息真的到了买家面前——`if not delivered` 分支已经在上面提前 return,
-        # 一条被退回 draft 重试的草稿永远不会执行到这一行,天然不会带上基线。
-        # status_at_send 取该 order **此刻**的真实状态;无关联订单的商机
-        # (弃单/咨询未下单,order_id 恒为空串)写空串,归因侧据此改用"发送后
-        # 有没有新建订单"的判法。基线记录失败不该推翻"已经真实发生"的投递,
-        # 只记日志(与 touch_conversation 的 fail-soft 同一姿态)。
-        try:
-            order_id = (draft.get("order_id") or "").strip()
-            status_at_send = ""
-            if order_id:
-                order = db.get_order(order_id)
-                if order is not None:
-                    status_at_send = order.get("status") or ""
-            db.set_outreach_baseline(draft_id, status_at_send)
-        except Exception:  # noqa: BLE001 基线记录失败不得推翻已发生的投递
-            logger.exception("触达基线记录失败(不影响已投递的消息) draft_id=%s", draft_id)
+        if marked:
+            # 记触达归因基线(N3):**只在草稿真的翻成 sent 之后**才记
+            # (review finding 4)。此前这段代码在检查 marked 之前就无条件
+            # 写基线——如果 mark_outreach_sent 返回 False(今天的状态机下
+            # "不可达",但不能假定永远如此),草稿会停在 approved,而
+            # `pending_attribution`/`outreach_stats` 只认 status='sent' 的行,
+            # 于是这条草稿变成"消息已经真实送到买家面前、却带着一条基线永远
+            # 进不了归因队列、也再不会被重新批准"的悬空态——比没有基线更
+            # 迷惑,因为它看起来像是正常记过账。把写基线的时机绑定在
+            # marked 为真这个前提下,这种"approved + 有基线"的组合从结构上
+            # 就不会再出现;marked 为假时改走下面 `if not marked` 分支——
+            # 那条分支本来就是"消息已投递但账本没对上"的既有处理方式(如实
+            # 告知操作者需要人工核查),不必再发明第二套。
+            #
+            # status_at_send 取该 order **此刻**的真实状态;无关联订单的商机
+            # (弃单/咨询未下单,order_id 恒为空串)写空串,归因侧据此改用"发送后
+            # 有没有新建订单"的判法。基线记录失败不该推翻"已经真实发生"的投递,
+            # 只记日志(与 touch_conversation 的 fail-soft 同一姿态)。
+            try:
+                order_id = (draft.get("order_id") or "").strip()
+                status_at_send = ""
+                if order_id:
+                    order = db.get_order(order_id)
+                    if order is not None:
+                        status_at_send = order.get("status") or ""
+                db.set_outreach_baseline(draft_id, status_at_send)
+            except Exception:  # noqa: BLE001 基线记录失败不得推翻已发生的投递
+                logger.exception("触达基线记录失败(不影响已投递的消息) draft_id=%s",
+                                 draft_id)
 
         bus.publish(bus.EV_OUTREACH_SENT,
                     {"draft_id": draft_id, "user_id": draft.get("user_id")},
@@ -1505,6 +1517,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
             # 已发送不代表账本也一致:mark_outreach_sent 只对 approved 生效,
             # 若这里返回 False(今天的状态机下不可达,但不能因此就不检查它的
             # 返回值),就不能谎报一次"干净的成功",必须如实告知需要人工核查。
+            # 上面已经跳过了写基线,这条草稿不会带着一条看似正常却永远用不上
+            # 的基线停在 approved。
             logger.error("投递成功但标记已发送失败(状态非 approved?) draft_id=%s",
                         draft_id)
             reason = (f"消息已投递给买家,但标记为已发送时失败;请人工核查草稿 "

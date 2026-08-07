@@ -110,6 +110,26 @@ def test_review_tool_is_seller_only(db):
         assert "review_insights" not in cfg["tools"]
 
 
+def test_refunded_order_review_still_counts_toward_bad_rate(db):
+    """决策(review finding 2):退款不会让已写的评价从差评率里消失。
+
+    评价记的是买家收货那一刻的真实体验,后续退款是另一件事,不能让"退款"
+    变成把差评从统计里洗掉的手段——那正是差评率与它驱动的告警要抓的东西。
+    见 Database.review_stats 的 docstring。"""
+    _order(db, "O1", "u1", "delivered")
+    rid = db.create_review("O1", "u1", "P001", 1, "质量太差,已申请退款")
+    assert rid is not None
+    assert db.set_refund("O1", "质量问题申请退款") is True
+
+    s = db.review_stats(window_days=7)
+    assert s["total"] == 1 and s["bad_rate"] == pytest.approx(1.0)
+
+    from app.agent.tools.reviews import review_insights
+    out = review_insights(window_days=7)
+    assert out["bad_rate"] == pytest.approx(1.0)
+    assert out["products"][0]["bad_count"] == 1
+
+
 def test_bad_review_anomaly(db, monkeypatch):
     from app.agent.tools import anomaly, shop_analytics as sa
     monkeypatch.setattr(sa, "get_db", lambda: db)

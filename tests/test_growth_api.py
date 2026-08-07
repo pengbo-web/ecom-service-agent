@@ -113,6 +113,23 @@ def test_send_success_but_mark_sent_failure_is_not_reported_as_clean(client, dra
     assert str(draft) in body["reason"]
 
 
+def test_mark_sent_failure_leaves_no_dangling_baseline(client, draft, monkeypatch):
+    """review finding 4:`mark_outreach_sent` 返回 False 时(草稿留在
+    approved,进不了只认 status='sent' 的 pending_attribution/outreach_stats),
+    绝不能还带着一条看似正常的归因基线——那样的草稿会比"没有基线"更迷惑,
+    因为乍看像是已经正常记过账。基线只应该在草稿真的翻成 sent 之后才写。"""
+    from app.db import get_db
+    db = get_db()
+    monkeypatch.setattr(client.app.state, "deliver_outreach", lambda d: True)
+    monkeypatch.setattr(db, "mark_outreach_sent", lambda draft_id: False)
+    r = client.post(f"/api/admin/growth/drafts/{draft}/approve", headers=AUTH)
+    body = r.json()
+    assert body["sent"] is True and body["success"] is False   # 既有口径不变
+    row = db.get_outreach_draft(draft)
+    assert row["status"] == "approved"          # 今天状态机下"不可达"但要有定论
+    assert row["status_at_send"] is None         # 没有被写过基线,不是空字符串
+
+
 # ---------------------------------------------------------------------------
 # 真实投递路径(不打桩 deliver_outreach):把假的会话 agent 注入 SessionManager,
 # 让 _deliver_outreach 真的走完 latest_conversation → session_lock →

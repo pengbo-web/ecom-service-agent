@@ -4,10 +4,14 @@
 `registry.SELLER_ONLY_TOOLS`——全店差评数据是经营信息,买家画像绝不能借一句
 "这个店差评多不多"就套到全店维度的数据。
 
-差评关键词的抽取刻意复用 `app/evaluation/trace_to_case.py::keywords_from_reply`
-已验证过的思路:只在系统已有词表(订单状态标签/商品名/承诺类术语)里找差评正文
-里**确实出现**的词,不对文本分词、不接第三方分词库、不调大模型;含数字的词一律
-剔除(订单号/日期/金额类,不可能在下一条差评里原样复现)。
+差评关键词的抽取与 `app/evaluation/trace_to_case.py::keywords_from_reply` 共用
+同一份匹配实现 `app.utils.keyword_match.match_known_terms`:只在系统已有词表
+(订单状态标签/商品名/承诺类术语)里找差评正文里**确实出现**的词,不对文本
+分词、不接第三方分词库、不调大模型;含数字的词一律剔除(订单号/日期/金额类,
+不可能在下一条差评里原样复现)。两边词表来源不同(评测用回复词表、这里用
+差评词表),但贪心最长匹配 + 数字剔除 + 双向包含判重这套算法只存一份——
+避免像本仓库已经栽过三次的"手抄表悄悄漂移"那样,复制一份算法变成同一个
+bug 的两处埋伏点。
 
 与 `trace_to_case` 不同的一点:那边内部另起一次 `from app.db import get_db`
 来读商品名,本模块的聚合函数把 `db` 作为显式参数传入,不在函数内部自行解析——
@@ -18,24 +22,23 @@
 
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from typing import Optional
 
 from app.agent.skills.risk import COMMITMENT_KEYWORDS
 from app.agent.tools.user_orders import STATUS_LABELS
 from app.db import get_db
+from app.utils.keyword_match import match_known_terms
 
 # 差评判定:rating<=2,与 review_stats/anomaly_scan 同口径,三处不能各写一遍
 # 字面量慢慢漂移。
 BAD_RATING_MAX = 2
 
-# 词表匹配的长度窗口与数字过滤,与 trace_to_case.keywords_from_reply 同一套纪律:
-# 词表里最长的词也远短于上限,超限的不可能是本表词;含数字的词(订单号/日期/
-# 金额)不可能在下一条差评里原样复现,一律剔除。
+# 词表匹配的长度窗口,与 trace_to_case.keywords_from_reply 同一套纪律:
+# 词表里最长的词也远短于上限,超限的不可能是本表词。数字过滤在
+# match_known_terms 里统一处理,两边共用同一条规则。
 _MIN_TERM_LEN = 2
 _MAX_TERM_LEN = 10
-_DIGIT_RE = re.compile(r"\d")
 
 # 差评洞察一次读取的评价行数上限,给"扫了多少"一个可见边界(与 anomaly.py
 # 里 PRODUCT_SCAN_LIMIT 同一目的:不让一次巨量差评悄悄溢出扫描范围而不自知)。
@@ -57,24 +60,14 @@ def _term_vocabulary(db) -> list[str]:
 
 
 def _bad_terms(text: str, db, top_n: int = 5) -> list[str]:
-    """从差评正文里抽词表命中的关键词。抽不出就返回 []——总比编造安全。"""
-    text = (text or "").strip()
-    if not text:
-        return []
-    out: list[str] = []
-    for term in _term_vocabulary(db):
-        if not term or not (_MIN_TERM_LEN <= len(term) <= _MAX_TERM_LEN):
-            continue
-        if _DIGIT_RE.search(term):
-            continue  # 含数字:订单号/日期/金额类,不可能原样复现
-        if term not in text:
-            continue
-        if any(term in o or o in term for o in out):  # 双向包含判重
-            continue
-        out.append(term)
-        if len(out) >= max(1, int(top_n)):
-            break
-    return out
+    """从差评正文里抽词表命中的关键词。抽不出就返回 []——总比编造安全。
+
+    匹配算法本身是 `app.utils.keyword_match.match_known_terms`,与
+    `trace_to_case.keywords_from_reply` 共用同一份实现,这里只负责组装
+    "差评用"的词表(见 `_term_vocabulary`)。
+    """
+    return match_known_terms(text, _term_vocabulary(db), top_n=top_n,
+                             min_len=_MIN_TERM_LEN, max_len=_MAX_TERM_LEN)
 
 
 def product_review_breakdown(db, window_days: int,
@@ -83,6 +76,10 @@ def product_review_breakdown(db, window_days: int,
 
     `db` 由调用方显式传入(参谋工具与异常扫描各自持有已在测试里 monkeypatch
     过的那份引用),本函数不在内部另行解析 get_db()——见模块 docstring。
+
+    这里同样不按订单后续状态过滤评价:一条评价一旦写下就计入统计,后来
+    该订单是否被退款不影响它是否算差评——决策与理由见
+    `Database.review_stats` 的 docstring(review finding 2)。
     """
     reviews = db.list_reviews(window_days=window_days, limit=limit)
     name_map: dict[str, str] = {}

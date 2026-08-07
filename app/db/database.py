@@ -1447,7 +1447,20 @@ class Database:
     def review_stats(self, window_days: int) -> dict:
         """窗口内全店评价统计:总数/均分/差评率(rating<=2)。除零返回 0.0
         而非 None——与 shop_analytics._rate 同口径,消费方是 LLM 与前端展示,
-        null 会诱导模型现编数字。"""
+        null 会诱导模型现编数字。
+
+        **决策(review finding 2)**:这里只按 `reviews` 表统计,不 JOIN
+        `orders` 排除后来被退款(refund_processing/refunded)的订单——一条
+        评价一旦写下,就是买家在收货那一刻的真实体验,后续退款是另一个独立
+        事件,不会让"当时东西有问题"这件事变成没发生过。反过来想:如果退款
+        能让对应的评价从差评率里消失,店主就有了一个现成的洗白手段——先让
+        买家写下差评,再批一笔退款把这条差评从统计里"退掉",差评率和它驱动
+        的告警(`anomaly_scan` 的 bad_review_rate_high)反而失去意义。所以
+        这是刻意保留、不是遗漏:退款只改 `orders.status`,`reviews` 表的行
+        永远不因订单后续状态而增减或被过滤。`tests/test_reviews.py::
+        test_refunded_order_review_still_counts_toward_bad_rate` 钉住这条
+        行为,后续若要改成排除,必须显式改这条测试,不能悄悄漂移。
+        """
         conn = self.connect()
         try:
             w = f"datetime('now', '-{max(1, int(window_days))} days')"
