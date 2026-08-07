@@ -179,6 +179,95 @@ def test_build_shadow_dir_rejects_unsafe_skill_name(tmp_path):
                              str(tmp_path / "shadow-bad"))
 
 
+def test_gate_candidate_wraps_evaluation_in_named_background_trace(tmp_path, monkeypatch):
+    """阶段一 gap⑤:gate_candidate 是 promote_skill.py/skill_watchdog.py 这两条
+    离线 CLI 调门禁的入口,整段判定过程必须包进一条命名 trace。"""
+    from contextlib import contextmanager
+    definitions = _setup(tmp_path)
+    candidate = definitions / "_candidates" / "process-return" / "SKILL.md"
+    eval_fn, _ = _fake_eval({"live": 0.60, "shadow": 0.80})
+
+    calls = []
+
+    class _FakeRoot:
+        def __init__(self):
+            self.updates = []
+        def update(self, **kw):
+            self.updates.append(kw)
+
+    @contextmanager
+    def _fake_bt(name, session_id=None, user_id=None, input=None):
+        root = _FakeRoot()
+        calls.append({"name": name, "input": input, "root": root})
+        yield root
+
+    monkeypatch.setattr("app.observability.langfuse_bridge.background_trace", _fake_bt)
+
+    result = gate_candidate("process-return", str(candidate), str(definitions),
+                            str(tmp_path / "shadow"), eval_fn, ["return_request"])
+
+    assert result["promote"] is True   # 门禁判定结果不受观测层影响
+    assert len(calls) == 1
+    assert calls[0]["name"] == "skill_gate_candidate"
+    assert calls[0]["input"]["skill_name"] == "process-return"
+    assert calls[0]["root"].updates   # 判定结论写回了 trace 的 output
+
+
+def test_gate_candidate_degrades_silently_when_langfuse_init_raises(tmp_path, monkeypatch):
+    """核心 fail-soft 性质:门控开着但 Langfuse 初始化抛异常,门禁判定结果
+    必须与不接 Langfuse 时逐字节一致。"""
+    import app.observability.langfuse_bridge as bridge_mod
+    from app.config import settings as st
+    monkeypatch.setattr(st.settings, "langfuse_enabled", True)
+    monkeypatch.setattr(bridge_mod, "_ensure_env",
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    definitions = _setup(tmp_path)
+    candidate = definitions / "_candidates" / "process-return" / "SKILL.md"
+    eval_fn, _ = _fake_eval({"live": 0.60, "shadow": 0.80})
+
+    result = gate_candidate("process-return", str(candidate), str(definitions),
+                            str(tmp_path / "shadow"), eval_fn, ["return_request"])
+
+    assert result["promote"] is True
+    assert result["baseline"]["pass_rate"] == 0.60
+    assert result["candidate"]["pass_rate"] == 0.80
+
+
+def test_default_eval_fn_routes_client_through_langfuse_wrapper(monkeypatch):
+    """default_eval_fn 必须经 make_openai_client 构造 client,而不是裸
+    OpenAI(...)——否则门控开着也没用。用 fake Evaluator 避免真调 LLM。"""
+    from app.agent.skills import gate as gate_mod
+    from app.config.settings import settings
+
+    captured = {}
+
+    def _fake_make_client(**kwargs):
+        captured.update(kwargs)
+        return "sentinel-client"
+
+    class _FakeSandbox:
+        def __init__(self, *a, **kw):
+            pass
+
+    class _FakeEvaluator:
+        def __init__(self, sandbox, client, model, use_judge, pass_threshold):
+            captured["client"] = client
+
+        def run_all(self, cases):
+            return {"summary": {}}
+
+    monkeypatch.setattr("app.observability.langfuse_client.make_openai_client",
+                        _fake_make_client)
+    monkeypatch.setattr("app.evaluation.sandbox.Sandbox", _FakeSandbox)
+    monkeypatch.setattr("app.evaluation.evaluator.Evaluator", _FakeEvaluator)
+    monkeypatch.setattr("app.evaluation.dataset.load_dataset", lambda path: [])
+
+    gate_mod.default_eval_fn(settings.skills_dir, [])
+
+    assert captured["client"] == "sentinel-client"
+
+
 def test_gate_fail_closed_on_unsafe_skill_name(tmp_path):
     """非法 skill 名走 gate 时同样 fail-closed(异常被兜住,不放行)。"""
     definitions = _setup(tmp_path)

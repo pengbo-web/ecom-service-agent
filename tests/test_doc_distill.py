@@ -223,3 +223,73 @@ def test_endpoint_reports_truncated_false_for_short_doc(tmp_path, monkeypatch):
                        headers=_headers()).json()
 
     assert d["truncated"] is False
+
+
+# ---------- 阶段一 gap⑤:蒸馏端点的 LLM 客户端与命名 trace ----------
+
+def _fake_distill_capturing_client(captured: dict):
+    """比 _fake_distill 多记一步:把端点传进来的 client 记下来,供断言它是
+    经 make_openai_client 包装过的那个,而不是裸 OpenAI(...)。"""
+    def _inner(client, model, doc_text, out_dir, **kwargs):
+        captured["client"] = client
+        skill_dir = Path(out_dir) / "sop-return"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text(GOOD_SKILL, encoding="utf-8")
+        return {"name": "sop-return", "path": str(skill_dir / "SKILL.md"),
+                "content": GOOD_SKILL}
+    return _inner
+
+
+def test_endpoint_routes_client_through_langfuse_wrapper(tmp_path, monkeypatch):
+    _endpoint_dirs(tmp_path, monkeypatch)
+    captured: dict = {}
+    monkeypatch.setattr("app.agent.skills.doc_distill.distill_from_doc",
+                        _fake_distill_capturing_client(captured))
+    monkeypatch.setattr("app.observability.langfuse_client.make_openai_client",
+                        lambda **kw: "sentinel-client")
+
+    d = _client().post("/api/admin/skills/distill", json={"doc_text": DOC},
+                       headers=_headers()).json()
+
+    assert d["created"] is True
+    assert captured["client"] == "sentinel-client"
+
+
+def test_endpoint_wraps_distill_call_in_named_background_trace(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    _endpoint_dirs(tmp_path, monkeypatch)
+    monkeypatch.setattr("app.agent.skills.doc_distill.distill_from_doc", _fake_distill)
+
+    calls = []
+
+    @contextmanager
+    def _fake_bt(name, session_id=None, user_id=None, input=None):
+        calls.append({"name": name, "input": input})
+        yield None
+
+    monkeypatch.setattr("app.observability.langfuse_bridge.background_trace", _fake_bt)
+
+    d = _client().post("/api/admin/skills/distill", json={"doc_text": DOC},
+                       headers=_headers()).json()
+
+    assert d["created"] is True
+    assert len(calls) == 1
+    assert calls[0]["name"] == "skills_distill"
+
+
+def test_endpoint_degrades_silently_when_langfuse_init_raises(tmp_path, monkeypatch):
+    """核心 fail-soft 性质:门控开着但 Langfuse 初始化本身抛异常,蒸馏端点
+    的产出必须与不接 Langfuse 时逐字节一致。"""
+    import app.observability.langfuse_bridge as bridge_mod
+    from app.config import settings as st
+    _endpoint_dirs(tmp_path, monkeypatch)
+    monkeypatch.setattr("app.agent.skills.doc_distill.distill_from_doc", _fake_distill)
+    monkeypatch.setattr(st.settings, "langfuse_enabled", True)
+    monkeypatch.setattr(bridge_mod, "_ensure_env",
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    d = _client().post("/api/admin/skills/distill", json={"doc_text": DOC},
+                       headers=_headers()).json()
+
+    assert d["created"] is True
+    assert d["name"] == "sop-return"

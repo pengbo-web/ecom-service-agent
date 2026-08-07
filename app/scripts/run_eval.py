@@ -25,8 +25,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from openai import OpenAI  # noqa: E402
-
 from app.config.settings import settings  # noqa: E402
 from app.utils.console import enable_utf8_stdout  # noqa: E402
 from app.evaluation.dataset import load_dataset  # noqa: E402
@@ -35,6 +33,8 @@ from app.evaluation.regression import (  # noqa: E402
     compare_to_baseline, save_baseline, load_baseline,
 )
 from app.evaluation.sandbox import Sandbox  # noqa: E402
+from app.observability.langfuse_bridge import background_trace  # noqa: E402
+from app.observability.langfuse_client import make_openai_client  # noqa: E402
 
 
 def _fmt(value) -> str:
@@ -136,7 +136,7 @@ def main():
     print(f"   共 {len(cases)} 条用例")
 
     print(f"\n[2/3] 在沙箱中重跑测试集（{args.mode} 模式）...")
-    client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+    client = make_openai_client(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
     sandbox = Sandbox(mode=args.mode)
     evaluator = Evaluator(
         sandbox=sandbox,
@@ -145,7 +145,10 @@ def main():
         use_judge=args.judge,
         pass_threshold=settings.eval_pass_threshold,
     )
-    report = evaluator.run_all(cases)
+    # 阶段一 gap⑤:离线评估这一次真调 LLM 的入口包进命名 trace,便于在
+    # Langfuse 里看到整套用例重跑的耗时与内部各次生成。
+    with background_trace("run_eval", input={"mode": args.mode, "cases": len(cases)}):
+        report = evaluator.run_all(cases)
 
     print("\n[3/3] 生成评估报告...")
     _print_report(report)

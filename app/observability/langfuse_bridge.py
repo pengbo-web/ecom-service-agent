@@ -172,6 +172,78 @@ class _LangfuseTurn:
                 input={k: v for k, v in ev.items() if k != "type"},
             )
             obs.end()
+        elif etype == "workflow_guard":
+            # 安全动作:守卫拦截了一次被跳过的工作流步骤——这是"拦下了什么",
+            # 不是"耗时多久"(拦截本身是瞬时判定),故记成即时观察,不建 span 栈;
+            # as_type="guardrail" + level="WARNING" 让它在 Langfuse UI 里醒目区分于
+            # 普通 span,不用逐条展开树才发现有拦截发生。
+            obs = self._client.start_observation(
+                as_type="guardrail", name=f"workflow_guard:{ev.get('name')}",
+                input={"name": ev.get("name"), "reason": ev.get("reason")},
+                level="WARNING",
+            )
+            obs.end()
+        elif etype == "degrade":
+            # 失败信号:模型客户端已经切到备选/降级路径。同样是"发生了没有"的
+            # 瞬时事实,没有可归属的时长区间(降级判定本身不耗时,真正耗时的
+            # LLM 调用由 drop-in generation 各自记账)——即时观察 + WARNING 醒目。
+            obs = self._client.start_observation(
+                as_type="span", name="degrade",
+                input={"reason": ev.get("reason")}, level="WARNING",
+            )
+            obs.end()
+        elif etype == "skill_preloaded":
+            # 确定性预加载:哪个技能被预置,记一次即时观察即可,无 start/end 配对信号。
+            obs = self._client.start_observation(
+                as_type="span", name="skill_preloaded",
+                input={"name": ev.get("name"), "variant": ev.get("variant")},
+            )
+            obs.end()
+        elif etype == "faq_cache":
+            # 命中缓存 = 跳过了模型这一步本身就是结论,没有"耗时区间"要展示。
+            obs = self._client.start_observation(
+                as_type="span", name="faq_cache",
+                input={"matched": ev.get("matched"), "score": ev.get("score")},
+            )
+            obs.end()
+        elif etype == "recall":
+            # 知识库预召回:协议里只有一条完事事件(命中/跳过二选一),没有配对的
+            # start 信号——真实检索耗时已经发生在这条事件被发出之前,伪造一个
+            # 起点反而失真,故仍按即时观察记录,用 as_type="retriever" 对应
+            # Langfuse 原生的检索语义,input/output 分别记查询与命中结果。
+            output = ({"skipped": True, "reason": ev.get("reason")} if ev.get("skipped")
+                      else {"hits": ev.get("hits")})
+            obs = self._client.start_observation(
+                as_type="retriever", name="recall",
+                input={"source": ev.get("source"), "query": ev.get("query")},
+                output=output,
+            )
+            obs.end()
+        elif etype == "thought":
+            # ReAct 的一步中间思考文本:与 tool_call/tool_result 不同,协议里没有
+            # 与之配对的起止信号,只是模型这一步顺带带的旁白,记即时观察。
+            obs = self._client.start_observation(
+                as_type="span", name="thought", output=ev.get("content"),
+            )
+            obs.end()
+        elif etype == "evaluate":
+            # 回复流水线的评审判定(ok/issues):判定动作本身瞬时完成,产生它的
+            # LLM 调用已被 drop-in generation 单独计时,这里只记判定结论。
+            obs = self._client.start_observation(
+                as_type="evaluator", name="evaluate", output={"ok": ev.get("ok")},
+            )
+            obs.end()
+        elif etype == "polish":
+            # 回复润色完成的旁路标记,同样没有独立起止信号,即时观察。
+            obs = self._client.start_observation(as_type="span", name="polish")
+            obs.end()
+        elif etype == "select":
+            # 回复流水线选择下一步(继续评审/终止):一次性决策,记入参与理由。
+            obs = self._client.start_observation(
+                as_type="span", name="select",
+                input={"next": ev.get("next"), "reason": ev.get("reason")},
+            )
+            obs.end()
         elif etype == "reply":
             self._root.update(output=ev.get("content"))
         elif etype == "metadata":

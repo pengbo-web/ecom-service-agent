@@ -193,3 +193,120 @@ def test_disabled_console_returns_404(client, monkeypatch):
     monkeypatch.setattr(st.settings, "seller_console_enabled", False)
     r = client.get("/api/seller/overview", headers=AUTH)
     assert r.status_code == 404
+
+
+# ---------- 阶段一 gap①:卖家会话必须产生 Langfuse trace ----------
+
+class _FakeLfTurn:
+    """假的 `_LangfuseTurn`:记事件、可当上下文管理器用,不触真 SDK。"""
+
+    def __init__(self):
+        self.events = []
+        self.entered = False
+
+    def __enter__(self):
+        self.entered = True
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def on_event(self, ev):
+        self.events.append(ev)
+
+
+class _RoutingFakeOrch:
+    """比 test_seller_chat_returns_agent_key 里的 FakeOrch 更真实一步:
+    chat() 内部会经 event_sink 发路由/工具事件——这正是端点要接进
+    Langfuse trace 的那部分,不能只测最终 reply。"""
+
+    last_agent_key = "analyst"
+
+    def __init__(self):
+        self.event_sink = None
+
+    def chat(self, text):
+        if self.event_sink:
+            self.event_sink({"type": "route", "agent": "经营参谋", "key": "analyst",
+                             "actor": "seller"})
+            self.event_sink({"type": "tool_call", "name": "shop_overview", "args": {}})
+            self.event_sink({"type": "tool_result", "content": "{}"})
+        return CustomerServiceResponse(
+            intent=IntentType.PRODUCT_CONSULT, confidence=1.0,
+            reply="近 7 天 GMV 平稳。", requires_human=False, follow_up_question=None)
+
+    def save(self):
+        pass
+
+
+def test_seller_chat_produces_langfuse_trace_when_enabled(client, monkeypatch):
+    """开着开关时,一次店主对话必须建出一条 trace,且路由/工具事件与最终
+    reply/metadata 都要喂给它——此前该端点完全没有接 Langfuse,这里如果
+    回退成裸调 `orch.chat()` 就会失败(fake_turn 永远不会被 entered/收到事件)。"""
+    from app.api import app as appmod
+    from app.config import settings as st
+    monkeypatch.setattr(st.settings, "langfuse_enabled", True)
+
+    fake_turn = _FakeLfTurn()
+    monkeypatch.setattr("app.observability.langfuse_bridge.langfuse_turn",
+                        lambda *a, **k: fake_turn)
+    orch = _RoutingFakeOrch()
+    monkeypatch.setattr(appmod.seller_sessions, "get_or_create",
+                        lambda sid, user_id=None: orch)
+
+    r = client.post("/api/seller/chat",
+                    json={"session_id": "s1", "message": "近7天GMV怎么样"}, headers=AUTH)
+
+    assert r.status_code == 200
+    assert r.json()["reply"] == "近 7 天 GMV 平稳。"
+    assert fake_turn.entered is True
+    kinds = [e["type"] for e in fake_turn.events]
+    assert "route" in kinds and "tool_call" in kinds and "tool_result" in kinds
+    assert "reply" in kinds and "metadata" in kinds
+    reply_ev = next(e for e in fake_turn.events if e["type"] == "reply")
+    assert reply_ev["content"] == "近 7 天 GMV 平稳。"
+    meta_ev = next(e for e in fake_turn.events if e["type"] == "metadata")
+    assert meta_ev["intent"] == "product_consult"
+    # 事件用完之后,端点必须把 event_sink 摘掉,不能让下一轮请求复用这次的 sink
+    assert orch.event_sink is None
+
+
+def test_seller_chat_unaffected_when_langfuse_disabled(client, monkeypatch):
+    """门控关(默认态):完全不建 trace,回复与 agent_key 都必须与开关无关。"""
+    from app.api import app as appmod
+    from app.config import settings as st
+    monkeypatch.setattr(st.settings, "langfuse_enabled", False)
+
+    orch = _RoutingFakeOrch()
+    monkeypatch.setattr(appmod.seller_sessions, "get_or_create",
+                        lambda sid, user_id=None: orch)
+
+    r = client.post("/api/seller/chat",
+                    json={"session_id": "s1", "message": "近7天GMV怎么样"}, headers=AUTH)
+
+    assert r.status_code == 200
+    assert r.json()["reply"] == "近 7 天 GMV 平稳。"
+    assert orch.event_sink is None   # 门控关:从未被赋过非 None 的 sink
+
+
+def test_seller_chat_degrades_silently_when_langfuse_init_raises(client, monkeypatch):
+    """核心 fail-soft 性质:门控开着,但 Langfuse SDK 初始化本身抛异常
+    (未装/坏配置的真实后果)——`langfuse_turn` 必须静默回退 None,店主这
+    一轮对话必须**完全不受影响**,不能因为观测层出错就把整个端点炸成 500。"""
+    import app.observability.langfuse_bridge as bridge_mod
+    from app.api import app as appmod
+    from app.config import settings as st
+    monkeypatch.setattr(st.settings, "langfuse_enabled", True)
+    monkeypatch.setattr(bridge_mod, "_ensure_env",
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    orch = _RoutingFakeOrch()
+    monkeypatch.setattr(appmod.seller_sessions, "get_or_create",
+                        lambda sid, user_id=None: orch)
+
+    r = client.post("/api/seller/chat",
+                    json={"session_id": "s1", "message": "近7天GMV怎么样"}, headers=AUTH)
+
+    assert r.status_code == 200
+    assert r.json()["reply"] == "近 7 天 GMV 平稳。"
+    assert orch.event_sink is None   # 初始化失败 → lf_turn=None → 从未被设成非 None

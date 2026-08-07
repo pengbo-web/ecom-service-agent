@@ -30,9 +30,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-from openai import OpenAI  # noqa: E402
-
 from app.config.settings import settings  # noqa: E402
+from app.observability.langfuse_bridge import background_trace  # noqa: E402
+from app.observability.langfuse_client import make_openai_client  # noqa: E402
 from app.db import get_db  # noqa: E402
 from app.agent.skills.loader import SkillManager  # noqa: E402
 from app.agent.skills.synthesizer import (  # noqa: E402
@@ -238,62 +238,65 @@ def main() -> None:
 
     print(f"读取到 {len(samples)} 条归档会话样本，开始三步离线闭环（建模/创建/自改进）...")
 
-    client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+    client = make_openai_client(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
     model = settings.model_name
 
-    # 各步 try/except 隔离：离线工具 fail-soft，单步异常不拖垮其他两步。
-    user_tags: dict[str, list[str]] = {}
-    try:
-        user_tags = run_user_modeling(client, model, samples)
-    except Exception as exc:
-        print(f"① 用户建模失败，跳过本步: {exc}")
+    # 阶段一 gap⑤:三步离线闭环(建模/创建/自改进)的全部真实 LLM 调用包进一条
+    # 命名 trace,离线跑一次即可在 Langfuse 里看到整段耗时与内部各次生成。
+    with background_trace("synthesize_skills", input={"limit": limit, "samples": len(samples)}):
+        # 各步 try/except 隔离：离线工具 fail-soft，单步异常不拖垮其他两步。
+        user_tags: dict[str, list[str]] = {}
+        try:
+            user_tags = run_user_modeling(client, model, samples)
+        except Exception as exc:
+            print(f"① 用户建模失败，跳过本步: {exc}")
 
-    candidate_paths: list[Path] = []
-    try:
-        candidate_paths = synthesize_skills(client, model, samples, out_dir=CANDIDATES_DIR)
-    except Exception as exc:
-        print(f"② 聚类创建失败，跳过本步: {exc}")
+        candidate_paths: list[Path] = []
+        try:
+            candidate_paths = synthesize_skills(client, model, samples, out_dir=CANDIDATES_DIR)
+        except Exception as exc:
+            print(f"② 聚类创建失败，跳过本步: {exc}")
 
-    # ②b 金牌客服蒸馏(G5):从人工接管过的会话学人的处理经验
-    golden_paths: list[Path] = []
-    try:
-        from app.agent.skills.golden_corpus import synthesize_from_golden
-        golden_paths = synthesize_from_golden(client, model, samples, out_dir=CANDIDATES_DIR)
-    except Exception as exc:
-        print(f"②b 金牌客服蒸馏失败，跳过本步: {exc}")
+        # ②b 金牌客服蒸馏(G5):从人工接管过的会话学人的处理经验
+        golden_paths: list[Path] = []
+        try:
+            from app.agent.skills.golden_corpus import synthesize_from_golden
+            golden_paths = synthesize_from_golden(client, model, samples, out_dir=CANDIDATES_DIR)
+        except Exception as exc:
+            print(f"②b 金牌客服蒸馏失败，跳过本步: {exc}")
 
-    # ③ 失败自改进:优先用真实执行轨迹(G3);无轨迹的老库回退关键词启发式
-    improve_paths: list[Path] = []
-    try:
-        trace_cap = limit * 4
-        failed_traces = get_db().list_skill_traces(
-            outcomes=["handoff", "tool_error"], limit=trace_cap,
-        )
-        if failed_traces:
-            improve_paths = run_improvements_from_traces(
-                client, model, failed_traces, samples,
-                skills_dir=DEFINITIONS_DIR, out_dir=CANDIDATES_DIR,
+        # ③ 失败自改进:优先用真实执行轨迹(G3);无轨迹的老库回退关键词启发式
+        improve_paths: list[Path] = []
+        try:
+            trace_cap = limit * 4
+            failed_traces = get_db().list_skill_traces(
+                outcomes=["handoff", "tool_error"], limit=trace_cap,
             )
-            print(f"③ 失败自改进:读到 {len(failed_traces)} 条失败轨迹(按真实轨迹关联)"
-                  f",产出 {len(improve_paths)} 份改进候选")
-            if len(improve_paths) == 0:
-                print("   注:失败轨迹存在但未产出候选 —— 常见原因:对应会话尚未归档、"
-                      "该 skill 已从正式库移除、或 LLM 产物未过校验")
-            if len(failed_traces) >= trace_cap:
-                print(f"   ⚠ 失败轨迹读取已达上限 {trace_cap} 条,更早的失败可能未纳入"
-                      f"(重跑时加大样本数 N 可放宽,当前 N={limit})")
-        else:
-            # 区分"库里根本没有轨迹"与"有轨迹但没有失败"——两者含义完全不同
-            has_any_trace = bool(get_db().list_skill_traces(limit=1))
-            if has_any_trace:
-                print("③ 失败自改进:已有执行轨迹但**无失败轨迹**(系统健康),本步跳过")
-            else:
-                improve_paths = run_improvements(
-                    client, model, samples, skills_dir=DEFINITIONS_DIR, out_dir=CANDIDATES_DIR,
+            if failed_traces:
+                improve_paths = run_improvements_from_traces(
+                    client, model, failed_traces, samples,
+                    skills_dir=DEFINITIONS_DIR, out_dir=CANDIDATES_DIR,
                 )
-                print("③ 失败自改进:skill_traces 尚无任何轨迹 → 回退关键词启发式")
-    except Exception as exc:
-        print(f"③ 失败自改进失败，跳过本步: {exc}")
+                print(f"③ 失败自改进:读到 {len(failed_traces)} 条失败轨迹(按真实轨迹关联)"
+                      f",产出 {len(improve_paths)} 份改进候选")
+                if len(improve_paths) == 0:
+                    print("   注:失败轨迹存在但未产出候选 —— 常见原因:对应会话尚未归档、"
+                          "该 skill 已从正式库移除、或 LLM 产物未过校验")
+                if len(failed_traces) >= trace_cap:
+                    print(f"   ⚠ 失败轨迹读取已达上限 {trace_cap} 条,更早的失败可能未纳入"
+                          f"(重跑时加大样本数 N 可放宽,当前 N={limit})")
+            else:
+                # 区分"库里根本没有轨迹"与"有轨迹但没有失败"——两者含义完全不同
+                has_any_trace = bool(get_db().list_skill_traces(limit=1))
+                if has_any_trace:
+                    print("③ 失败自改进:已有执行轨迹但**无失败轨迹**(系统健康),本步跳过")
+                else:
+                    improve_paths = run_improvements(
+                        client, model, samples, skills_dir=DEFINITIONS_DIR, out_dir=CANDIDATES_DIR,
+                    )
+                    print("③ 失败自改进:skill_traces 尚无任何轨迹 → 回退关键词启发式")
+        except Exception as exc:
+            print(f"③ 失败自改进失败，跳过本步: {exc}")
 
     print("\n===== 离线闭环摘要 =====")
     print(f"用户建模: {len(user_tags)} 个用户，标签 {user_tags}")

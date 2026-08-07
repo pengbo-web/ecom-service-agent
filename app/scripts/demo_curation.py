@@ -17,8 +17,10 @@ def _build_client():
     if settings.resilience_enabled:
         from app.resilience.factory import make_resilient_client
         return make_resilient_client()
-    from openai import OpenAI
-    return OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+    # 阶段一 gap⑤:门控关/未装时与裸 OpenAI(...) 行为完全一致,门控开时策展
+    # 这次调用会自动上报为 generation,嵌进 main() 里开的命名 trace。
+    from app.observability.langfuse_client import make_openai_client
+    return make_openai_client(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
 
 
 def _fact(content: str, category: str = "preference", created_at: str = "2024-01-01T00:00:00") -> MemoryFact:
@@ -61,7 +63,11 @@ def main() -> None:
     # B) LLM 策展:合并近义 / 就地纠正 / 按重要性淘汰
     print("\n正在调用 LLM 策展(需要真实模型,请稍候)...")
     client = _build_client()
-    curated = curate_facts(client, settings.model_name, EXISTING, NEW, max_facts=50)
+    from app.observability.langfuse_bridge import background_trace
+    # 阶段一 gap⑤:本脚本的真实 LLM 调用入口包进命名 trace,离线跑一次即可
+    # 在 Langfuse 里看到这次策展调用的耗时。
+    with background_trace("demo_curation", input={"existing": len(EXISTING), "new": len(NEW)}):
+        curated = curate_facts(client, settings.model_name, EXISTING, NEW, max_facts=50)
     if curated is None:
         print("\n⚠️  策展调用失败(网络/密钥/返回非法)——线上会自动降级回 A 的朴素结果,记忆不受损。")
         return

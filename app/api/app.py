@@ -311,6 +311,30 @@ def create_app(session_manager: Optional[SessionManager] = None,
             yield _sse_frame({"type": "done"})
         return StreamingResponse(gen(), media_type="text/event-stream")
 
+    def _gate_reply_stream(gate: str, text: str, session_id: str = "", user_id: str = "",
+                           user_message: str = "", conversation: Optional[tuple] = None):
+        """限流/人工接管/规则快路径/成本上限 命中时的短路回复(阶段一 gap④)。
+
+        这四道门都在 `run_agent_streaming`(也就是 `langfuse_turn` 建根 trace 的
+        地方)之前就 `return _reply_stream(...)`,此前这些轮次在 Langfuse 里
+        完全不存在——而它们恰恰是**最快**的那批轮次,缺席会让延迟统计系统性
+        偏高。这里补一条极轻量的命名 trace,只记"哪道门命中的"+ 这道门自身的
+        判定/落盘耗时,不去伪造一段它并未经历的模型调用时长。
+
+        `background_trace` 已经是门控关/未装/异常即返回 None 的 best-effort
+        实现,这里只是再包一层 try 防 `root.update` 本身抛错——四道门本身的
+        放行/拒绝逻辑完全不依赖这条 trace 是否记成功。
+        """
+        from app.observability.langfuse_bridge import background_trace
+        with background_trace(f"gate:{gate}", session_id=session_id or None,
+                              user_id=user_id or None, input=user_message) as root:
+            if root is not None:
+                try:
+                    root.update(output=text, metadata={"gate": gate})
+                except Exception:  # noqa: BLE001 记录失败不能反过来影响这轮短路回复
+                    pass
+        return _reply_stream(text, conversation=conversation)
+
     # Demo 一键体验:启动即把预置 hmdp 身份写入 Redis(login:token:{demo_token}),
     # 使前端零登录即可以该身份聊真实 hmdp 订单数据。失败静默(Redis 未起时不阻断启动)。
     if settings.demo_mode:
@@ -619,12 +643,16 @@ def create_app(session_manager: Optional[SessionManager] = None,
         #    session_id 至少按会话粒度隔离,更贴近"每客户端限流"的本意)。
         _rl_key = req.user_id if settings.auth_enabled else (req.session_id or req.user_id)
         if not rate_limiter.allow(_rl_key):
-            return _reply_stream("⏳ 您发送得太快啦，请稍后再试～")
+            return _gate_reply_stream("rate_limit", "⏳ 您发送得太快啦，请稍后再试～",
+                                      session_id=req.session_id, user_id=req.user_id,
+                                      user_message=req.message)
 
         # 2) 人工接管中：短路，不调用 Agent。同理用原始 ID:坐席是对客户端
         #    正在用的会话 ID 做接管;先换发会让接管被静默绕过。
         if hitl is not None and hitl.manual_mode.is_manual(req.session_id):
-            return _reply_stream("🎧 当前会话已转由人工客服处理，请稍候…")
+            return _gate_reply_stream("manual_takeover", "🎧 当前会话已转由人工客服处理，请稍候…",
+                                      session_id=req.session_id, user_id=req.user_id,
+                                      user_message=req.message)
 
         # 3) 会话生命周期:确保 ID 可用;closed/未知(旧格式/伪造)→ 服务端换发翻篇
         active_id, rotated = ensure_active(get_db(), req.session_id, req.user_id)
@@ -641,8 +669,10 @@ def create_app(session_manager: Optional[SessionManager] = None,
                     if not got:
                         # 抢不到锁=上一条还在处理:此时若照发快路径回复,该轮问答不会入历史
                         # (刷新/多端回显缺失),且与在途轮次并发改 raw_messages。故返回忙提示。
-                        return _reply_stream("⏳ 您的上一条消息还在处理中，请稍候再发～",
-                                             conversation=(active_id, rotated))
+                        return _gate_reply_stream(
+                            "fast_path", "⏳ 您的上一条消息还在处理中，请稍候再发～",
+                            session_id=req.session_id, user_id=req.user_id,
+                            user_message=req.message, conversation=(active_id, rotated))
                     msgs = getattr(agent, "raw_messages", None)
                     if isinstance(msgs, list):
                         msgs.append({"role": "user", "content": req.message})
@@ -657,11 +687,16 @@ def create_app(session_manager: Optional[SessionManager] = None,
                                 save()
                             except Exception:  # noqa: BLE001 保存失败不影响本轮回复
                                 pass
-                return _reply_stream(fp["reply"], conversation=(active_id, rotated))
+                return _gate_reply_stream("fast_path", fp["reply"],
+                                          session_id=req.session_id, user_id=req.user_id,
+                                          user_message=req.message,
+                                          conversation=(active_id, rotated))
 
         # 5) 成本上限（防烧爆 API Key）
         if not cost_guard.allow():
-            return _reply_stream("🛑 今日服务已达使用上限，请明天再来～")
+            return _gate_reply_stream("cost_ceiling", "🛑 今日服务已达使用上限，请明天再来～",
+                                      session_id=req.session_id, user_id=req.user_id,
+                                      user_message=req.message)
 
         agent = manager.get_or_create(req.session_id, req.user_id)
 
@@ -1050,11 +1085,11 @@ def create_app(session_manager: Optional[SessionManager] = None,
         import shutil
         import tempfile
 
-        from openai import OpenAI
-
         from app.agent.skills import doc_distill as dd
         from app.agent.skills.risk import promotion_policy
         from app.agent.skills.tree_text import classify_tree_risk, validate_skill_tree
+        from app.observability.langfuse_bridge import background_trace
+        from app.observability.langfuse_client import make_openai_client
         from app.scripts import promote_skill as ps
 
         doc = (req.doc_text or "").strip()
@@ -1071,9 +1106,12 @@ def create_app(session_manager: Optional[SessionManager] = None,
         staging = Path(tempfile.mkdtemp(prefix="skill_distill_"))
         try:
             try:
-                client = OpenAI(api_key=settings.openai_api_key,
-                                base_url=settings.openai_base_url)
-                out = dd.distill_from_doc(client, settings.model_name, doc, str(staging))
+                # 阶段一 gap⑤:蒸馏这一次真调 LLM 的入口包进命名 trace,client 换成
+                # drop-in 包装(门控关/未装时行为与裸 OpenAI 完全一致)。
+                with background_trace("skills_distill", input={"doc_chars": len(doc)}):
+                    client = make_openai_client(api_key=settings.openai_api_key,
+                                                base_url=settings.openai_base_url)
+                    out = dd.distill_from_doc(client, settings.model_name, doc, str(staging))
             except Exception as exc:  # noqa: BLE001 LLM/网络失败如实回传,不 500
                 # 完整异常(可能带 base_url/代理等细节)只落服务端日志,回给客户端的只有类型名
                 logger.exception("skills/distill 调用 LLM 失败")
@@ -1124,13 +1162,34 @@ def create_app(session_manager: Optional[SessionManager] = None,
         鉴权用 admin_auth:经营数据只对店铺管理者开放,买家 token 拿不到。
         会话落进 seller_sessions(独立 SessionManager+独立目录),与买家会话
         的 session_id 命名空间互不相通,同名 session_id 不会串话。
+
+        可观测性(阶段一 gap①):此端点此前直接调 `orch.chat()`,完全绕开
+        `run_agent_streaming`,店主的每一轮对话在 Langfuse 里都是空白——
+        分析师/增长两个画像回答了多少、调了什么工具、耗时多少,一概看不到。
+        这里补一条与买家侧同等丰富度的 trace:开轮根 trace→挂 event_sink
+        接住路由/工具调用等事件→结束后补发 reply/metadata(orch.chat() 本身
+        不像 streaming.py 那样发这两类事件,需要在这里补齐)。全程 best-effort:
+        `langfuse_turn` 门控关/未装/异常都返回 None,不影响店主本轮回复。
         """
         _require_seller_console()
+        from contextlib import nullcontext
+        from app.observability.langfuse_bridge import langfuse_turn
         sid = (req.session_id or "").strip() or "seller-default"
         orch = seller_sessions.get_or_create(sid, user_id="seller")
         lock = seller_sessions.get_lock(sid)
+        lf_turn = langfuse_turn(sid, "seller", req.message or "")
         with lock:
-            result = orch.chat(req.message or "")
+            orch.event_sink = lf_turn.on_event if lf_turn is not None else None
+            try:
+                with (lf_turn if lf_turn is not None else nullcontext()):
+                    result = orch.chat(req.message or "")
+                    if lf_turn is not None:
+                        lf_turn.on_event({"type": "reply", "content": result.reply})
+                        lf_turn.on_event({"type": "metadata", "intent": result.intent.value,
+                                          "confidence": result.confidence,
+                                          "requires_human": result.requires_human})
+            finally:
+                orch.event_sink = None
             try:
                 orch.save()
             except Exception:      # noqa: BLE001 落盘失败不吞掉已生成的回复

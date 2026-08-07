@@ -337,6 +337,112 @@ def test_attach_correlation_failure_does_not_lose_drafts_or_fail_event(db, monke
     assert any(c != "C3" for c in corr_ids)  # 第一条挂链失败,保留了 draft_outreach 自己生成的 corr
 
 
+# ---------- 阶段一 gap②:协作链两次 LLM 调用必须可观测,且与 correlation_id 绑定 ----------
+
+def test_collab_client_routes_through_langfuse_wrapper(monkeypatch):
+    """_collab_client() 必须经 make_openai_client 包装,而不是裸 OpenAI(...)——
+    否则门控开着也没用,因为构造点本身就绕开了 drop-in。"""
+    calls = {}
+
+    def _fake_make_client(**kwargs):
+        calls.update(kwargs)
+        return "sentinel-client"
+
+    monkeypatch.setattr("app.observability.langfuse_client.make_openai_client",
+                        _fake_make_client)
+    client = collab._collab_client()
+    assert client == "sentinel-client"
+    assert "timeout" in calls and "max_retries" in calls
+
+
+class _FakeTraceRoot:
+    def __init__(self):
+        self.updates = []
+
+    def update(self, **kw):
+        self.updates.append(kw)
+
+
+def _fake_background_trace(calls):
+    """造一个假的 `background_trace`:记录每次开的 trace 名/session_id,
+    yield 一个能收 .update() 的假根观察。"""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _bt(name, session_id=None, user_id=None, input=None):
+        root = _FakeTraceRoot()
+        calls.append({"name": name, "session_id": session_id, "root": root})
+        yield root
+
+    return _bt
+
+
+def test_handle_signal_wraps_attribution_with_correlation_as_session(db, monkeypatch):
+    """归因这一步必须包进一条以 correlation_id 为 Langfuse session_id 的命名
+    trace——参谋这一段与营销那一段(handle_insight)共享同一个 corr,
+    Langfuse 会话视图才能把两段协作步骤分到同一条链上。"""
+    calls: list = []
+    monkeypatch.setattr("app.observability.langfuse_bridge.background_trace",
+                        _fake_background_trace(calls))
+    _signal(db, corr="TRACE1")
+    with patch.object(collab, "_llm_explain", return_value="尺码问题"):
+        collab.run_once()
+    # 该信号是 MARKETING_WORTHY(refund_rate_high),归因段之后 growth 段也会
+    # 开自己的一条 trace(即便没有商机可起草)——这里只断言归因段那一条存在。
+    attribution_calls = [c for c in calls if c["name"] == "collab_analyst_attribution"]
+    assert len(attribution_calls) == 1
+    assert attribution_calls[0]["session_id"] == "TRACE1"
+    assert attribution_calls[0]["root"].updates   # 结论写回了 trace 的 output
+
+
+def test_handle_insight_wraps_drafting_with_correlation_as_session(db, monkeypatch):
+    """起草这一步同样包进以 correlation_id 为 session_id 的命名 trace,
+    与归因那条共享同一个 corr,构成信号→归因→起草的完整链路视图。"""
+    calls: list = []
+    monkeypatch.setattr("app.observability.langfuse_bridge.background_trace",
+                        _fake_background_trace(calls))
+    _unpaid(db, "O1", "u1")
+    _signal(db, corr="TRACE2")
+    with patch.object(collab, "_llm_explain", return_value="尺码问题"), \
+         patch.object(collab, "_llm_draft", return_value="话术"):
+        collab.run_once()
+    names = {c["name"] for c in calls}
+    sids = {c["session_id"] for c in calls}
+    assert names == {"collab_analyst_attribution", "collab_growth_drafting"}
+    assert sids == {"TRACE2"}   # 两段共享同一个 correlation_id 作 session_id
+
+
+def test_collab_degrades_silently_when_langfuse_init_raises(db, monkeypatch):
+    """核心 fail-soft 性质:门控开着,但 Langfuse SDK 初始化本身抛异常——协作
+    链路的判定结果(归因是否降级、是否转发、草稿条数)必须与完全不接
+    Langfuse 时逐字节一致,不能被观测层的异常打断或改变。"""
+    import app.observability.langfuse_bridge as bridge_mod
+    from app.config import settings as st
+    monkeypatch.setattr(st.settings, "langfuse_enabled", True)
+    monkeypatch.setattr(bridge_mod, "_ensure_env",
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    _unpaid(db, "O1", "u1")
+    _signal(db, corr="TRACE3")
+    with patch.object(collab, "_llm_explain", return_value="尺码问题"), \
+         patch.object(collab, "_llm_draft", return_value="话术"):
+        stats = collab.run_once()
+    assert stats["analyst"]["done"] == 1
+    assert stats["growth"]["done"] == 1
+    assert len(db.list_outreach_drafts(status="draft")) == 1
+
+
+def test_collab_unaffected_when_langfuse_disabled(db):
+    """门控关(默认态):协作链路行为不变,这是回归测试的基线对照。"""
+    _unpaid(db, "O1", "u1")
+    _signal(db, corr="TRACE4")
+    with patch.object(collab, "_llm_explain", return_value="尺码问题"), \
+         patch.object(collab, "_llm_draft", return_value="话术"):
+        stats = collab.run_once()
+    assert stats["analyst"]["done"] == 1
+    assert stats["growth"]["done"] == 1
+    assert len(db.list_outreach_drafts(status="draft")) == 1
+
+
 def test_attach_correlation_does_not_rewrite_reviewed_draft(db):
     """人工已经审批过的草稿,correlation_id 不该被再改写——状态守卫只对
     仍是 draft(待审)的行生效。"""

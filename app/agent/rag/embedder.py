@@ -3,11 +3,17 @@
 - 支持批量编码（list[str] → list[list[float]]）。
 - 可配置 model 与 base_url（与 chat 模型共用一套 OpenAI 客户端配置）。
 - 返回原始 list[float]，由调用方决定如何持久化（这里用 json，不引入 numpy 依赖）。
+
+阶段一 gap⑤:客户端改用 `make_openai_client` drop-in 包装——门控关/未装时
+返回的仍是原生 `OpenAI(**kwargs)`,与改动前逐字节一致(热路径 FAQ 缓存/
+知识库召回、离线建索引脚本共用这一个类,零行为差异);门控开时 embedding
+调用会被 langfuse.openai 自动上报为 "embedding" 类型的观察,嵌进调用方
+当前所处的 span/trace(如 background_trace 或某个 stage)下。
 """
 
 from typing import Iterable
 
-from openai import OpenAI
+from app.observability.langfuse_client import make_openai_client
 
 
 class Embedder:
@@ -27,7 +33,7 @@ class Embedder:
             client_kwargs["timeout"] = timeout
         if max_retries is not None:
             client_kwargs["max_retries"] = max_retries
-        self._client = OpenAI(**client_kwargs)
+        self._client = make_openai_client(**client_kwargs)
         self._model = model
         self._batch_size = batch_size
 

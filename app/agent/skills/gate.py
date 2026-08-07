@@ -68,31 +68,44 @@ def gate_candidate(skill_name: str, candidate_path: str, definitions_dir: str,
     - 无 case_ids → promote=False, reason="no_gate_cases"(fail-closed);
     - eval_fn 抛异常 → promote=False,reason 带异常信息(fail-closed);
     - 复用 `compare_to_baseline`:候选相对现行掉点超过 tolerance 即判劣化。
+
+    阶段一 gap⑤:本函数是 `promote_skill.py`/`skill_watchdog.py` 这两条离线 CLI
+    调门禁的入口,整段判定过程(含两次真调 LLM 的 `eval_fn` 调用)包进一条
+    命名 trace,门控关/未装/异常时 `background_trace` 静默让本函数行为不变。
     """
     if not case_ids:
         return {"promote": False, "reason": "no_gate_cases", "baseline": None,
                 "candidate": None, "comparison": None, "shadow_dir": None}
 
-    try:
-        shadow = build_shadow_dir(definitions_dir, skill_name, candidate_path, dest_root)
-        baseline = (eval_fn(definitions_dir, case_ids) or {}).get("summary") or {}
-        candidate = (eval_fn(str(shadow), case_ids) or {}).get("summary") or {}
-    except Exception as exc:  # noqa: BLE001 门禁 fail-closed:评测失败=不许上
-        return {"promote": False, "reason": f"评测执行失败: {exc}", "baseline": None,
-                "candidate": None, "comparison": None, "shadow_dir": None}
+    from app.observability.langfuse_bridge import background_trace
 
-    comparison = compare_to_baseline(candidate, baseline, tolerance)
-    # fail-closed:没有任何可比指标(评测返回空/缺 summary/指标全为 None)时,
-    # compare_to_baseline 会给出 regressed=False —— 那是"没测出劣化",不是"证明了不劣化",
-    # 绝不能据此放行。
-    if not comparison["diffs"]:
-        return {"promote": False, "reason": "评测未产出可比指标,按 fail-closed 拒绝转正",
-                "baseline": baseline or None, "candidate": candidate or None,
-                "comparison": comparison, "shadow_dir": str(shadow)}
-    regressed = comparison["regressed"]
-    reason = "候选劣化超过容差,拒绝转正" if regressed else "候选未劣化,允许转正"
-    return {"promote": not regressed, "reason": reason, "baseline": baseline,
-            "candidate": candidate, "comparison": comparison, "shadow_dir": str(shadow)}
+    with background_trace("skill_gate_candidate",
+                          input={"skill_name": skill_name, "case_ids": case_ids}) as root:
+        try:
+            shadow = build_shadow_dir(definitions_dir, skill_name, candidate_path, dest_root)
+            baseline = (eval_fn(definitions_dir, case_ids) or {}).get("summary") or {}
+            candidate = (eval_fn(str(shadow), case_ids) or {}).get("summary") or {}
+        except Exception as exc:  # noqa: BLE001 门禁 fail-closed:评测失败=不许上
+            return {"promote": False, "reason": f"评测执行失败: {exc}", "baseline": None,
+                    "candidate": None, "comparison": None, "shadow_dir": None}
+
+        comparison = compare_to_baseline(candidate, baseline, tolerance)
+        # fail-closed:没有任何可比指标(评测返回空/缺 summary/指标全为 None)时,
+        # compare_to_baseline 会给出 regressed=False —— 那是"没测出劣化",不是"证明了不劣化",
+        # 绝不能据此放行。
+        if not comparison["diffs"]:
+            return {"promote": False, "reason": "评测未产出可比指标,按 fail-closed 拒绝转正",
+                    "baseline": baseline or None, "candidate": candidate or None,
+                    "comparison": comparison, "shadow_dir": str(shadow)}
+        regressed = comparison["regressed"]
+        reason = "候选劣化超过容差,拒绝转正" if regressed else "候选未劣化,允许转正"
+        if root is not None:
+            try:
+                root.update(output={"promote": not regressed, "reason": reason})
+            except Exception:  # noqa: BLE001 记录失败不影响门禁判定
+                pass
+        return {"promote": not regressed, "reason": reason, "baseline": baseline,
+                "candidate": candidate, "comparison": comparison, "shadow_dir": str(shadow)}
 
 
 def gate_case_ids(skill_name: str, dataset_path: str) -> list[str]:
@@ -108,18 +121,18 @@ def default_eval_fn(skills_dir: str, case_ids: list[str]) -> dict:
     会真调 LLM(评测本身要跑 Agent),故单测不用本函数。settings 改动在
     finally 中还原,避免污染同进程后续调用。
     """
-    from openai import OpenAI
-
     from app.config.settings import settings
     from app.evaluation.dataset import load_dataset
     from app.evaluation.evaluator import Evaluator
     from app.evaluation.sandbox import Sandbox
+    from app.observability.langfuse_client import make_openai_client
 
     original_dir = settings.skills_dir
     settings.skills_dir = skills_dir
     try:
         cases = [c for c in load_dataset(settings.eval_dataset_path) if c.id in set(case_ids)]
-        client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+        client = make_openai_client(api_key=settings.openai_api_key,
+                                    base_url=settings.openai_base_url)
         evaluator = Evaluator(
             sandbox=Sandbox(mode="single"), client=client, model=settings.model_name,
             use_judge=settings.eval_use_judge, pass_threshold=settings.eval_pass_threshold,

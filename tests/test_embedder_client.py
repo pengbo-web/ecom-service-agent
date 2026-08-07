@@ -23,6 +23,39 @@ def test_embedder_defaults_keep_sdk_behavior():
     assert e._client.timeout != 6.0
 
 
+def test_embedder_routes_through_langfuse_wrapper(monkeypatch):
+    """阶段一 gap⑤:Embedder 必须经 make_openai_client 构造底层客户端——
+    门控关/未装时行为与裸 OpenAI(**kwargs) 完全一致(见下面两个既有测试),
+    门控开时 embedding 调用才有机会被自动上报。"""
+    captured = {}
+
+    def _fake_make_client(**kwargs):
+        captured.update(kwargs)
+        return "sentinel-client"
+
+    monkeypatch.setattr("app.agent.rag.embedder.make_openai_client", _fake_make_client)
+    e = Embedder(api_key="x", base_url="http://localhost", model="m", timeout=6.0, max_retries=0)
+    assert e._client == "sentinel-client"
+    assert captured == {"api_key": "x", "base_url": "http://localhost",
+                        "timeout": 6.0, "max_retries": 0}
+
+
+def test_embedder_degrades_silently_when_langfuse_init_raises(monkeypatch):
+    """核心 fail-soft 性质:门控开着但 Langfuse 初始化抛异常,Embedder 仍必须
+    正常拿到一个可用客户端(回退原生 OpenAI),不能因观测层异常而构造失败。"""
+    import os
+    from app.config.settings import settings
+    monkeypatch.setattr(settings, "langfuse_enabled", True)
+    # make_openai_client 在门控开时无条件 os.environ.setdefault(LANGFUSE_HOST,...)——
+    # 让这一步抛异常,模拟"包装初始化本身失败"的真实后果。
+    monkeypatch.setattr(os.environ, "setdefault",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    e = Embedder(api_key="x", base_url="http://localhost", model="m",
+                 timeout=6.0, max_retries=0)
+    assert e._client.timeout == 6.0
+    assert e._client.max_retries == 0
+
+
 def test_hot_path_retriever_uses_fast_fail_settings(monkeypatch):
     """_get_retriever 构造的 Embedder 必须带 recall_kb 超时/零重试。"""
     import app.agent.tools.knowledge as knowledge_mod
