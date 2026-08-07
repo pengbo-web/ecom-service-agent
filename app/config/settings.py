@@ -246,6 +246,13 @@ class Settings(BaseSettings):
     unpaid_stale_hours: int = 24       # 下单后超过多久仍未支付才算"催付款"商机
     cart_stale_hours: int = 48         # 购物车超过多久未转化(下单)才算"弃单"商机
 
+    # 物流关怀 + 评价邀约(两个纯新增的商机口径,机制完全复用既有的
+    # find_opportunities/draft_outreach 草稿-审批链路,不涉及新表):
+    # 已发货超过 shipped_care_hours 仍未主动告知物流进度 → shipped_no_care;
+    # 已签收超过 review_request_hours 仍未评价 → delivered_no_review。
+    shipped_care_hours: int = 12       # 发货后多久才值得主动推一次物流播报
+    review_request_hours: int = 72     # 签收后多久才邀约评价——当天就催会显得急功近利
+
     # 触达转化归因(N3):发送后等多久才判定有没有效果——刚发出去就判定对买家
     # 不公平,要给反应时间;窗口内(sent_at 早于 -N 小时)才进入可判定队列。
     outreach_attribution_window_hours: int = 24

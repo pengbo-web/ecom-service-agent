@@ -81,6 +81,46 @@ def test_stop_when_opportunity_gone(db, monkeypatch):
     assert out["stopped"] == 1
 
 
+def test_shipped_no_care_stops_once_delivered(db):
+    """物流播报不能在包裹签收之后还反复提——一旦该买家名下已无 status='shipped'
+    的订单(已推进到 delivered),商机就该判定为已消失。"""
+    from app.multi_agent.followup import _opportunity_still_open
+
+    conn = db.connect()
+    conn.execute("INSERT INTO orders (order_id,user,status,total,created_at) "
+                 "VALUES ('O1','u1','shipped',199,datetime('now'))")
+    conn.commit()
+    conn.close()
+    row = {"kind": "shipped_no_care", "user_id": "u1"}
+    assert _opportunity_still_open(row, db) is True
+
+    conn = db.connect()
+    conn.execute("UPDATE orders SET status = 'delivered' WHERE order_id = 'O1'")
+    conn.commit()
+    conn.close()
+    assert _opportunity_still_open(row, db) is False
+
+
+def test_delivered_no_review_stops_once_reviewed(db):
+    """评价邀约不能在买家评完价之后还继续提——复用 reviewable_items,
+    买家一旦提交评价,该商机必须判定为已消失。"""
+    from app.multi_agent.followup import _opportunity_still_open
+
+    conn = db.connect()
+    conn.execute("INSERT INTO orders (order_id,user,status,total,created_at) "
+                 "VALUES ('O1','u1','delivered',199,datetime('now'))")
+    conn.execute("INSERT INTO order_items (order_id,name,sku,quantity,price) "
+                 "VALUES ('O1','跑鞋','P001',1,199)")
+    conn.commit()
+    conn.close()
+    row = {"kind": "delivered_no_review", "user_id": "u1"}
+    assert _opportunity_still_open(row, db) is True
+
+    assert db.create_review(order_id="O1", user_id="u1", sku="P001",
+                            rating=5, content="好") is not None
+    assert _opportunity_still_open(row, db) is False
+
+
 def test_advance_produces_a_draft_not_a_send(db, monkeypatch):
     """"持续沟通"= 序列自动推进,不是自动发送;每一步仍需人工批准。"""
     from app.multi_agent import followup

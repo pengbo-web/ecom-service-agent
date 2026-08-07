@@ -56,9 +56,18 @@ def _opportunity_still_open(row: dict, db) -> bool:
       (已发货/已签收/退款都算"不再是久拖不发这件事")
     - stalled_bargain / consulted_no_order:这两类商机的"已消失"就是
       "买家下单了"——一旦名下出现任意订单即视为转化,不再是"没下单"这件事
+    - shipped_no_care:该买家名下是否还有 status='shipped' 的订单——一旦
+      推进到 delivered(或转退款等其它终态),"发货未关怀"这件事本身就已经
+      不成立,继续提物流播报只会显得莫名其妙(包裹都签收了还在说"已发货")
+    - delivered_no_review:复用 `Database.reviewable_items`——只要该买家
+      名下还有"已签收且未评价"的条目就算商机仍开着;买家一旦评价完,
+      reviewable_items 返回空列表,链就该停,不能评完了还在收到邀评提醒
+      (这正是本函数存在的目的:防止这类"事后确定性会消失"的商机被继续骚扰)
     """
     kind = row.get("kind")
     user_id = row.get("user_id")
+    if kind == "delivered_no_review":
+        return bool(db.reviewable_items(user_id))
     conn = db.connect()
     try:
         if kind == "unpaid_order":
@@ -74,6 +83,11 @@ def _opportunity_still_open(row: dict, db) -> bool:
         if kind == "stale_pending_order":
             r = conn.execute(
                 "SELECT 1 FROM orders WHERE user = ? AND status = 'pending' LIMIT 1",
+                (user_id,)).fetchone()
+            return r is not None
+        if kind == "shipped_no_care":
+            r = conn.execute(
+                "SELECT 1 FROM orders WHERE user = ? AND status = 'shipped' LIMIT 1",
                 (user_id,)).fetchone()
             return r is not None
         # stalled_bargain / consulted_no_order

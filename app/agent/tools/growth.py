@@ -34,6 +34,8 @@ OPPORTUNITY_KINDS = {
     "abandoned_cart": "加购未下单",
     "stalled_bargain": "议价未成交",
     "consulted_no_order": "咨询过但没下单",
+    "shipped_no_care": "已发货待关怀",
+    "delivered_no_review": "已签收未评价",
 }
 
 # "久拖不发"的判定:状态取自真实写路径(Database.create_order 的默认值),
@@ -161,6 +163,58 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
             items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
                       "order_id": "", "user_id": r["user_id"], "sku": r["sku"],
                       "quantity": int(r["quantity"] or 0), "created_at": r["added_at"]}
+                     for r in rows]
+
+        elif kind == "shipped_no_care":
+            # 已发货待关怀:买家包裹动了,但店铺从没主动说过一句——现在只能被动
+            # 应答"我的包裹到哪了"。status='shipped' 且 shipped_at 超过
+            # settings.shipped_care_hours(刚发货就打扰没意义,包裹可能还没
+            # 真正上路)。tracking_number/carrier/estimated_delivery 直接带
+            # 上,这条商机存在的意义就是让起草模型说得出具体的物流信息,不是
+            # 空喊一句"已发货哦"。
+            rows = conn.execute(
+                f"SELECT o.order_id, o.user AS user_id, o.status, o.total, o.shipped_at, "
+                f"       o.tracking_number, o.carrier, o.estimated_delivery, "
+                f"       GROUP_CONCAT(oi.name, '、') AS items "
+                f"FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.order_id "
+                f"WHERE o.status = 'shipped' "
+                f"  AND o.shipped_at <= datetime('now', '-{max(1, int(settings.shipped_care_hours))} hours') "
+                f"  AND o.shipped_at >= datetime('now', '-{days} days') "
+                f"GROUP BY o.order_id ORDER BY o.shipped_at DESC LIMIT ?", (lim,)).fetchall()
+            items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
+                      "order_id": r["order_id"], "user_id": r["user_id"],
+                      "order_status": r["status"],
+                      "order_status_label": STATUS_LABELS.get(r["status"], r["status"]),
+                      "tracking_number": r["tracking_number"] or "",
+                      "carrier": r["carrier"] or "",
+                      "estimated_delivery": r["estimated_delivery"] or "",
+                      "amount": float(r["total"] or 0.0), "created_at": r["shipped_at"],
+                      "items": r["items"] or ""} for r in rows]
+
+        elif kind == "delivered_no_review":
+            # 已签收未评价:WHERE/NOT EXISTS 这两行逐字照抄
+            # `Database.reviewable_items` 里"已签收且该 (order_id, sku) 尚未
+            # 评价"这条唯一判定——不重写第二份口径,防止两处"该不该邀评"的
+            # 标准悄悄走岔。这里在其之上只多加了两件事:①按 delivered_at 加
+            # settings.review_request_hours 门槛(签收当天就催显得急功近利);
+            # ②按 order 聚合(而不是像 reviewable_items 那样按 (order_id, sku)
+            # 逐行返回),因为这里要产出的是"要不要联系这个买家"的商机,单位
+            # 是订单/买家,不是逐个 sku。
+            rows = conn.execute(
+                f"SELECT o.order_id, o.user AS user_id, o.status, o.delivered_at, "
+                f"       GROUP_CONCAT(oi.name, '、') AS items "
+                f"FROM orders o JOIN order_items oi ON oi.order_id = o.order_id "
+                f"WHERE o.status = 'delivered' "
+                f"  AND NOT EXISTS (SELECT 1 FROM reviews r "
+                f"                  WHERE r.order_id = o.order_id AND r.sku = oi.sku) "
+                f"  AND o.delivered_at <= datetime('now', '-{max(1, int(settings.review_request_hours))} hours') "
+                f"  AND o.delivered_at >= datetime('now', '-{days} days') "
+                f"GROUP BY o.order_id ORDER BY o.delivered_at DESC LIMIT ?", (lim,)).fetchall()
+            items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
+                      "order_id": r["order_id"], "user_id": r["user_id"],
+                      "order_status": r["status"],
+                      "order_status_label": STATUS_LABELS.get(r["status"], r["status"]),
+                      "created_at": r["delivered_at"], "items": r["items"] or ""}
                      for r in rows]
 
         else:  # consulted_no_order

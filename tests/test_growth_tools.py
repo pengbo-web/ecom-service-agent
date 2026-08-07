@@ -6,6 +6,7 @@ import inspect
 import pytest
 
 from app.agent.tools import growth
+from app.config.settings import settings
 from app.db.database import Database
 
 
@@ -36,6 +37,42 @@ def _order_hours_ago(d, oid, user, status, hours_ago):
         conn.execute(
             "INSERT INTO orders (order_id,user,status,total,created_at) "
             f"VALUES (?,?,?,199,datetime('now','-{hours_ago} hours'))", (oid, user, status))
+        conn.execute("INSERT INTO order_items (order_id,name,sku,quantity,price) "
+                     "VALUES (?, '跑鞋','P001',1,199)", (oid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _order_shipped_hours_ago(d, oid, user, hours_ago, tracking_number="SF1001",
+                              carrier="顺丰速运", estimated_delivery=""):
+    """插入一条 status='shipped' 的订单,shipped_at 精确到小时前——用来单独
+    压测 shipped_no_care 的阈值边界,而不必等真实的 created_at 时间。"""
+    conn = d.connect()
+    try:
+        conn.execute(
+            "INSERT INTO orders (order_id,user,status,total,created_at,shipped_at,"
+            "tracking_number,carrier,estimated_delivery) "
+            f"VALUES (?,?,?,199,datetime('now','-3 days'),"
+            f"datetime('now','-{hours_ago} hours'),?,?,?)",
+            (oid, user, "shipped", tracking_number, carrier, estimated_delivery))
+        conn.execute("INSERT INTO order_items (order_id,name,sku,quantity,price) "
+                     "VALUES (?, '跑鞋','P001',1,199)", (oid,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _order_delivered_hours_ago(d, oid, user, hours_ago):
+    """插入一条 status='delivered' 的订单,delivered_at 精确到小时前——用来
+    单独压测 delivered_no_review 的阈值边界。"""
+    conn = d.connect()
+    try:
+        conn.execute(
+            "INSERT INTO orders (order_id,user,status,total,created_at,delivered_at) "
+            f"VALUES (?,?,?,199,datetime('now','-5 days'),"
+            f"datetime('now','-{hours_ago} hours'))",
+            (oid, user, "delivered"))
         conn.execute("INSERT INTO order_items (order_id,name,sku,quantity,price) "
                      "VALUES (?, '跑鞋','P001',1,199)", (oid,))
         conn.commit()
@@ -145,6 +182,90 @@ def test_consulted_no_order_ignores_orders_outside_window(db):
     out = growth.find_opportunities(kind="consulted_no_order", window_days=14)
     assert out["success"] is True
     assert [o["user_id"] for o in out["opportunities"]] == ["u2"]
+
+
+def test_find_shipped_no_care_carries_logistics_info(db):
+    """已发货待关怀:item 必须自带物流三件套(运单号/承运商/预计送达),
+    否则起草模型只能空喊"已发货哦",说不出买家真正想知道的进度。"""
+    _order_shipped_hours_ago(db, "O1", "u1", hours_ago=settings.shipped_care_hours + 1,
+                             tracking_number="SF1001", carrier="顺丰速运",
+                             estimated_delivery="2026-08-10")
+    out = growth.find_opportunities(kind="shipped_no_care", window_days=14)
+    assert out["success"] is True
+    assert [o["order_id"] for o in out["opportunities"]] == ["O1"]
+    opp = out["opportunities"][0]
+    assert opp["user_id"] == "u1"
+    assert opp["kind"] == "shipped_no_care"
+    assert opp["situation_label"] == "已发货待关怀"
+    assert opp["order_status"] == "shipped"
+    assert opp["order_status_label"] == "已发货"
+    assert opp["tracking_number"] == "SF1001"
+    assert opp["carrier"] == "顺丰速运"
+    assert opp["estimated_delivery"] == "2026-08-10"
+
+
+def test_shipped_no_care_threshold(db):
+    """阈值内的发货订单还不算商机(包裹可能还没真正上路);越过阈值才算。"""
+    fresh_hours = settings.shipped_care_hours - 1
+    stale_hours = settings.shipped_care_hours + 1
+    _order_shipped_hours_ago(db, "O1", "u1", hours_ago=fresh_hours)
+    _order_shipped_hours_ago(db, "O2", "u2", hours_ago=stale_hours)
+    out = growth.find_opportunities(kind="shipped_no_care", window_days=14)
+    assert out["success"] is True
+    # 阈值内(fresh_hours)的 O1 不出现——只有越过阈值的 O2 才算商机。
+    assert [o["order_id"] for o in out["opportunities"]] == ["O2"]
+
+
+def test_shipped_no_care_respects_window(db):
+    _order_shipped_hours_ago(db, "O1", "u1", hours_ago=90 * 24)
+    assert growth.find_opportunities(
+        kind="shipped_no_care", window_days=14)["opportunities"] == []
+
+
+def test_find_delivered_no_review(db):
+    """已签收未评价:item 必须自带真实订单状态,且只在越过阈值后才出现——
+    签收当天就催评显得急功近利。"""
+    _order_delivered_hours_ago(db, "O1", "u1", hours_ago=settings.review_request_hours + 1)
+    out = growth.find_opportunities(kind="delivered_no_review", window_days=14)
+    assert out["success"] is True
+    assert [o["order_id"] for o in out["opportunities"]] == ["O1"]
+    opp = out["opportunities"][0]
+    assert opp["user_id"] == "u1"
+    assert opp["kind"] == "delivered_no_review"
+    assert opp["situation_label"] == "已签收未评价"
+    assert opp["order_status"] == "delivered"
+    assert opp["order_status_label"] == "已签收"
+    assert opp["items"] == "跑鞋"
+
+
+def test_delivered_no_review_threshold(db):
+    """阈值边界:签收未满 review_request_hours 的订单不出现;越过阈值才出现。"""
+    fresh_hours = settings.review_request_hours - 1
+    stale_hours = settings.review_request_hours + 1
+    _order_delivered_hours_ago(db, "O1", "u1", hours_ago=fresh_hours)
+    _order_delivered_hours_ago(db, "O2", "u2", hours_ago=stale_hours)
+    out = growth.find_opportunities(kind="delivered_no_review", window_days=14)
+    assert out["success"] is True
+    # 阈值内(fresh_hours)的 O1 不出现——不能当天就催评。
+    assert [o["order_id"] for o in out["opportunities"]] == ["O2"]
+
+
+def test_delivered_no_review_excludes_already_reviewed_order(db):
+    """已经评价过的订单永远不会作为「待评价」商机再次出现——这条逻辑逐字复用
+    `Database.reviewable_items` 的 NOT EXISTS 判定,不是另写一份可能走岔的口径。"""
+    _order_delivered_hours_ago(db, "O1", "u1", hours_ago=settings.review_request_hours + 1)
+    assert db.create_review(order_id="O1", user_id="u1", sku="P001",
+                            rating=5, content="很好") is not None
+    out = growth.find_opportunities(kind="delivered_no_review", window_days=14)
+    assert out["success"] is True
+    # 评价已经提交,商机必须消失——不能对着已经评过价的订单再邀评一次。
+    assert out["opportunities"] == []
+
+
+def test_delivered_no_review_respects_window(db):
+    _order_delivered_hours_ago(db, "O1", "u1", hours_ago=90 * 24)
+    assert growth.find_opportunities(
+        kind="delivered_no_review", window_days=14)["opportunities"] == []
 
 
 def test_draft_outreach_only_creates_draft(db):
