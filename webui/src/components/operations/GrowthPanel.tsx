@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getGrowthDrafts, approveDraft, rejectDraft, getOpportunities, getOpportunityKinds,
-  getOutreachStats, type OpportunityKind, type OutreachDraft, type OutreachStats } from "@/lib/api";
+  getOutreachStats, getFollowups, type OpportunityKind, type OutreachDraft, type OutreachStats,
+  type OutreachFollowup } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RotateCcw } from "lucide-react";
@@ -54,6 +55,13 @@ export function GrowthPanel() {
   const [outreachStats, setOutreachStats] = useState<OutreachStats | null>(null);
   const [outreachErr, setOutreachErr] = useState("");
 
+  // 「跟进链」卡(N7:持续沟通=序列自动推进,不是自动发送)。只读展示,
+  // 同样独立成自己的 busy/error——它读取失败不该连累草稿列表/商机概览/
+  // 触达效果这三张已有卡片,反过来也一样。
+  const [followups, setFollowups] = useState<OutreachFollowup[] | null>(null);
+  const [followupsErr, setFollowupsErr] = useState("");
+  const [followupsBusy, setFollowupsBusy] = useState(false);
+
   async function load() {
     setBusy(true);
     try {
@@ -90,12 +98,32 @@ export function GrowthPanel() {
     }
   }
 
+  async function loadFollowups() {
+    setFollowupsBusy(true);
+    try {
+      const r = await getFollowups();
+      setFollowups(r.followups);
+      setFollowupsErr("");
+    } catch (e) {
+      setFollowupsErr(String(e));
+    } finally {
+      setFollowupsBusy(false);
+    }
+  }
+
   useEffect(() => {
     load();
     loadOpportunities();
     loadOutreachStats();
+    loadFollowups();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // 跟进链状态 → 中文;done 没有 stop_reason(达到步数上限是正常走完,不是
+  // 被什么原因拦下),终止原因只在 stopped 时才有意义。
+  const FOLLOWUP_STATUS_LABELS: Record<string, string> = {
+    active: "进行中", done: "已完成", stopped: "已终止",
+  };
 
   function setRowBusy(id: number, isBusy: boolean) {
     setBusyIds((prev) => {
@@ -216,6 +244,61 @@ export function GrowthPanel() {
               </div>
             </Card>
           ))}
+        </div>
+      </section>
+
+      {/* 跟进链(N7):"持续沟通"指序列到期自动推进,不是自动发送——每一步
+          仍产一条待审草稿。终止的链必须带着中文原因常驻显示,店主要看懂
+          "为什么不再跟了",而不是这条链悄悄从列表里消失。 */}
+      <section>
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">跟进链（{followups?.length ?? 0}）</h3>
+          <Button variant="ghost" size="sm" onClick={loadFollowups} disabled={followupsBusy}>
+            <RotateCcw className="h-3.5 w-3.5" /> 刷新
+          </Button>
+        </div>
+        {followupsErr && (
+          <div className="mb-2 text-sm text-destructive">跟进链读取失败：{followupsErr}</div>
+        )}
+        {!followups && followupsBusy && <div className="text-sm text-muted-foreground">加载中…</div>}
+        <div className="flex flex-col gap-2" data-testid="followups-list">
+          {(followups || []).map((f) => (
+            <Card key={f.id} className="p-3 text-sm" data-testid={`followup-${f.id}`}>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium">买家 {f.user_id}</span>
+                <span className="rounded bg-secondary px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                  {f.kind_label || f.kind}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  第 {f.step} / 共 {f.max_steps} 步
+                </span>
+                <span
+                  className={`rounded px-1.5 py-0.5 text-[11px] ${
+                    f.status === "stopped"
+                      ? "bg-destructive/10 text-destructive"
+                      : f.status === "done"
+                      ? "bg-secondary text-muted-foreground"
+                      : "bg-primary/10 text-primary"
+                  }`}
+                >
+                  {FOLLOWUP_STATUS_LABELS[f.status] || f.status}
+                </span>
+              </div>
+              {f.status === "active" && (
+                <div className="mt-1 text-xs text-muted-foreground">
+                  下次触达时间：{f.next_touch_at}
+                </div>
+              )}
+              {f.status === "stopped" && (
+                <div className="mt-1 text-xs text-destructive">
+                  终止原因：{f.stop_reason_label || f.stop_reason || "未知"}
+                </div>
+              )}
+            </Card>
+          ))}
+          {followups && followups.length === 0 && (
+            <div className="text-sm text-muted-foreground">暂无跟进链</div>
+          )}
         </div>
       </section>
 

@@ -1353,6 +1353,29 @@ def create_app(session_manager: Optional[SessionManager] = None,
         stats["window_hours"] = settings.outreach_attribution_window_hours
         return {"success": True, **stats}
 
+    @app.get("/api/admin/growth/followups", dependencies=[Depends(admin_auth)])
+    def growth_followups(status: str = "", limit: int = 50):
+        """列跟进链(N7:持续沟通=序列自动推进,不是自动发送),供工作台
+        「跟进链」小节展示。`status` 留空 = 全部(含已终止的)——已终止的链
+        必须带着终止原因一起可见,店主要能看懂"为什么不再跟了";只想看进行中
+        的可传 `status=active`。
+
+        `kind_label`/`stop_reason_label` 中文标签同样只在这里附加一次,唯一
+        口径分别是 app/agent/tools/growth.py 的 OPPORTUNITY_KINDS 与
+        app/multi_agent/followup.py 的 STOP_REASON_LABELS,前端不重抄一份。
+        """
+        _require_seller_console()
+        from app.agent.tools.growth import OPPORTUNITY_KINDS
+        from app.multi_agent.followup import STOP_REASON_LABELS
+
+        rows = get_db().list_followups(status=status or None, limit=limit)
+        for r in rows:
+            kind = r.get("kind") or ""
+            r["kind_label"] = OPPORTUNITY_KINDS.get(kind, kind)
+            reason = r.get("stop_reason") or ""
+            r["stop_reason_label"] = STOP_REASON_LABELS.get(reason, reason)
+        return {"success": True, "followups": rows}
+
     @app.post("/api/admin/growth/drafts/{draft_id}/approve",
               dependencies=[Depends(admin_auth)])
     def approve_draft(draft_id: int):

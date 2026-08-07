@@ -462,6 +462,24 @@ export async function getOutreachStats(windowDays = 30): Promise<OutreachStats> 
   return r.json();
 }
 
+// ---- 跟进序列(N7:持续沟通=序列自动推进,不是自动发送;每一步仍是待审草稿)----
+// kind_label/stop_reason_label 中文标签由后端同源给出,唯一口径分别在
+// app/agent/tools/growth.py 的 OPPORTUNITY_KINDS 与
+// app/multi_agent/followup.py 的 STOP_REASON_LABELS,前端不重抄一份。
+export type OutreachFollowup = {
+  id: number; user_id: string; kind: string; kind_label?: string;
+  correlation_id: string; step: number; max_steps: number;
+  next_touch_at: string; status: "active" | "done" | "stopped";
+  stop_reason: string | null; stop_reason_label?: string;
+  created_at: string; updated_at: string;
+};
+
+export async function getFollowups(status = ""): Promise<{ success: boolean; followups: OutreachFollowup[] }> {
+  const r = await adminFetch(`/api/admin/growth/followups?status=${encodeURIComponent(status)}`);
+  if (!r.ok) throw new Error(`加载跟进链失败 (${r.status})`);
+  return r.json();
+}
+
 // ---- 店铺人格(N1:品牌语气可配置)----
 export type ShopProfile = { shop_name: string; tone: string; banned_words: string };
 export type ShopProfileResult = {

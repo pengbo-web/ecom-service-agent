@@ -237,6 +237,23 @@ class Database:
                     UNIQUE(code, user_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_coupon_grants_user ON coupon_grants(user_id);
+                CREATE TABLE IF NOT EXISTS outreach_followups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    correlation_id TEXT,
+                    step INTEGER NOT NULL DEFAULT 1,
+                    max_steps INTEGER NOT NULL DEFAULT 3,
+                    next_touch_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    stop_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_followups_active_unique
+                    ON outreach_followups(user_id, kind) WHERE status = 'active';
+                CREATE INDEX IF NOT EXISTS idx_followups_due
+                    ON outreach_followups(status, next_touch_at);
                 """
             )
             # 兼容旧库：products 补 floor_price 列
@@ -1630,6 +1647,129 @@ class Database:
             rows = conn.execute(
                 "SELECT * FROM coupon_grants WHERE user_id = ? ORDER BY id DESC",
                 (user_id,)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ---------- 跟进序列(N7:持续沟通=序列自动推进,不是自动发送) ----------
+    # 五条终止条件里,只有"同一买家同一 kind 只能有一条 active 链"这一条由
+    # 本层(数据库唯一约束)兜底——其它四条(商机消失/上次触达已转化/仲裁拒绝/
+    # 达到步数上限)交给 app.multi_agent.followup 判定,那里才看得到业务口径。
+    def start_followup(self, user_id: str, kind: str, correlation_id: str,
+                       max_steps: int = 3, interval_hours: int = 48) -> Optional[int]:
+        """开一条新的跟进链,首次到期时间为当下 + interval_hours。
+
+        同一买家同一 kind 只能有一条 active 链,交给 `idx_followups_active_unique`
+        这条部分索引兜底判重(与 create_review/grant_coupon 同一套姿态:并发下
+        唯一可靠的判重方式是让约束顶上去,而不是先查后插),命中冲突捕获
+        IntegrityError 返回 None,不抛。"""
+        conn = self.connect()
+        try:
+            now = self._now()
+            cur = conn.execute(
+                "INSERT INTO outreach_followups (user_id, kind, correlation_id, step, "
+                "max_steps, next_touch_at, status, created_at, updated_at) "
+                "VALUES (?, ?, ?, 1, ?, datetime('now', '+' || ? || ' hours'), "
+                "'active', ?, ?)",
+                (user_id, kind, correlation_id, max(1, int(max_steps)),
+                 max(0, int(interval_hours)), now, now))
+            conn.commit()
+            return int(cur.lastrowid)
+        except sqlite3.IntegrityError:
+            return None
+        finally:
+            conn.close()
+
+    def due_followups(self, limit: int = 20) -> list[dict]:
+        """到期可推进的 active 跟进链(next_touch_at 已过)。"""
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM outreach_followups WHERE status = 'active' "
+                "AND next_touch_at <= datetime('now') "
+                "ORDER BY next_touch_at ASC LIMIT ?", (max(1, int(limit)),)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def advance_followup(self, fid: int, interval_hours: int = 48) -> bool:
+        """推进一步:step + 1;超过 max_steps 则收尾为 done,否则重排下次触达
+        时间到未来。**只对 active 状态生效**(与 review_outreach_draft 等既有
+        条件更新同一套幂等纪律)。"""
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT step, max_steps FROM outreach_followups "
+                "WHERE id = ? AND status = 'active'", (fid,)).fetchone()
+            if row is None:
+                return False
+            new_step = int(row["step"]) + 1
+            now = self._now()
+            if new_step > int(row["max_steps"]):
+                conn.execute(
+                    "UPDATE outreach_followups SET step = ?, status = 'done', "
+                    "updated_at = ? WHERE id = ?", (new_step, now, fid))
+            else:
+                conn.execute(
+                    "UPDATE outreach_followups SET step = ?, "
+                    "next_touch_at = datetime('now', '+' || ? || ' hours'), "
+                    "updated_at = ? WHERE id = ?",
+                    (new_step, max(0, int(interval_hours)), now, fid))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def stop_followup(self, fid: int, reason: str) -> bool:
+        """终止一条跟进链并记下终止原因。**只对 active 状态生效**——链一旦
+        done/stopped 就不该再被第二次判定改写理由。stop_reason 必须落库,
+        否则一条链停了但店主看不出为什么,等同于一个静默的 bug。"""
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE outreach_followups SET status = 'stopped', stop_reason = ?, "
+                "updated_at = ? WHERE id = ? AND status = 'active'",
+                (reason, self._now(), fid))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def active_followup(self, user_id: str, kind: str) -> Optional[dict]:
+        """该买家该 kind 当前的 active 链(至多一条,由唯一约束保证)。"""
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM outreach_followups WHERE user_id = ? AND kind = ? "
+                "AND status = 'active' ORDER BY id DESC LIMIT 1",
+                (user_id, kind)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def get_followup(self, fid: int) -> Optional[dict]:
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM outreach_followups WHERE id = ?", (fid,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def list_followups(self, status: Optional[str] = None,
+                       limit: int = 100) -> list[dict]:
+        """列跟进链,供管理端「跟进链」小节展示。默认不筛状态——已终止的链
+        也要能看到(带着终止原因),否则店主看不出"为什么不再跟了"。"""
+        sql = "SELECT * FROM outreach_followups"
+        params: list = []
+        if status:
+            sql += " WHERE status = ?"
+            params.append(status)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        conn = self.connect()
+        try:
+            rows = conn.execute(sql, tuple(params)).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
