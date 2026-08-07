@@ -48,4 +48,26 @@ describe("ShopProfilePanel", () => {
     await waitFor(async () =>
       expect(await screen.findByText(/下一轮/)).toBeInTheDocument());
   });
+
+  it("含承诺词被后端拒存时,原样显示后端点名的措辞", async () => {
+    // GET 走默认 DATA;PUT 模拟后端 400 + detail(与 validate_tone 的拒绝文案一致)。
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      async (_url: string, opts?: RequestInit) => {
+        if (opts?.method === "PUT") {
+          return {
+            ok: false,
+            status: 400,
+            json: async () => ({
+              detail: "语气设定包含承诺类措辞:全额退。语气设定只管说话方式，" +
+                "不能用来承诺退款、包邮、赔付等具体授权与验证流程。",
+            }),
+          };
+        }
+        return { ok: true, json: async () => DATA };
+      });
+    render(<ShopProfilePanel />);
+    fireEvent.click(await screen.findByRole("button", { name: /保存/ }));
+    expect(await screen.findByText(/全额退/)).toBeInTheDocument();
+    expect(await screen.findByText(/只管说话方式/)).toBeInTheDocument();
+  });
 });
