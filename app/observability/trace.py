@@ -17,6 +17,9 @@ class Span:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     meta: dict = field(default_factory=dict)
+    # stage 嵌套树的父指针:None = 顶层(不在任何 stage 内)。仅自研 tracer
+    # 写入(W1 补齐 stage 覆盖),对既有 5 类事件是纯新增字段,不影响其取值。
+    parent_span_id: Optional[str] = None
 
 
 @dataclass

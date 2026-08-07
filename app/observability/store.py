@@ -48,13 +48,22 @@ class TraceStore:
                     success INTEGER,
                     prompt_tokens INTEGER,
                     completion_tokens INTEGER,
-                    meta TEXT
+                    meta TEXT,
+                    parent_span_id TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id);
                 CREATE INDEX IF NOT EXISTS idx_traces_started ON traces(started_at);
                 """
             )
             conn.commit()
+            # 迁移:老库(建表时还没有 parent_span_id 列)补列。CREATE TABLE
+            # IF NOT EXISTS 对已存在的表不会补新列，SQLite 也没有
+            # "ADD COLUMN IF NOT EXISTS"，只能靠捕获重复添加时的异常幂等。
+            try:
+                conn.execute("ALTER TABLE spans ADD COLUMN parent_span_id TEXT")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # 列已存在(新库已在 CREATE TABLE 里带上,或已迁移过)
         finally:
             conn.close()
 
@@ -74,13 +83,14 @@ class TraceStore:
                 conn.execute(
                     """INSERT OR REPLACE INTO spans
                        (span_id, trace_id, name, kind, started_at, ended_at, latency_ms,
-                        success, prompt_tokens, completion_tokens, meta)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        success, prompt_tokens, completion_tokens, meta, parent_span_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (s.span_id, s.trace_id, s.name, s.kind, s.started_at, s.ended_at,
                      s.latency_ms,
                      None if s.success is None else int(s.success),
                      s.prompt_tokens, s.completion_tokens,
-                     json.dumps(s.meta, ensure_ascii=False)),
+                     json.dumps(s.meta, ensure_ascii=False),
+                     getattr(s, "parent_span_id", None)),
                 )
             conn.commit()
         finally:

@@ -65,3 +65,35 @@ def test_streaming_with_tracer_persists_trace(tmp_path):
     tool_spans = [s for s in detail["spans"] if s["kind"] == "tool"]
     assert len(tool_spans) == 1
     assert tool_spans[0]["success"] == 1
+
+
+class _StagedAgent(FakeAgent):
+    """在真实 chat.py 里 react stage 包住工具调用；这里复刻同一形状，
+    验证 stage 事件穿过 run_agent_streaming → tracer 全链路后，嵌套关系
+    在落库的 trace 里如实还原(W1)。"""
+
+    def chat(self, user_input):
+        self.event_sink({"type": "stage", "status": "start", "name": "react"})
+        self.event_sink({"type": "tool_call", "name": "query_order", "args": {}})
+        self.event_sink({"type": "tool_result", "content": '{"success": true}'})
+        self.event_sink({"type": "stage", "status": "end", "name": "react"})
+        return CustomerServiceResponse(
+            intent=IntentType.ORDER_QUERY, confidence=0.9,
+            reply="已发货", requires_human=False, follow_up_question=None,
+        )
+
+
+def test_streaming_stage_events_reach_tracer_nested(tmp_path):
+    tracer, store = _tracer(tmp_path)
+    events = list(run_agent_streaming(_StagedAgent(), "查订单", tracer=tracer,
+                                      session_id="sess1"))
+    assert [e["type"] for e in events][-1] == "done"
+
+    trace_id = store.recent_traces()[0]["trace_id"]
+    detail = store.get_trace(trace_id)
+    by_name = {s["name"]: s for s in detail["spans"]}
+    react = by_name["stage:react"]
+    tool_span = by_name["tool:query_order"]
+    assert react["kind"] == "stage"
+    assert react["latency_ms"] >= 0
+    assert tool_span["parent_span_id"] == react["span_id"]
