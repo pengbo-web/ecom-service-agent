@@ -9,7 +9,7 @@ from app.agent.tools.logistics import query_logistics
 from app.agent.tools.refund import apply_refund
 from app.agent.tools.knowledge import search_knowledge
 from app.agent.tools.user_orders import list_user_orders
-from app.agent.tools.memory_tool import recall_user_memory, save_user_memory
+from app.agent.tools.memory_tool import recall_user_memory, save_user_memory, VALID_CATEGORIES
 from app.agent.tools.skill_tool import load_skill, read_skill_file
 from app.config.settings import settings
 from app.agent.tools.bargain import negotiate_price
@@ -35,6 +35,13 @@ from app.agent.tools.cart import add_to_cart, view_cart
 # 模型于是根本看不到新 kind,是这份 schema 本身该被治好的病,不是把新名字
 # 再补进这份快照(下一次新增第七个 kind 会原样重演)。
 _OPPORTUNITY_KIND_HINT = "、".join(f"{k}({v})" for k, v in OPPORTUNITY_KINDS.items())
+
+# save_user_memory 的 category 参数取值说明,同样从 VALID_CATEGORIES 派生而不是
+# 抄一份枚举——这里以前是写死的 `enum: [...]`,那份快照与 memory_tool.py 的
+# VALID_CATEGORIES 各自维护,新增一个类别只会改到后者,前者悄悄过期,模型
+# 因此看不到新类别、也造不出对应的调用参数。现在改成从权威表渲染文字,
+# 新增类别只需要改 memory_tool.py 这一处。
+_MEMORY_CATEGORY_HINT = "、".join(f"{k}={v}" for k, v in VALID_CATEGORIES.items())
 
 _TOOL_MAP: dict[str, Callable] = {
     "query_order": query_order,
@@ -228,8 +235,7 @@ TOOL_DEFINITIONS: list[dict] = [
                     },
                     "category": {
                         "type": "string",
-                        "enum": ["identity", "preference", "behavior", "issue", "other"],
-                        "description": "事实类别：identity=身份/会员，preference=偏好，behavior=行为习惯，issue=问题记录，other=其他",
+                        "description": f"事实类别，取值: {_MEMORY_CATEGORY_HINT}",
                     },
                 },
                 "required": ["content"],

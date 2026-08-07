@@ -3,6 +3,7 @@
 from datetime import datetime
 
 from app.agent.memory.manager import MemoryManager
+from app.agent.tools import memory_tool
 from app.agent.tools.memory_tool import recall_user_memory, save_user_memory, set_memory_manager
 from app.agent.tools.registry import TOOL_DEFINITIONS, execute_tool
 from app.multi_agent.agents import AGENT_CONFIGS
@@ -70,6 +71,25 @@ def test_registered_in_registry_and_common_tools(tmp_path):
     _manager(tmp_path)
     out = execute_tool("save_user_memory", {"content": "用户偏好蓝色", "category": "preference"})
     assert '"success": true' in out.lower() or "true" in out.lower()
+
+
+def test_save_user_memory_schema_has_no_frozen_category_enum():
+    """回归测试:category 参数的 schema 曾经是一份手抄的 enum 快照
+    (identity/preference/behavior/issue/other),与 memory_tool.VALID_CATEGORIES
+    各自维护,新增一个类别只会改到后者,前者悄悄过期——模型于是看不到新类别。
+    断言①category 参数不带 enum;②VALID_CATEGORIES 的每一个 key 都出现在
+    渲染后的 description 里(说明取值说明是从权威表算出来的,不是另一份手抄
+    文本)。真正的合法性兜底仍然只在 save_user_memory 里对着此刻的
+    VALID_CATEGORIES 判定(非法类别落回 other),不是对着一份 schema 快照——
+    谁再往这个 schema 里加回一份写死的 category 列表,这条测试就会失败。"""
+    spec = next(d for d in TOOL_DEFINITIONS if d["function"]["name"] == "save_user_memory")
+    category_prop = spec["function"]["parameters"]["properties"]["category"]
+    assert "enum" not in category_prop, "save_user_memory 的 category 参数不该再带 enum 快照"
+    rendered = category_prop["description"]
+    for k in memory_tool.VALID_CATEGORIES:
+        assert k in rendered, (
+            f"category 的 description 里没提到类别「{k}」,"
+            "取值说明看起来没有真的从 VALID_CATEGORIES 派生")
 
 
 def test_prompts_carry_usage_and_negative_guidance():

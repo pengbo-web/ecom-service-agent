@@ -52,7 +52,18 @@ def recall_user_memory(query: str = "") -> dict:
     return result
 
 
-_VALID_CATEGORIES = {"identity", "preference", "behavior", "issue", "other"}
+# 合法的记忆类别及其含义,是这份口径唯一的权威来源。以前 registry.py 的
+# save_user_memory 工具 schema 里还抄了一份 `enum: [...]` 快照给模型看,
+# 新增/改名一个类别时那份快照没人记得同步,模型于是根本看不到新类别——
+# 与 growth.py 的 OPPORTUNITY_KINDS 同一种病,治法也一样:registry.py 从
+# 这里把说明文字派生进 description,不再维护第二份名单。
+VALID_CATEGORIES: dict[str, str] = {
+    "identity": "身份/会员",
+    "preference": "偏好",
+    "behavior": "行为习惯",
+    "issue": "问题记录",
+    "other": "其他",
+}
 
 
 def save_user_memory(content: str = "", category: str = "other") -> dict:
@@ -68,7 +79,7 @@ def save_user_memory(content: str = "", category: str = "other") -> dict:
     if not content:
         return {"success": False, "error": "记忆内容不能为空"}
     content = content[:200]
-    if category not in _VALID_CATEGORIES:
+    if category not in VALID_CATEGORIES:
         category = "other"
 
     try:
