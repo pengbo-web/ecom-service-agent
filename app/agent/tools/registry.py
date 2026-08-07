@@ -22,10 +22,19 @@ from app.agent.tools.shop_analytics import (
 )
 from app.agent.tools.anomaly import anomaly_scan
 from app.agent.tools.growth import (
-    find_opportunities, draft_outreach, list_outreach_drafts_tool,
+    find_opportunities, draft_outreach, list_outreach_drafts_tool, OPPORTUNITY_KINDS,
 )
 from app.agent.tools.reviews import review_insights
 from app.agent.tools.cart import add_to_cart, view_cart
+
+# find_opportunities/draft_outreach 的 kind 参数取值说明,从 OPPORTUNITY_KINDS
+# 派生而不是抄一份枚举——与 `build_tool_hint`(app.agent.skills.synthesizer)
+# 把工具清单渲染进 prompt 是同一手法:文字直接算自权威表,新增/改名一个 kind
+# 只需要改 growth.py 这一处,这里的 schema 描述自动跟着变。之前这里是写死的
+# `enum: [...]`——那份快照在 growth.py 新增两个 kind 之后没人记得同步,
+# 模型于是根本看不到新 kind,是这份 schema 本身该被治好的病,不是把新名字
+# 再补进这份快照(下一次新增第七个 kind 会原样重演)。
+_OPPORTUNITY_KIND_HINT = "、".join(f"{k}({v})" for k, v in OPPORTUNITY_KINDS.items())
 
 _TOOL_MAP: dict[str, Callable] = {
     "query_order": query_order,
@@ -495,14 +504,12 @@ TOOL_DEFINITIONS.extend([
         "type": "function",
         "function": {
             "name": "find_opportunities",
-            "description": "【营销增长专用】按类型查找被漏掉的成交机会。kind: stale_pending_order(已付款待发货,下单后久未推进) / unpaid_order(下单未支付,催付款) / abandoned_cart(加购未下单,弃单挽回) / stalled_bargain(议价未成交) / consulted_no_order(咨询过没下单)。只读。",
+            "description": f"【营销增长专用】按类型查找被漏掉的成交机会。kind 取值: {_OPPORTUNITY_KIND_HINT}。只读。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "kind": {"type": "string",
-                             "enum": ["stale_pending_order", "unpaid_order", "abandoned_cart",
-                                      "stalled_bargain", "consulted_no_order"],
-                             "description": "商机类型"},
+                             "description": f"商机类型,取值: {_OPPORTUNITY_KIND_HINT}"},
                     "window_days": {"type": "integer", "description": "回看天数，默认 14"},
                     "limit": {"type": "integer", "description": "最多返回条数，默认 20"},
                 },
@@ -521,8 +528,7 @@ TOOL_DEFINITIONS.extend([
                     "user_id": {"type": "string", "description": "目标买家的 user_id"},
                     "content": {"type": "string", "description": "触达话术正文，简短口语，3 句以内"},
                     "kind": {"type": "string",
-                             "enum": ["stale_pending_order", "unpaid_order", "abandoned_cart",
-                                      "stalled_bargain", "consulted_no_order"]},
+                             "description": f"商机类型,取值: {_OPPORTUNITY_KIND_HINT}"},
                     "order_id": {"type": "string", "description": "相关订单号（如有）"},
                     "reason": {"type": "string", "description": "为什么触达这个人（给店主看的理由）"},
                     "offer_note": {"type": "string", "description": "建议的优惠说明（不是承诺，需店主确认）"},

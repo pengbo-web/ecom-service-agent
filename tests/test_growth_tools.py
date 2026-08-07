@@ -354,3 +354,27 @@ def test_list_drafts_tool(db):
     growth.draft_outreach(user_id="u1", content="a", kind="stale_pending_order")
     out = growth.list_outreach_drafts_tool(status="draft")
     assert out["success"] is True and out["count"] == 1
+
+
+def test_find_opportunities_and_draft_outreach_schema_have_no_frozen_kind_enum():
+    """回归测试:kind 参数的 schema 曾经是一份手抄的 enum 快照,新增两个 kind
+    (shipped_no_care/delivered_no_review)之后这份快照没跟着变,模型因此根本
+    看不到新 kind——这正是本次要治好的病。断言①两个工具的 kind 参数都不带
+    enum;②OPPORTUNITY_KINDS 的每一个 key 都出现在渲染后的 description 里
+    (说明取值说明是从权威表算出来的,不是另一份手抄文本)。谁再往这两个 schema
+    里加回一份写死的 kind 列表,这条测试就会失败。真正的合法性校验仍然只在
+    `growth._validate_kind`——它对着此刻的 OPPORTUNITY_KINDS 判定,不是对着
+    一份 schema 快照。"""
+    from app.agent.tools import registry
+
+    for tool_name in ("find_opportunities", "draft_outreach"):
+        spec = next(d for d in registry.TOOL_DEFINITIONS
+                    if d["function"]["name"] == tool_name)
+        kind_prop = spec["function"]["parameters"]["properties"]["kind"]
+        assert "enum" not in kind_prop, (
+            f"{tool_name} 的 kind 参数不该再带 enum 快照")
+        rendered = kind_prop["description"] + spec["function"]["description"]
+        for k in growth.OPPORTUNITY_KINDS:
+            assert k in rendered, (
+                f"{tool_name} 的 description 里没提到 kind「{k}」,"
+                "取值说明看起来没有真的从 OPPORTUNITY_KINDS 派生")
