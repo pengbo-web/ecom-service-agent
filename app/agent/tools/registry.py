@@ -526,6 +526,17 @@ TOOL_DEFINITIONS.extend([
                     "order_id": {"type": "string", "description": "相关订单号（如有）"},
                     "reason": {"type": "string", "description": "为什么触达这个人（给店主看的理由）"},
                     "offer_note": {"type": "string", "description": "建议的优惠说明（不是承诺，需店主确认）"},
+                    "coupon_code": {
+                        "type": "string",
+                        "description": (
+                            "建议随这条草稿附带发放的优惠券码。必须是本店真实在售的券码"
+                            "（可用 query_coupons 查到的 code）——填一个编造的码不会让它变成真的券，"
+                            "店主批准时系统会校验，未知码会被拒绝发放。写在这里只是【建议】，"
+                            "不会立即生效：只有店主在工作台点击批准后才会真正发放这张券。"
+                            "在与买家的对话里，绝不能说「送您一张券」或类似已发放的措辞——"
+                            "此刻券还没有发出去，也可能因未通过审批/校验而永远不会发出去。"
+                        ),
+                    },
                 },
                 "required": ["user_id", "content", "kind"],
             },
