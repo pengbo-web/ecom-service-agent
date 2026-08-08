@@ -179,6 +179,11 @@ class Settings(BaseSettings):
     session_store_backend: str = "file"
     redis_url: str = "redis://localhost:6379/0"
     session_ttl: int = 2592000   # redis 热会话过期(秒,默认30天),每次访问续期;另有 SQLite 持久快照永久兜底
+    # R1.x 容灾:Redis 连接失败/超时后的退避冷却秒数——冷却期内每次 load/save/
+    # delete 直接跳过 Redis 走本地文件兜底,不重复承担一次连接超时;冷却期一过
+    # 下次调用自动重新尝试连 Redis(不是永久开关)。见 app/session/store.py
+    # RedisSessionStore。几秒即可:既躲开单次故障被反复摞超时,又不拖慢恢复后的切回。
+    session_store_redis_retry_cooldown_s: float = 5.0
     checkpoint_enabled: bool = True   # R2 步级 checkpoint:每工具步落盘,回合中途崩溃可恢复
     session_lock_ms: int = 30000      # R4 分布式会话锁超时(毫秒),防持有者崩溃后死锁
     archive_enabled: bool = True      # R5 会话结束/回收时冷归档到 SQLite(审计/离线分析)
