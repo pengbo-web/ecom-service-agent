@@ -283,11 +283,31 @@ class Settings(BaseSettings):
 
     # L3①:查询理解(QU)与知识召回(KB)并发发起——QU 判需要的是"这轮该不该
     # 检索、检索什么",但检索只需要原句就能先跑;两者并发,用原句先起一次
-    # KB 检索,QU 出结果后按 need_kb/kb_query 决定复用/丢弃/二次检索(见
-    # app/multi_agent/orchestrator.py `_understand_and_prefetch`)。
+    # KB 检索,QU 出结果后按 need_kb 决定复用还是丢弃(见
+    # app/multi_agent/orchestrator.py `_submit_kb_prefetch`)。
     # 关=完全回退老串行路径(QU 先跑完,KB 检索在 react 第一步才起),逐字节
     # 一致,用于对比测量或怀疑并发引入问题时快速回退。
+    #
+    # R1(本轮):复用条件从"改写后的 kb_query 与预取 query 逐字节相同"改成
+    # "need_kb=True 就复用"——旧条件实际几乎永不成立,后果是每轮**两次**阻塞
+    # 检索(预取那次白算,现场再等一次完整的 ApeRAG 往返)。实测证据与召回
+    # 差异论证见 .superpowers/sdd/r1-report.md。
     qu_recall_concurrent_enabled: bool = True
+
+    # R1:并发预取的检索 query 是否按最近一条买家话做**零 LLM** 的上下文补全。
+    # 背景:预取发生在 QU 之前,拿不到 QU 改写后的自包含 kb_query,只能用原句;
+    # 而"那运费呢?""多久之内有效?"这类指代/省略型追问,原句本身几乎不携带
+    # 可检索的语义——实测(见 r1-report.md)这类用例上"原句检索"与"改写后检索"
+    # 的命中集合 Jaccard 低至 0.0,而把上一条买家话拼在前面(纯字符串拼接,
+    # 零 LLM、零额外延迟)就能把同一用例拉回 1.0。
+    # 只对"短 + 含指示/人称代词"的句子生效(见 orchestrator._prefetch_query),
+    # 自包含句一律用原句——实测拼错了是真的会伤:自包含的"退货运费谁出"原句
+    # 召回本来就与改写后完全一致(Jaccard=1.0),硬拼上不相关的上一轮话题后
+    # 掉到 0.0。所以判据取窄不取宽,宁漏勿错杀(漏了=退回原句,不会更差)。
+    # 关=预取一律用原句(R1 之前的行为),用于对比测量。
+    qu_recall_prefetch_context_enabled: bool = True
+    # 触发上下文补全的原句长度上限(字符);超过这个长度视为自包含,不补全。
+    qu_recall_prefetch_context_max_chars: int = 12
 
     # L3②:app/agent/understanding.py 规则快筛表的"扩展规则"总开关——覆盖
     # 原有 4 条之外新增的高频无歧义短句规则(订单查询/议价/商品信息类零检索

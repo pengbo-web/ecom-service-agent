@@ -162,14 +162,33 @@ class EcomAgent:
         self._turn_qu = qu
 
     def set_turn_kb_prefetch_future(self, query: str, future) -> None:
-        """L3①:orchestrator 提交的 KB 并发预取任务——`future` 是用**原始用户
-        输入**发起的检索任务的 concurrent.futures.Future(此刻可能还没跑完)。
+        """L3①/R1:orchestrator 提交的 KB 并发预取任务——`future` 是那次检索的
+        concurrent.futures.Future(此刻可能还没跑完),`query` 是它**实际用来
+        检索的那个 query**(见 MultiAgentOrchestrator._prefetch_query:通常是
+        买家原句;短的指代型追问会被零 LLM 地拼上最近一条买家话)。
 
         存的是 Future 本身,不在这里阻塞等结果——真正调用 `future.result()`
-        (可能阻塞)推迟到 `_build_messages` 判定"这次要用的检索 query 与预取
-        时完全相同"之后才做(见 `_build_messages`);不相同则这个 Future 会被
-        原样丢弃(不 cancel,让它在后台自然跑完退出,不影响正确性,只是白算
-        了一次——成本记在报告里),现场按改写后的 kb_query 重新检索一次。"""
+        (可能阻塞)推迟到 `_build_messages` 真正需要检索结果的那一刻。
+
+        **R1 起的复用契约(与之前不同,改了要连这段一起改)**:预取一旦提交,
+        它就是本轮**唯一一次**检索。`_build_messages` 只按查询理解的 `need_kb`
+        决定用还是丢:
+          - need_kb=True  → 直接复用这批行(哪怕 QU 把 kb_query 改写成了别的
+            句子,也不再为改写后的 query 补一次阻塞检索);若预取时的 query 与
+            QU 最终的 kb_query 不同,发一条 `kb_prefetch_reused` 事件如实记录
+            "注入的知识是按哪个 query 检出来的",不静默替换。
+          - need_kb=False → 丢弃,**绝不注入**(门控语义优先于这次优化),并发
+            一条 `kb_prefetch_discarded` 事件留痕。
+          - Future 结果为 None(预取本身失败/早退)→ 本轮无知识注入,同样发
+            `kb_prefetch_discarded` 留痕,**不**回退现场补检索。
+        丢弃时不 cancel,让它在后台自然跑完退出(不影响正确性)。
+
+        为什么不再按"kb_query 与预取 query 逐字节相同"才复用:那个条件实际
+        几乎永不成立(QU 几乎总会改写措辞),后果是每轮**两次**阻塞检索——
+        预取那次白算,买家还要再等一次完整的 ApeRAG 往返(实测这一段占首字
+        延迟 11.8s)。改写带来的召回差异是真实的但有界,且已用零 LLM 的
+        `_prefetch_query` 上下文补全把差距最大的那一类(指代型追问)补回来。
+        完整的实测数据与取舍论证见 `.superpowers/sdd/r1-report.md`。"""
         self._turn_kb_prefetch = (query, future)
 
     def set_turn_progress_gate(self, gate) -> None:
@@ -212,10 +231,14 @@ class EcomAgent:
         gate.emit(self._emit, stage, domain)
 
     def clear_turn_kb_prefetch(self) -> None:
-        """orchestrator 在"本轮不复用预取"的每一条分支都必须显式调用这个方法
-        (而不是放着不管)——否则上一轮残留的 (query, rows, backend) 会被
-        `_build_messages` 的字符串匹配误当成本轮的检索结果复用,是一类真实的
-        跨轮泄漏(与 memory 工具 manager 每轮刷新是同一类教训)。"""
+        """orchestrator 在"本轮没有提交预取"的每一条分支(关并发开关/QU 关闭/
+        原句过短/总开关关)都必须显式调用这个方法,而不是放着不管。
+
+        R1 之后这条纪律比以前更要紧:复用不再要求"query 逐字节相同",上一轮
+        残留的 (query, Future) 会被本轮**无条件**当成自己的检索结果用掉——
+        以前那道字符串相等的门顺带挡住了一部分跨轮泄漏,现在它没了,唯一的
+        防线就是 orchestrator 每轮显式覆盖或清空(与 memory 工具 manager 每轮
+        刷新是同一类教训)。"""
         self._turn_kb_prefetch = None
 
     def set_turn_stream_eligible(self, eligible: bool) -> None:
@@ -993,34 +1016,62 @@ class EcomAgent:
             include_kb = qu.need_kb if qu is not None else True
             recall_query = (qu.kb_query if qu is not None and qu.kb_query else last_user)
             domain = qu.domain if qu is not None else None
-            # L3①:orchestrator 并发预取的 KB 检索 Future——只有当预取时用的
-            # query 与本轮**最终**要用的检索 query(recall_query,可能已被 QU
-            # 改写)完全相同,才认为可以直接复用(不是"差不多"就用,是逐字
-            # 相等才用);否则原样丢弃(不 cancel,让它自然跑完退出),走下面
-            # else 分支现场检索——与老串行行为完全一致,不冒充结果。
+            # L3①/R1:orchestrator 并发预取的 KB 检索 Future。**契约见
+            # set_turn_kb_prefetch_future 的文档**——预取一旦提交,它就是本轮
+            # 唯一一次检索,这里只按 need_kb 决定用还是丢,不再为"QU 把 query
+            # 改写过"补一次阻塞检索(那正是"一轮两次检索、首字多等一整个
+            # ApeRAG 往返"的根因)。
             # 只在这一刻才真正阻塞等待(`.result()`)——到这里之前 FAQ 缓存
             # 查询/技能预加载等已经花掉了一些挂钟时间,这段时间与并发检索
             # 天然重叠,真正需要等待的窗口因此被压缩,而不是从头到尾白等。
             _pf = self._turn_kb_prefetch
             kb_prefetch = None
-            if include_kb and _pf is not None and _pf[0] == recall_query:
+            prefetch_failed = False
+            if _pf is not None and not include_kb:
+                # 门控说本轮不需要知识(闲聊/纯订单操作):预取的行**绝不注入**。
+                # 门控语义优先于这次并发优化——这条是任务的硬约束,不是偏好。
+                # 丢弃必须留痕(fail-soft 留痕约束):正因为过去丢弃是静默的,
+                # "复用条件几乎永不成立"这个缺陷才活到今天没人发现。
+                self._emit({"type": "kb_prefetch_discarded", "reason": "need_kb_false",
+                            "intent": (qu.intent if qu is not None else None),
+                            "prefetch_query": _pf[0]})
+            elif _pf is not None:
                 try:
                     fetched = _pf[1].result()
                 except Exception:
                     fetched = None   # Future 里的任务已自行 fail-soft;这里再兜一层防御
                 if fetched is not None:
-                    kb_prefetch = fetched   # (rows, backend)
-                # fetched is None:预取本就判定"这轮不会检索"(见 kb_fetch_rows
-                # 的早退分支)或取行失败——kb_prefetch 留 None,走下面现场检索,
-                # 它会按同样的门控再判一次,结论必然一致,不会因此多注入内容。
-            if kb_prefetch is None and include_kb:
-                # 没有可复用的预取(未开并发 / kb_query 改写导致不一致 / 未命中):
-                # 这一步即将真正发起一次(可能是本轮唯一一次)KB 检索,如实上报
-                # "正在检索"这个阶段——不是猜,是这行代码接下来确实要做的事。
+                    kb_prefetch = fetched   # (rows, backend[, meta])
+                    if _pf[0] != recall_query:
+                        # 复用了"按预取 query 检出来的行",而本轮 QU 最终认定的
+                        # 检索 query 是另一个——不静默替换,如实记一条,Langfuse
+                        # 里能直接看到"这轮注入的知识是按哪个 query 检出来的"。
+                        self._emit({"type": "kb_prefetch_reused",
+                                    "prefetch_query": _pf[0],
+                                    "final_query": recall_query})
+                else:
+                    # 预取失败/早退:本轮无知识注入,**不**回退现场补检索——
+                    # 与全局约束"检索失败必须保持非致命:买家仍然拿到回复,
+                    # 只是这一轮没有知识注入"一致,也保证了"一轮至多一次检索"。
+                    prefetch_failed = True
+                    self._emit({"type": "kb_prefetch_discarded",
+                                "reason": "prefetch_failed",
+                                "prefetch_query": _pf[0]})
+            if kb_prefetch is None and include_kb and not prefetch_failed:
+                # 没有预取可用(关并发开关 / QU 关闭 / 裸引擎):这一步即将真正
+                # 发起一次(本轮唯一一次)KB 检索,如实上报"正在检索"这个阶段
+                # ——不是猜,是这行代码接下来确实要做的事。有预取时这条不会发,
+                # orchestrator 提交预取时已经发过一条,买家因此只看到一次。
                 self._emit_progress("retrieving", domain)
+            # prefetch_failed 时用 include_kb=False 调用:让 KB 源直接留空,而不是
+            # 在召回层里现场补一次检索(那就是第二次阻塞检索)。返回后把 backend
+            # 从 "skipped" 改标成 "unavailable"——门控主动跳过与检索真的失败是
+            # 两回事,观测/前端不该把两者混为一谈。
             rr = build_recall_sections(self.memory_manager, recall_query,
-                                       include_kb=include_kb,
+                                       include_kb=include_kb and not prefetch_failed,
                                        kb_domain=domain, kb_prefetch=kb_prefetch)
+            if prefetch_failed:
+                rr.kb_backend = "unavailable"
             self._turn_recall = (last_user, rr)
             if rr.kb_hits:   # 命中才发正常事件(前端思考面板+tracer 各消费一次)
                 self._emit({"type": "recall", "source": "kb", "backend": rr.kb_backend,

@@ -63,7 +63,14 @@ def build_recall_sections(memory_manager, query: str | None,
     (kb_format),不再重新发起检索请求——与直接调 kb_recall(query, kb_domain)
     相比,只是把"取行"这一步挪到了更早、并发的时间点,格式化尾部代码完全
     共用,因此两条路径在同一 query 下产出逐字节一致(不改变检索结果,只改
-    变检索发起的时间点)。None(默认)= 老行为,现场调 kb_recall。"""
+    变检索发起的时间点)。None(默认)= 老行为,现场调 kb_recall。
+
+    R1 补充:当本轮的并发预取**已经发起过**一次检索但没拿到结果(失败/早退)
+    时,调用方(EcomAgent._build_messages)会用 include_kb=False 调本函数并在
+    返回后把 kb_backend 改标为 "unavailable"——既不能用 kb_prefetch(没有行),
+    也**不能**在这里现场再检索一次(那就是第二次阻塞检索,正是 R1 要消灭的
+    东西),按全局约束"检索失败保持非致命:买家仍然拿到回复,只是这一轮没有
+    知识注入"处理。"""
     result = RecallResult()
     memory_on = memory_manager is not None and getattr(memory_manager, "memory_enabled", False)
     if memory_on:

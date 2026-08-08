@@ -190,16 +190,21 @@ def test_prefetch_does_not_block_understand_call(tmp_path, monkeypatch):
     assert route_elapsed < 1.0, "route 事件不该等 KB 检索释放才发出(说明被卡住了)"
 
 
-def test_kb_query_rewrite_falls_back_to_fresh_retrieval(tmp_path, monkeypatch):
-    """kb_query 与原句不同(QU 改写生效)时,预取(按原句取到的行)不能被冒充
-    复用——必须现场按 kb_query 重新检索一次,内容与老串行路径完全一致。"""
+def test_kb_query_rewrite_no_longer_triggers_a_second_retrieval(tmp_path, monkeypatch):
+    """R1 契约变更(与改造前相反,故意的):kb_query 与预取 query 不同时,
+    **不再**现场补一次阻塞检索——预取的行被直接复用,并发一条 kb_prefetch_reused
+    事件如实记录"注入的知识是按哪个 query 检出来的"。
+
+    改造前这里断言的是"必须现场重新检索一次";那个条件在生产里几乎每轮都
+    成立(QU 几乎总会改写措辞),等于每轮两次阻塞检索、首字多等一整个 ApeRAG
+    往返(实测 11.8s)。取舍论证见 .superpowers/sdd/r1-report.md。"""
     monkeypatch.setattr(settings, "query_understanding_enabled", True)
     monkeypatch.setattr(settings, "qu_recall_concurrent_enabled", True)
     qu = QueryUnderstanding(domain="aftersale", intent="政策咨询",
                             need_kb=True, kb_query="退货运费谁承担", source="llm")
     monkeypatch.setattr("app.agent.understanding.understand", _fixed_understand(qu))
 
-    raw_rows = [{"doc": "错误的原句检索结果", "section": "x", "score": 0.9, "text": "不该被用到"}]
+    raw_rows = [{"doc": "原句预取结果", "section": "x", "score": 0.9, "text": "按原句检出来的"}]
     monkeypatch.setattr("app.agent.recall.kb.kb_fetch_rows", _fixed_kb_fetch(raw_rows))
 
     import app.agent.recall.service as svc
@@ -207,12 +212,180 @@ def test_kb_query_rewrite_falls_back_to_fresh_retrieval(tmp_path, monkeypatch):
 
     def fake_kb_recall(query, domain=None):
         fresh_calls.append(query)
-        return KbRecall(section="【平台知识(自动检索)】改写后的正确结果", hits=[{"doc": "d", "section": "s", "score": 1.0}])
+        return KbRecall(section="【平台知识(自动检索)】第二次检索的结果",
+                        hits=[{"doc": "d", "section": "s", "score": 1.0}])
     monkeypatch.setattr(svc, "kb_recall", fake_kb_recall)
 
     o = _orch(tmp_path, monkeypatch)
+    events = []
+    o.event_sink = events.append
     o.chat("那运费呢?")   # 原句与 kb_query("退货运费谁承担")不同
 
-    assert fresh_calls == ["退货运费谁承担"]   # 现场重新检索,而不是复用原句预取的"不该被用到"
+    assert fresh_calls == []   # 关键:没有第二次检索
     rr = o.engine._turn_recall[1]
-    assert "改写后的正确结果" in rr.sections[0]["content"]
+    assert "按原句检出来的" in rr.sections[0]["content"]
+    reused = [e for e in events if e.get("type") == "kb_prefetch_reused"]
+    assert len(reused) == 1
+    assert reused[0]["final_query"] == "退货运费谁承担"
+    assert reused[0]["prefetch_query"] != "退货运费谁承担"   # 复用的确实是另一个 query 的结果
+
+
+# ---- R1:用打桩的检索客户端数"这一轮到底对检索服务发了几次调用" ----
+#
+# 打桩打在 app.agent.recall.external_kb.aperag_search 上(kb_backend="aperag"),
+# 也就是**真正发 HTTP 的那一层**——不是打在更上面的 kb_recall/kb_fetch_rows 上。
+# 这样数出来的就是验收口径里那个"对 ApeRAG 的调用次数",预取那条链路和现场
+# 检索那条链路都必然经过它,谁也绕不过去。
+
+def _count_aperag(monkeypatch, rows=None, boom=False):
+    """把 aperag_search 换成计数桩,返回记录调用 query 的 list。"""
+    calls: list[str] = []
+    payload = rows if rows is not None else [
+        {"doc": "退换货政策", "section": "运费", "score": 0.9, "text": "签收7天内可退"}]
+
+    def _stub(query):
+        calls.append(query)
+        if boom:
+            raise RuntimeError("aperag down")
+        return payload
+
+    monkeypatch.setattr("app.agent.recall.external_kb.aperag_search", _stub)
+    monkeypatch.setattr(settings, "kb_backend", "aperag")
+    monkeypatch.setattr(settings, "kb_local_fallback_enabled", False)
+    monkeypatch.setattr(settings, "recall_kb_enabled", True)
+    monkeypatch.setattr(settings, "recall_kb_min_query_chars", 4)
+    monkeypatch.setattr(settings, "query_understanding_enabled", True)
+    return calls
+
+
+_LONG_INPUT = "我买的洗衣机想退货运费要我出吗"
+
+
+def test_exactly_one_retrieval_call_per_turn_on_concurrent_path(tmp_path, monkeypatch):
+    """验收条款①:同一轮请求里对 ApeRAG 的调用次数 = 1(改造前是 2)。
+    场景取的正是"QU 改写了 query"这一最常见的情况——改造前这里必然是 2 次。"""
+    calls = _count_aperag(monkeypatch)
+    monkeypatch.setattr(settings, "qu_recall_concurrent_enabled", True)
+    qu = QueryUnderstanding(domain="aftersale", intent="政策咨询",
+                            need_kb=True, kb_query="退货运费谁承担", source="llm")
+    monkeypatch.setattr("app.agent.understanding.understand", _fixed_understand(qu))
+
+    o = _orch(tmp_path, monkeypatch, "one_call.json")
+    o.chat(_LONG_INPUT)
+
+    assert calls == [_LONG_INPUT], f"本轮检索调用应恰好 1 次(预取那次),实际:{calls}"
+    rr = o.engine._turn_recall[1]
+    assert rr.kb_hits, "复用的预取结果必须真的被注入,而不是既省了检索也省掉了知识"
+
+
+def test_need_kb_false_injects_nothing_and_leaves_a_trace(tmp_path, monkeypatch):
+    """门控语义不能被这次优化破坏:need_kb=False 时预取结果**绝不注入**,
+    且丢弃必须留痕(fail-soft 留痕约束)。"""
+    calls = _count_aperag(monkeypatch)
+    monkeypatch.setattr(settings, "qu_recall_concurrent_enabled", True)
+    qu = QueryUnderstanding(domain="presale", intent="闲聊寒暄", need_kb=False, source="llm")
+    monkeypatch.setattr("app.agent.understanding.understand", _fixed_understand(qu))
+
+    o = _orch(tmp_path, monkeypatch, "no_kb.json")
+    events = []
+    o.event_sink = events.append
+    o.chat(_LONG_INPUT)
+
+    rr = o.engine._turn_recall[1]
+    assert rr.kb_hits == []
+    assert rr.kb_backend == "skipped"
+    assert not any("平台知识" in s.get("content", "") for s in rr.sections), \
+        "门控判定本轮不需要知识,预取的行一个字都不能进 prompt"
+    discarded = [e for e in events if e.get("type") == "kb_prefetch_discarded"]
+    assert len(discarded) == 1
+    assert discarded[0]["reason"] == "need_kb_false"
+    assert discarded[0]["intent"] == "闲聊寒暄"
+    # 预取那次调用仍然发生过(它提交在 QU 出结果之前,这是并发的代价,不是缺陷)
+    assert len(calls) == 1
+
+
+def test_switch_off_falls_back_to_serial_single_retrieval(tmp_path, monkeypatch):
+    """总开关关掉:回到串行——没有预取,现场按 QU 改写后的 kb_query 检索一次,
+    仍然只有 1 次调用,且用的是改写后的 query(串行路径的召回质量不受影响)。"""
+    calls = _count_aperag(monkeypatch)
+    monkeypatch.setattr(settings, "qu_recall_concurrent_enabled", False)
+    qu = QueryUnderstanding(domain="aftersale", intent="政策咨询",
+                            need_kb=True, kb_query="退货运费谁承担", source="llm")
+    monkeypatch.setattr("app.agent.understanding.understand", _fixed_understand(qu))
+
+    o = _orch(tmp_path, monkeypatch, "serial_one.json")
+    o.chat(_LONG_INPUT)
+
+    assert calls == ["退货运费谁承担"], f"串行路径应只检索一次且用改写后的 query,实际:{calls}"
+    assert o.engine._turn_kb_prefetch is None
+    assert o.engine._turn_recall[1].kb_hits
+
+
+def test_prefetch_failure_yields_no_injection_and_no_second_retrieval(tmp_path, monkeypatch):
+    """预取失败 → 这一轮没有知识注入(全局约束:检索失败保持非致命),
+    但**不能**因此现场补一次检索(那就是第二次阻塞检索);失败必须留痕。"""
+    calls = _count_aperag(monkeypatch, boom=True)
+    monkeypatch.setattr(settings, "qu_recall_concurrent_enabled", True)
+    qu = QueryUnderstanding(domain="aftersale", intent="政策咨询",
+                            need_kb=True, kb_query="退货运费谁承担", source="llm")
+    monkeypatch.setattr("app.agent.understanding.understand", _fixed_understand(qu))
+
+    o = _orch(tmp_path, monkeypatch, "pf_fail.json")
+    events = []
+    o.event_sink = events.append
+    result = o.chat(_LONG_INPUT)
+
+    assert len(calls) == 1, f"预取失败后不该再补一次检索,实际调用:{calls}"
+    rr = o.engine._turn_recall[1]
+    assert rr.kb_hits == []
+    assert rr.kb_backend == "unavailable"   # 与门控主动跳过的 "skipped" 区分开
+    discarded = [e for e in events if e.get("type") == "kb_prefetch_discarded"]
+    assert len(discarded) == 1
+    assert discarded[0]["reason"] == "prefetch_failed"
+    assert result is not None   # 买家仍然拿到回复,只是这一轮没有知识注入
+
+
+# ---- R1:预取 query 的零 LLM 上下文补全 ----
+
+class TestPrefetchQuery:
+    """`_prefetch_query`:预取发生在 QU 之前,拿不到改写后的 kb_query,只能用
+    原句;对指代/省略型短句补上最近一条买家话(纯字符串拼接,零 LLM)。"""
+
+    def _o(self, tmp_path, monkeypatch, history=()):
+        o = _orch(tmp_path, monkeypatch, "pq.json")
+        o.engine.raw_messages = list(history)
+        return o
+
+    def test_short_followup_gets_previous_user_turn_prepended(self, tmp_path, monkeypatch):
+        o = self._o(tmp_path, monkeypatch,
+                    [{"role": "user", "content": "我想退货"},
+                     {"role": "assistant", "content": "好的"}])
+        assert o._prefetch_query("那运费呢?") == "我想退货 那运费呢?"
+
+    def test_self_contained_long_sentence_is_left_alone(self, tmp_path, monkeypatch):
+        """自包含长句拼上不相关的上一轮话题只会污染向量查询,是净损失。"""
+        o = self._o(tmp_path, monkeypatch,
+                    [{"role": "user", "content": "我想买个吹风机有推荐吗"}])
+        q = "七天无理由退货是从签收当天开始算吗"
+        assert o._prefetch_query(q) == q
+
+    def test_first_turn_has_no_context_to_borrow(self, tmp_path, monkeypatch):
+        o = self._o(tmp_path, monkeypatch)
+        assert o._prefetch_query("那运费呢?") == "那运费呢?"
+
+    def test_switch_off_restores_raw_sentence_behaviour(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(settings, "qu_recall_prefetch_context_enabled", False)
+        o = self._o(tmp_path, monkeypatch, [{"role": "user", "content": "我想退货"}])
+        assert o._prefetch_query("那运费呢?") == "那运费呢?"
+
+    def test_prefetch_actually_retrieves_with_the_enriched_query(self, tmp_path, monkeypatch):
+        """端到端:补全后的 query 真的被送进了检索调用(不是算完就丢)。"""
+        calls = _count_aperag(monkeypatch)
+        monkeypatch.setattr(settings, "qu_recall_concurrent_enabled", True)
+        qu = QueryUnderstanding(domain="aftersale", intent="政策咨询",
+                                need_kb=True, kb_query="退货运费谁承担", source="llm")
+        monkeypatch.setattr("app.agent.understanding.understand", _fixed_understand(qu))
+        o = _orch(tmp_path, monkeypatch, "enriched.json")
+        o.engine.raw_messages = [{"role": "user", "content": "我想退货"}]
+        o.chat("那运费呢?")
+        assert calls == ["我想退货 那运费呢?"]

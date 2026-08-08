@@ -393,3 +393,78 @@ def test_concurrent_path_progress_never_regresses_with_real_react_loop(tmp_path,
     ranks = [STAGE_RANK[s] for s in stages]
     assert ranks == sorted(ranks), f"进度帧倒退: {stages}"
     assert "understanding" in stages and "generating" in stages
+
+
+# ---- R1:并发路径上 retrieving 只能出现一次 ----
+
+def test_retrieving_emitted_once_even_when_qu_rewrites_the_query(tmp_path, monkeypatch):
+    """验收条款②:进度帧里 `retrieving` 不再出现两次。
+
+    场景是生产里最常见的那一种——QU 把 kb_query 改写成了与原句不同的句子。
+    改造前:orchestrator 提交预取时发一条推测性 retrieving,随后 engine 因为
+    "预取 query 与 kb_query 不逐字节相同"判定预取不可复用、现场再检索一次,
+    于是又发一条 retrieving(单调门只吞"倒退",同阶段重复是放行的,见
+    test_stage_gate_allows_same_rank_repeat)——买家连着看到两次"正在检索"。
+    改造后预取被直接复用,engine 那条根本不会发。这里用**真实**的
+    _build_messages/_react_loop 跑完一整轮来断言,不是只测门本身。"""
+    monkeypatch.setattr(settings, "progress_events_enabled", True)
+    monkeypatch.setattr(settings, "query_understanding_enabled", True)
+    monkeypatch.setattr(settings, "qu_recall_concurrent_enabled", True)
+    monkeypatch.setattr(settings, "recall_kb_enabled", True)
+    monkeypatch.setattr(settings, "recall_kb_min_query_chars", 4)
+    qu = QueryUnderstanding(domain="aftersale", intent="政策咨询",
+                            need_kb=True, kb_query="退货运费谁承担", source="llm")
+    monkeypatch.setattr("app.agent.understanding.understand", lambda *a, **k: qu)
+    rows = [{"doc": "退换货政策", "section": "运费", "score": 0.9, "text": "签收7天内可退"}]
+    monkeypatch.setattr("app.agent.recall.kb.kb_fetch_rows", lambda q: (rows, "local"))
+
+    fake_msg = type("M", (), {"content": "ok", "tool_calls": None})()
+    fake_resp = type("R", (), {"choices": [type("C", (), {"message": fake_msg})()]})()
+
+    o = MultiAgentOrchestrator(session_path=str(tmp_path / "r1_once.json"), user_id="u1")
+    monkeypatch.setattr(o.engine, "_llm_create", lambda messages, use_tools: fake_resp)
+    o.engine.memory_manager.update_short_term = lambda *a, **k: None
+    o.engine._reply_pipeline.run = lambda *a, **k: a[3]
+
+    events = []
+    o.event_sink = events.append
+    o.chat("我买的洗衣机想退货运费要我出吗")   # 原句 != kb_query,改造前必然两条
+
+    stages = [e["stage"] for e in events if e["type"] == "progress"]
+    assert stages.count("retrieving") == 1, f"retrieving 出现了 {stages.count('retrieving')} 次: {stages}"
+    ranks = [STAGE_RANK[s] for s in stages]
+    assert ranks == sorted(ranks), f"进度帧倒退: {stages}"
+    assert stages == ["understanding", "retrieving", "generating"]
+
+
+def test_no_retrieving_progress_at_all_when_gate_says_no_kb(tmp_path, monkeypatch):
+    """need_kb=False 时预取仍被提交过(它先于 QU),所以推测性 retrieving 会有
+    一条;但 engine 绝不会再补第二条,而且这一轮一个字的知识都不会被注入。"""
+    monkeypatch.setattr(settings, "progress_events_enabled", True)
+    monkeypatch.setattr(settings, "query_understanding_enabled", True)
+    monkeypatch.setattr(settings, "qu_recall_concurrent_enabled", True)
+    monkeypatch.setattr(settings, "recall_kb_enabled", True)
+    monkeypatch.setattr(settings, "recall_kb_min_query_chars", 4)
+    qu = QueryUnderstanding(domain="presale", intent="闲聊寒暄", need_kb=False, source="llm")
+    monkeypatch.setattr("app.agent.understanding.understand", lambda *a, **k: qu)
+    rows = [{"doc": "退换货政策", "section": "运费", "score": 0.9, "text": "签收7天内可退"}]
+    monkeypatch.setattr("app.agent.recall.kb.kb_fetch_rows", lambda q: (rows, "local"))
+
+    fake_msg = type("M", (), {"content": "ok", "tool_calls": None})()
+    fake_resp = type("R", (), {"choices": [type("C", (), {"message": fake_msg})()]})()
+
+    o = MultiAgentOrchestrator(session_path=str(tmp_path / "r1_nokb.json"), user_id="u1")
+    monkeypatch.setattr(o.engine, "_llm_create", lambda messages, use_tools: fake_resp)
+    o.engine.memory_manager.update_short_term = lambda *a, **k: None
+    o.engine._reply_pipeline.run = lambda *a, **k: a[3]
+
+    events = []
+    o.event_sink = events.append
+    o.chat("你们家东西看着还挺不错的哈")
+
+    stages = [e["stage"] for e in events if e["type"] == "progress"]
+    assert stages.count("retrieving") == 1
+    ranks = [STAGE_RANK[s] for s in stages]
+    assert ranks == sorted(ranks), f"进度帧倒退: {stages}"
+    rr = o.engine._turn_recall[1]
+    assert not any("平台知识" in s.get("content", "") for s in rr.sections)

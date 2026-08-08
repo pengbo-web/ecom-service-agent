@@ -102,6 +102,7 @@ class MultiAgentOrchestrator:
             from app.agent import understanding
             self._turn_progress_gate.emit(self.event_sink, "understanding")   # L3③:如实上报——这一步真的要调 LLM 了
             kb_future = None
+            kb_query = None
             if settings.qu_recall_concurrent_enabled:
                 # L3①(关键):KB 预取只**提交**、不在这里等它跑完——真正的并发
                 # 收益来自"understand() 这一步同步跑的时候,KB 检索已经在另一
@@ -111,8 +112,9 @@ class MultiAgentOrchestrator:
                 # 它(阻塞等待)的时机推迟到 `_build_messages` 真正需要检索结果
                 # 的那一刻——这中间(FAQ 缓存查询/技能预加载等)本身也要花时间,
                 # 进一步稀释了需要等待的那一段。
-                kb_future = self._submit_kb_prefetch(user_input)
-                if kb_future is not None:
+                submitted = self._submit_kb_prefetch(user_input)
+                if submitted is not None:
+                    kb_query, kb_future = submitted
                     self._turn_progress_gate.emit(self.event_sink, "retrieving")   # 确实提交了才说"正在检索"
             # 用 self.client(streaming 层每轮注入的 TracingClient):QU 调用进当前 trace,
             # token/延迟完整入账;engine.client 在下面才被覆盖,用它会漏记首轮。
@@ -124,19 +126,20 @@ class MultiAgentOrchestrator:
         else:
             qu = None
             kb_future = None
+            kb_query = None
             key = self.router.route(user_input, self.engine.raw_messages)
         self._last_key = key
         if qu is not None and qu.domain is None:
             qu.domain = key          # 粘性解析结果回填:检索过滤拿到确定域
         self.engine.set_turn_understanding(qu)
-        # L3①:预取的 Future 是否可复用,交给 engine._build_messages 在**真正
-        # 需要检索结果的那一刻**按"最终检索 query 是否与预取时完全相同"精确
-        # 判定(见 EcomAgent.set_turn_kb_prefetch_future 的文档)——这里只负责
-        # 搬运,不阻塞。没有提交预取(关开关/QU 关闭/原句过短)时必须显式 clear,
-        # 不能让上一轮的 Future 残留在引擎上被误用(跨轮泄漏,见
-        # EcomAgent.clear_turn_kb_prefetch 的文档)。
+        # R1:预取一旦提交,它就是**本轮唯一一次**检索——engine._build_messages
+        # 在真正需要检索结果的那一刻消费它,只按 need_kb 决定用还是丢,不再按
+        # "kb_query 与预取 query 是否逐字节相同"决定要不要再检索一次(见
+        # EcomAgent.set_turn_kb_prefetch_future 的文档)。这里只负责搬运,不阻塞。
+        # 没有提交预取(关开关/QU 关闭/原句过短)时必须显式 clear,不能让上一轮
+        # 的 Future 残留在引擎上被误用(跨轮泄漏,见 clear_turn_kb_prefetch)。
         if kb_future is not None:
-            self.engine.set_turn_kb_prefetch_future(user_input, kb_future)
+            self.engine.set_turn_kb_prefetch_future(kb_query, kb_future)
         else:
             self.engine.clear_turn_kb_prefetch()
         profile = self.profiles.get(key) or next(iter(self.profiles.values()))
@@ -157,11 +160,64 @@ class MultiAgentOrchestrator:
         self.engine.client = self.client
         return self.engine.chat(user_input)
 
+    # R1:指代信号——命中任一即认为这句话"不自包含",光靠它自己检索几乎检不到
+    # 对的东西(实测见 .superpowers/sdd/r1-report.md)。只在**短句**上判(见
+    # settings.qu_recall_prefetch_context_max_chars),长句一律当自包含。
+    #
+    # 只收**指示代词/人称代词**,刻意不收"吗/呢/么"这类疑问语气词——它们出现在
+    # 大量本来就自包含的短问句里,一旦据此拼上上一轮话题就是净损失。这不是
+    # 保守的直觉,是实测:"退货运费谁出"(自包含)在上一轮是"有优惠券吗"时,
+    # 原句检索与改写后检索的命中集合 Jaccard=1.0(原句已经完美),拼上上文后
+    # 掉到 0.0(整个检索被"优惠券与促销规则"带跑)。反过来漏判的代价很小:
+    # 漏了就等于用原句检索,与本次改造之前的行为一模一样,不会更差。
+    # 与 understanding.py 扩展规则表同一条口径:宁漏勿错杀。
+    _ANAPHORA_MARKERS = ("那", "这", "它", "他", "她", "此", "该", "其")
+
+    def _prefetch_query(self, user_input: str) -> str:
+        """R1:算出**预取时刻**能用的最好的检索 query。
+
+        预取必须发生在 QU 之前(否则就不是并发,见 chat() 的注释),所以拿不到
+        QU 改写后的自包含 kb_query。对自包含长句而言原句已经够用(实测原句与
+        改写后的命中集合 Jaccard=1.0);真正拉开差距的是"那运费呢?""多久之内
+        有效?"这类指代/省略型追问——它们本身几乎不携带可检索语义,原句检索
+        与改写后检索的命中集合 Jaccard 实测低到 0.0。
+
+        这里用**零 LLM、零额外网络调用**的办法补上这段语义:把最近一条买家
+        话原样拼在前面。实测这一步把上述用例的 Jaccard 从 0.0 拉回 1.0(详见
+        报告)。刻意只对"短 + 含指代/省略信号"的句子生效:自包含长句拼上
+        不相关的上一轮话题只会污染向量查询,那是净损失,不是净收益。
+
+        fail-soft:任何一步出错都回落原句——这只是让检索 query 更好一点的
+        增强,绝不能让它成为买家会话的新失败点。
+        """
+        text = (user_input or "").strip()
+        try:
+            if not settings.qu_recall_prefetch_context_enabled:
+                return text
+            if len(text) > settings.qu_recall_prefetch_context_max_chars:
+                return text          # 够长=按自包含处理,不拼上文
+            if not any(m in text for m in self._ANAPHORA_MARKERS):
+                return text          # 没有指代信号,当自包含处理,不拼(宁漏勿错杀)
+            prev = next((m.get("content") for m in reversed(self.engine.raw_messages)
+                         if m.get("role") == "user" and m.get("content")), None)
+            if not prev:
+                return text          # 本轮是会话第一句,没有上文可补
+            return f"{str(prev).strip()} {text}"
+        except Exception:  # noqa: BLE001 query 增强失败绝不阻断本轮检索
+            logging.getLogger(__name__).warning("预取 query 上下文补全失败,回落原句",
+                                                exc_info=True)
+            return text
+
     def _submit_kb_prefetch(self, user_input: str):
-        """L3①:把 KB 检索(用买家原句)**提交**到共享线程池,立即返回 Future,
-        不阻塞——真正的并发收益就在这个"不阻塞"上:调用方(chat())紧接着
-        同步跑 understand(),这次 LLM 调用与 KB 检索天然重叠在同一段挂钟时间
-        里,谁都不用等谁。
+        """L3①:把 KB 检索**提交**到共享线程池,立即返回 `(检索用的 query,
+        Future)`,不阻塞——真正的并发收益就在这个"不阻塞"上:调用方(chat())
+        紧接着同步跑 understand(),这次 LLM 调用与 KB 检索天然重叠在同一段
+        挂钟时间里,谁都不用等谁。
+
+        R1:检索用的 query 不再固定是买家原句,而是 `_prefetch_query()` 的
+        输出(短的指代型追问会被拼上最近一条买家话,零 LLM);返回它是为了
+        让下游(engine 的 kb_prefetch_reused 事件)能如实报告"注入的知识到底
+        是按哪个 query 检索出来的"。
 
         实测教训(第一版实现踩过的坑,记在这里免得回头复犯):第一版在这个
         方法内部把 understand() 也扔进另一个线程,然后 `t1.join(); t2.join()`
@@ -184,16 +240,19 @@ class MultiAgentOrchestrator:
             return None
         if len((user_input or "").strip()) < settings.recall_kb_min_query_chars:
             return None
+        query = self._prefetch_query(user_input)
 
         def _run():
             try:
-                return kb_fetch_rows(user_input)
+                return kb_fetch_rows(query)
             except Exception:
-                # 预取失败=没有可复用的行,回退现场检索——现场检索(build_recall_
-                # sections 内部)自有一套同样的容错,不在这里重复处理/上报。
+                # R1:预取失败=本轮没有知识注入(engine 侧发 kb_prefetch_discarded
+                # 留痕,见 EcomAgent._build_messages),**不再**回退一次现场补检索
+                # ——那正是"一轮两次阻塞检索"的来源之一,且与全局约束"检索失败
+                # 必须保持非致命:买家仍然拿到回复,只是这一轮没有知识注入"一致。
                 return None
 
-        return _kb_prefetch_executor().submit(_run)
+        return query, _kb_prefetch_executor().submit(_run)
 
     def _build_system_prompt(self, profile: dict) -> str:
         """每轮按店主当前语气组装 system prompt(N1:品牌语气可配置)。
