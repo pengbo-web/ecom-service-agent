@@ -92,7 +92,9 @@ def test_kb_prefetch_matches_fresh_kb_recall_for_same_query(monkeypatch):
 
     rows_backend = kb_mod.kb_fetch_rows("退货政策是什么")
     assert rows_backend is not None
-    rows, backend = rows_backend
+    # 3 元组:_fetch_rows 现在多带一个 meta(ApeRAG 耗时观测,backend=="local"
+    # 时为 None)——这里只关心 rows/backend,meta 用 *_ 接住不解包。
+    rows, backend, *_ = rows_backend
 
     r_fresh = svc.build_recall_sections(None, "退货政策是什么", kb_domain="aftersale")
     r_prefetch = svc.build_recall_sections(None, "退货政策是什么", kb_domain="aftersale",

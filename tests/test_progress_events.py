@@ -1,9 +1,11 @@
 """L3③:生成前进度事件——如实反映当前阶段(理解/检索/生成),新增帧不影响既有帧。"""
 
 import concurrent.futures
+import threading
+import time
 
 from app.agent.chat import EcomAgent
-from app.agent.progress import ProgressStageGate, stage_message
+from app.agent.progress import ProgressStageGate, STAGE_RANK, stage_message
 from app.agent.recall.service import RecallResult
 from app.agent.understanding import QueryUnderstanding
 from app.config.settings import settings
@@ -266,3 +268,128 @@ def test_orchestrator_speculative_retrieving_only_when_concurrent_and_query_long
     retrieving2 = [e for e in events2 if e["type"] == "progress" and e["stage"] == "retrieving"]
     assert len(retrieving2) == 1
     assert retrieving2[0]["message"] == "正在为您查询售后政策…"      # 域已知(aftersale),不是推测性通用文案
+
+
+# ---- L3③ Defect-2 修复:并发路径(orchestrator 预告 + engine 现场检索/生成)
+# 必须共用同一把单调门,而不是两套互不知情的计数器 ----
+
+def test_orchestrator_and_engine_share_one_progress_gate(tmp_path, monkeypatch):
+    """核心断言:orchestrator 用来发 understanding/retrieving 预告的那把门,
+    就是 chat() 结束时挂在 engine 上、继续推进 retrieving/generating 的同一个
+    ProgressStageGate 实例——不是两个各自为战、互不知情的计数器(旧写法那两条
+    预告调的是模块级裸函数 emit_progress,完全不经任何门,是"并发路径的单调
+    性没被覆盖"的根因)。"""
+    monkeypatch.setattr(settings, "progress_events_enabled", True)
+    monkeypatch.setattr(settings, "query_understanding_enabled", True)
+    monkeypatch.setattr(settings, "qu_recall_concurrent_enabled", False)
+    qu = QueryUnderstanding(domain="presale", intent="商品咨询", need_kb=False, source="rule")
+    monkeypatch.setattr("app.agent.understanding.understand", lambda *a, **k: qu)
+    monkeypatch.setattr("app.agent.recall.service.build_recall_sections",
+                        lambda mm, q, include_kb=True, kb_domain=None, kb_prefetch=None: RecallResult())
+
+    o = _orch(tmp_path, monkeypatch)
+    o.event_sink = lambda e: None
+    o.chat("你有什么商品")
+
+    assert o._turn_progress_gate is o.engine._turn_progress_gate
+    # 本轮走到 generating(rank2)结束(_orch 桩掉的 _react_loop 直接返回结果,
+    # 不经真实 generating 事件;换成走真实 _react_loop 的用例见下面两条)。
+
+
+def test_late_background_recall_completion_cannot_regress_stage_after_generating(tmp_path, monkeypatch):
+    """字面复现任务描述的真实回归场景:recall 与 understanding 并发跑,
+    "recall 的完成"发生在 generating 已经发出之后。用一次真实的完整轮先把
+    单调门推进到 generating(rank2),再模拟"recall 后台线程迟到的完成事件"
+    尝试通过**同一条通道**(共用的门)补发一条 retrieving(rank1)——即使
+    这次尝试来自另一个线程,单调门也必须把它吞掉,买家绝不会看到这条
+    倒退帧。"""
+    monkeypatch.setattr(settings, "progress_events_enabled", True)
+    monkeypatch.setattr(settings, "query_understanding_enabled", True)
+    monkeypatch.setattr(settings, "qu_recall_concurrent_enabled", True)
+    monkeypatch.setattr(settings, "recall_kb_enabled", True)
+    monkeypatch.setattr(settings, "recall_kb_min_query_chars", 4)
+    qu = QueryUnderstanding(domain="aftersale", intent="政策咨询",
+                            need_kb=True, kb_query="退货政策是什么", source="llm")
+    monkeypatch.setattr("app.agent.understanding.understand", lambda *a, **k: qu)
+    monkeypatch.setattr("app.agent.recall.kb.kb_fetch_rows", lambda q: ([], "local"))
+
+    fake_msg = type("M", (), {"content": "ok", "tool_calls": None})()
+    fake_resp = type("R", (), {"choices": [type("C", (), {"message": fake_msg})()]})()
+
+    o = MultiAgentOrchestrator(session_path=str(tmp_path / "conc.json"), user_id="u1")
+    monkeypatch.setattr(o.engine, "_llm_create", lambda messages, use_tools: fake_resp)
+    o.engine.memory_manager.update_short_term = lambda *a, **k: None
+    o.engine._reply_pipeline.run = lambda *a, **k: a[3]
+
+    events = []
+    o.event_sink = events.append
+    o.chat("退货政策是什么")   # 真实 _build_messages/_react_loop 跑完,走到 generating
+
+    stages_before = [e["stage"] for e in events if e["type"] == "progress"]
+    assert stages_before[-1] == "generating"
+
+    gate = o._turn_progress_gate
+    assert gate is o.engine._turn_progress_gate   # 两边确实共用同一把门,不是巧合单调
+
+    # 模拟"recall 后台线程迟到的完成事件"从**另一个线程**尝试补发一条 retrieving。
+    late = []
+    t = threading.Thread(target=lambda: gate.emit(late.append, "retrieving", "aftersale"))
+    t.start()
+    t.join(timeout=2)
+    assert late == []   # 被吞掉——不是"没跑",是跑了但被同一把门拒绝转发给买家
+
+    stages_after = [e["stage"] for e in events if e["type"] == "progress"]
+    ranks = [STAGE_RANK[s] for s in stages_after]
+    assert ranks == sorted(ranks), f"进度帧倒退: {stages_after}"
+
+
+def test_concurrent_path_progress_never_regresses_with_real_react_loop(tmp_path, monkeypatch):
+    """驱动真实并发路径(不 mock _react_loop,让 _build_messages 真的跑):
+    KB 检索故意卡住一小段时间才放开,模拟"recall 完成得比较晚"——买家看到
+    的整轮进度帧序列(跨 orchestrator 预告 + engine 现场检索/生成两段代码)
+    必须严格单调,一旦有任何改动让某处又能在 generating 之后补发一条更早
+    阶段的帧,这条测试就会失败。"""
+    monkeypatch.setattr(settings, "progress_events_enabled", True)
+    monkeypatch.setattr(settings, "query_understanding_enabled", True)
+    monkeypatch.setattr(settings, "qu_recall_concurrent_enabled", True)
+    monkeypatch.setattr(settings, "recall_kb_enabled", True)
+    monkeypatch.setattr(settings, "recall_kb_min_query_chars", 4)
+
+    kb_release = threading.Event()
+
+    def slow_kb_fetch(query):
+        kb_release.wait(timeout=5)   # 模拟一次慢检索,测试结束前释放
+        return ([{"doc": "d", "section": "s", "score": 0.9, "text": "t"}], "local")
+
+    qu = QueryUnderstanding(domain="aftersale", intent="政策咨询",
+                            need_kb=True, kb_query="退货政策是什么", source="llm")
+    monkeypatch.setattr("app.agent.understanding.understand", lambda *a, **k: qu)
+    monkeypatch.setattr("app.agent.recall.kb.kb_fetch_rows", slow_kb_fetch)
+
+    fake_msg = type("M", (), {"content": "ok", "tool_calls": None})()
+    fake_resp = type("R", (), {"choices": [type("C", (), {"message": fake_msg})()]})()
+
+    o = MultiAgentOrchestrator(session_path=str(tmp_path / "conc2.json"), user_id="u1")
+    monkeypatch.setattr(o.engine, "_llm_create", lambda messages, use_tools: fake_resp)
+    o.engine.memory_manager.update_short_term = lambda *a, **k: None
+    o.engine._reply_pipeline.run = lambda *a, **k: a[3]
+
+    events = []
+    o.event_sink = events.append
+
+    done = threading.Event()
+
+    def _drive():
+        o.chat("退货政策是什么")
+        done.set()
+
+    t = threading.Thread(target=_drive, daemon=True)
+    t.start()
+    time.sleep(0.05)   # 给 understanding/retrieving 预告一点时间先发出来
+    kb_release.set()   # 放开卡住的 KB 检索,让 chat() 能收尾
+    assert done.wait(timeout=5), "释放 KB 检索后 chat() 应该能收尾"
+
+    stages = [e["stage"] for e in events if e["type"] == "progress"]
+    ranks = [STAGE_RANK[s] for s in stages]
+    assert ranks == sorted(ranks), f"进度帧倒退: {stages}"
+    assert "understanding" in stages and "generating" in stages

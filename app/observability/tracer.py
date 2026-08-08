@@ -241,6 +241,24 @@ class Tracer:
                 meta={"time_to_first_chunk_ms": (now - trace.started_at) * 1000.0},
                 parent_span_id=self._parent(trace),
             ))
+        elif etype == "kb_latency":
+            # ApeRAG 调用耗时/结果观测(见 app/agent/chat.py `_build_messages`):
+            # 与 reply_delta:first 同姿态,有明确的耗时数字但没有配对的
+            # start/end 信号(调用早已发生完,伪造起点反而失真)——用
+            # duration_ms 回推 started_at,让这条 span 在时间轴上落在它
+            # "本该"发生的位置,latency_ms 直接就是真实调用耗时,而不是
+            # 零时长标记(未来这条腿变慢/超时,一眼能在 trace 里看出来)。
+            now = self._now()
+            duration_ms = float(event.get("duration_ms", 0.0) or 0.0)
+            started = now - duration_ms / 1000.0
+            trace.spans.append(Span(
+                span_id=self._id(), trace_id=trace.trace_id,
+                name=f"kb_latency:{event.get('outcome')}", kind="kb_latency",
+                started_at=started, ended_at=now, latency_ms=duration_ms,
+                meta={"backend": event.get("backend"), "legs": event.get("legs"),
+                      "rows": event.get("rows"), "outcome": event.get("outcome")},
+                parent_span_id=self._parent(trace),
+            ))
         elif etype == "handoff":
             now = self._now()
             trace.spans.append(Span(

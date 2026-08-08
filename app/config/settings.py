@@ -243,6 +243,15 @@ class Settings(BaseSettings):
     aperag_api_key: str = ""           # ApeRAG 控制台创建(Bearer);放 .env 勿提交
     aperag_collection_id: str = ""     # 知识库 collection id(col_ 开头)
     aperag_rerank: bool = False        # 预召回热路径默认关重排(省延迟);深查精度可开
+    # 全文路(fulltext_search)开关。默认关——实测基准(12 次调用/配置,4 个真实买家
+    # 问句):"退货运费谁承担"/"七天无理由退货"/"包邮" 三个多字问句全文路命中数均为 0,
+    # 只有单字常见词"运费"才命中(全文索引的中文分词没配好,只能整词/子串匹配,匹配不上
+    # 真实多字问句)——同时全文腿几乎背了全部尾部延迟(该基准下 p90 4.46s→1.11s、
+    # 最坏 18.15s→2.36s,去掉这条腿后中位数减半)。也就是说现状是"多花一次网络往返,
+    # 零额外召回"。关掉不是放弃混合检索——等 collection 配好中文分词、全文路真的能
+    # 贡献不同于向量路的召回后,应该重新打开(混合检索理论上确实优于纯向量单路),
+    # 到时候只需翻这一个开关,aperag_search 的调用形状不用再改。
+    aperag_fulltext_enabled: bool = False
     # 向量路相似度阈值。0.2=ApeRAG 服务端 Field 默认值(其 Web 搜索页用 0.7,精确率优先);
     # 预召回选低阈值走召回率优先,下游有字符预算+评估器兜底。必须显式传:ApeRAG API 层
     # 会把缺省字段解析成 None 显式下传,覆盖 Field 默认导致整体 500(上游 bug,可提 issue)
@@ -250,9 +259,20 @@ class Settings(BaseSettings):
     # aperag 故障时是否降级本地索引。False(默认)=纯 ApeRAG 体验,故障=本轮无KB注入(可感知);
     # True=三级降级 aperag→local→无注入(生产建议开,故障静默兜底)
     kb_local_fallback_enabled: bool = False
-    # ApeRAG 检索超时。实测暖机 0.9-1.1s,容器冷启首查 3.5s+;6s(embedding 快速失败值)会误杀
-    # 冷启首查,单独放宽到 10s——仍有界防挂死,超时行为=该轮无注入(或降级,看上面开关)
-    aperag_timeout_s: float = 10.0
+    # ApeRAG 检索超时。旧值 10s 是为兜住"vector+fulltext 双路"的尾部(实测最坏
+    # 18.15s 都兜不住,10s 只是权宜),且刻意放宽以免误杀冷启首查。去掉全文腿后
+    # 重新按实测分布定:owner 基准(12 次/配置,同一批问句)测得纯向量路
+    # p90=1.11s、最坏=2.36s——3s ≈ 2.7×p90,同时留出 0.6s+ 的余量盖住实测最坏值,
+    # 是"留足 p90 之上的真实余量、但不为了兜中位数之外的极端值而放宽到掩盖真实
+    # 变慢"的折中。选紧不选松是刻意的:owner 已声明 ApeRAG 无本地兜底,超时=
+    # 这一轮直接零注入进入生成(见 kb_local_fallback_enabled False 时的行为)——
+    # 让买家等 10s 才等到"这轮没有知识库",比现在就没有更糟,该失败就快失败。
+    # 本次复核(见 .superpowers/sdd/task-aperag-latency-report.md)用同一台本机
+    # ApeRAG 复测时观测到比 owner 基准更高的延迟与更大的方差(该机器当时负载不同),
+    # 但仍以 owner 提供的基准分布定这个值——如果上线后 kb_latency 观测事件里
+    # outcome=timeout 的占比持续偏高,应该按那时的真实分布再调,而不是按这次复测
+    # 的一次性噪声顺势放宽。
+    aperag_timeout_s: float = 3.0
 
     # 统一查询理解节点(意图识别):一次 LLM 调用出 domain/intent/need_kb/kb_query,
     # 吃掉独立路由与改写调用;闲聊轮免检索。关=回退老 Router 路由+每轮必检索

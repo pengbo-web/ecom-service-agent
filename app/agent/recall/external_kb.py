@@ -35,9 +35,15 @@ def aperag_search(query: str, top_k: int | None = None) -> list[dict] | None:
         # similarity 在 OpenAPI 里标可选,但服务端 VectorSearchInput 必填——缺省会整体 500
         "vector_search": {"topk": topk,
                           "similarity": settings.aperag_min_similarity},
-        "fulltext_search": {"topk": topk},
         "rerank": settings.aperag_rerank,
     }
+    # settings.aperag_fulltext_enabled(默认关,见该设置项注释):实测这条腿对真实
+    # 多字中文问句命中率为 0(中文分词没配好),却背了几乎全部尾部延迟——不发这条
+    # 腿本身就是最直接的延迟修复。留着开关(不是删掉这条能力)是因为混合检索理论上
+    # 确实优于纯向量单路,collection 配好中文分词后应该重新打开,到时候只需翻这一
+    # 个开关,不用再改这里的调用形状。
+    if settings.aperag_fulltext_enabled:
+        payload["fulltext_search"] = {"topk": topk}
     try:
         resp = httpx.post(url, json=payload,
                           headers={"Authorization": f"Bearer {settings.aperag_api_key}"},

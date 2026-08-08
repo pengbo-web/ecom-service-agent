@@ -226,6 +226,19 @@ class _LangfuseTurn:
                 output=output,
             )
             obs.end()
+        elif etype == "kb_latency":
+            # ApeRAG 调用耗时/结果观测:与 recall 同姿态即时观察(调用早已
+            # 发生完,没有配对的 start 信号),as_type="retriever" 对应检索
+            # 语义;outcome!="ok"(服务不可用/超时)时 WARNING 醒目,不用
+            # 逐条展开才发现这条腿在变慢/挂掉。
+            obs = self._client.start_observation(
+                as_type="retriever", name="kb_latency",
+                input={"backend": ev.get("backend"), "legs": ev.get("legs")},
+                output={"rows": ev.get("rows"), "outcome": ev.get("outcome"),
+                        "duration_ms": ev.get("duration_ms")},
+                level=("WARNING" if ev.get("outcome") != "ok" else "DEFAULT"),
+            )
+            obs.end()
         elif etype == "thought":
             # ReAct 的一步中间思考文本:与 tool_call/tool_result 不同,协议里没有
             # 与之配对的起止信号,只是模型这一步顺带带的旁白,记即时观察。

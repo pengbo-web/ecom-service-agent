@@ -74,6 +74,7 @@ class MultiAgentOrchestrator:
         self.event_sink = None
         self.client = self.engine.client
         self._turn_stream_eligible = False   # E1:见 set_turn_stream_eligible
+        self._turn_progress_gate = None   # L3③ 并发路径修复:chat() 每轮重建,见该方法文档
 
     def set_turn_stream_eligible(self, eligible: bool) -> None:
         """E1:streaming.py 每轮在调 chat() 前对着总控注入(它才是
@@ -82,12 +83,24 @@ class MultiAgentOrchestrator:
         self._turn_stream_eligible = bool(eligible)
 
     def chat(self, user_input: str):
+        # L3③ 并发路径修复(Defect-2):本轮唯一一把单调门,orchestrator(下面
+        # 的 understanding 预告 + 并发预取提交成功时的推测性 retrieving 预告)
+        # 与 engine(现场检索的 retrieving / generating,见 EcomAgent._build_
+        # messages、_react_loop)共用同一个实例——不再是两套互不知情的计数器。
+        # 旧写法这里两条预告调的是模块级裸函数 `emit_progress(event_sink, ...)`，
+        # 完全不经任何门；engine 自己那把门只在 `chat()` 开头 reset,对
+        # orchestrator 已经发生的阶段一无所知——这正是"并发路径的单调性没被
+        # 覆盖"的真正原因(engine 内部单调 ≠ 买家看到的整轮单调)。每轮都新建
+        # 一把、显式注入给 engine(见 EcomAgent.set_turn_progress_gate),不会
+        # 有跨轮残留,与 kb_prefetch 同样"每轮显式覆盖"的姿态。
+        from app.agent.progress import ProgressStageGate
+        self._turn_progress_gate = ProgressStageGate()
+        self.engine.set_turn_progress_gate(self._turn_progress_gate)
         # 统一查询理解(默认):一次调用出 domain/intent/need_kb/kb_query,
         # 替代独立路由;关开关=回退老 Router(每轮必检索,无门控无改写)
         if settings.query_understanding_enabled:
-            from app.agent.progress import emit_progress
             from app.agent import understanding
-            emit_progress(self.event_sink, "understanding")   # L3③:如实上报——这一步真的要调 LLM 了
+            self._turn_progress_gate.emit(self.event_sink, "understanding")   # L3③:如实上报——这一步真的要调 LLM 了
             kb_future = None
             if settings.qu_recall_concurrent_enabled:
                 # L3①(关键):KB 预取只**提交**、不在这里等它跑完——真正的并发
@@ -100,7 +113,7 @@ class MultiAgentOrchestrator:
                 # 进一步稀释了需要等待的那一段。
                 kb_future = self._submit_kb_prefetch(user_input)
                 if kb_future is not None:
-                    emit_progress(self.event_sink, "retrieving")   # 确实提交了才说"正在检索"
+                    self._turn_progress_gate.emit(self.event_sink, "retrieving")   # 确实提交了才说"正在检索"
             # 用 self.client(streaming 层每轮注入的 TracingClient):QU 调用进当前 trace,
             # token/延迟完整入账;engine.client 在下面才被覆盖,用它会漏记首轮。
             # 这次调用本身就在"当前"线程同步执行——KB 预取(如果提交了)已经在

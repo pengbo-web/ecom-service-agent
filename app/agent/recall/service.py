@@ -27,6 +27,9 @@ class RecallResult:
     sections: list[dict] = field(default_factory=list)   # [{"role":"system","content":...}]
     kb_hits: list[dict] = field(default_factory=list)    # KB 命中明细(供 recall 事件/观测)
     kb_backend: str = "local"                            # 本轮 KB 实际后端(aperag/local),供前端标识来源
+    # 本轮 ApeRAG 调用的耗时/结果观测(从 KbRecall.latency 原样搬上来);None=
+    # backend!="aperag" 或本轮压根没检索,见 KbRecall.latency 的文档。
+    kb_latency: dict | None = None
 
 
 def _profile_section(memory_manager, query):
@@ -50,7 +53,8 @@ def _short_term_section(memory_manager, query):
 def build_recall_sections(memory_manager, query: str | None,
                           include_kb: bool = True,
                           kb_domain: str | None = None,
-                          kb_prefetch: tuple[list[dict], str] | None = None) -> RecallResult:
+                          kb_prefetch: tuple[list[dict], str] | tuple[list[dict], str, dict | None]
+                          | None = None) -> RecallResult:
     """统一召回入口:按源顺序检索,合并为注入段列表;单源失败隔离。
     include_kb=False(查询理解判定本轮无需知识)时跳过 KB 源,记忆源照常。
 
@@ -76,14 +80,19 @@ def build_recall_sections(memory_manager, query: str | None,
         return result
     try:
         if kb_prefetch is not None:
-            rows, backend = kb_prefetch
+            # *_rest 容错解包:kb_prefetch 现在可能是 (rows, backend, meta) 三元组
+            # (预取带上了 ApeRAG 耗时观测),但仍兼容既有测试直接喂 (rows, backend)
+            # 二元组的写法——两种都能跑,只是二元组时 meta 留 None。
+            rows, backend, *_rest = kb_prefetch
             kb = kb_format(rows, backend, kb_domain)
+            kb.latency = _rest[0] if _rest else None
         else:
             kb = kb_recall(query, domain=kb_domain)
     except Exception:
         logger.warning("recall source kb failed", exc_info=True)
         kb = KbRecall()
     result.kb_backend = kb.backend
+    result.kb_latency = kb.latency
     if kb.section:
         result.sections.append({"role": "system", "content": kb.section})
         result.kb_hits = kb.hits

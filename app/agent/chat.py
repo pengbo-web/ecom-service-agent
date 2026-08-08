@@ -74,6 +74,10 @@ class EcomAgent:
         # 每轮 chat() 开始时 reset 一次,防止上一轮的阶段位置残留误判本轮。
         from app.agent.progress import ProgressStageGate
         self._turn_progress_gate = ProgressStageGate()
+        # L3③ 并发路径修复(Defect-2,见 set_turn_progress_gate 文档):本轮是否
+        # 由 orchestrator 注入了"已经推进过"的门,chat() 开头据此决定是 reset
+        # 还是直接沿用——默认 False(裸引擎测试/未经 orchestrator 场景不受影响)。
+        self._external_progress_gate_pending = False
         # E1:这一轮是否允许 ReAct 第一步流式吐字给买家——由 streaming.py 在
         # 调 chat() 前注入(见 set_turn_stream_eligible),已经把"输出护栏是否
         # 含改写类 guard"这件事在生成前判完。引擎本身拿不到 guard_pipeline，
@@ -168,6 +172,29 @@ class EcomAgent:
         了一次——成本记在报告里),现场按改写后的 kb_query 重新检索一次。"""
         self._turn_kb_prefetch = (query, future)
 
+    def set_turn_progress_gate(self, gate) -> None:
+        """L3③ 并发路径修复(Defect-2):orchestrator.chat() 在真正调用
+        engine.chat() **之前**,已经用这把门发过"understanding"/(并发预取
+        提交成功时)"retrieving" 预告——旧写法那两条预告调的是模块级裸函数
+        `app.agent.progress.emit_progress(event_sink, ...)`,完全不经任何门,
+        跟 engine 自己这把 `_turn_progress_gate` 是两套互不知情的计数器。
+        这本身就是"并发路径未被覆盖"的真正原因:engine 内部单调(retrieving
+        永远先于 generating,由 `_react_loop`/`_build_messages` 的代码结构
+        保证)不等于买家看到的**整轮**(跨 orchestrator/engine 两段代码)单调
+        ——recall 完成后如果有任何代码路径(包括未来的改动)想在 generating
+        已经发出之后再补一条 retrieving,只要它们各自维护自己的计数器,
+        谁都无法察觉这是一次倒退。
+
+        本方法把 orchestrator 已经推进过的**同一个**门实例交给 engine,本轮
+        `chat()` 直接复用它继续往下走,不再在 chat() 开头 reset 成一把从 -1
+        起步、对 orchestrator 那两条预告一无所知的新门。orchestrator 每轮都
+        必须显式调用(哪怕这一轮没有并发预取),与 `set_turn_kb_prefetch_
+        future`/`clear_turn_kb_prefetch` 同样"每轮显式覆盖,不留旧值"的姿态
+        ——`_external_progress_gate_pending` 只在 `chat()` 开头被消费一次,
+        不会跨轮残留。"""
+        self._turn_progress_gate = gate
+        self._external_progress_gate_pending = True
+
     def _emit_progress(self, stage: str, domain: str | None = None) -> None:
         """L3③:走本引擎既有的 `_emit` 通道发一条 progress 帧(见
         app/agent/progress.py)。经 `_turn_progress_gate` 单调门:阶段号倒退
@@ -217,7 +244,15 @@ class EcomAgent:
         # 新一轮:阶段单调门归零,不带着上一轮的阶段位置。getattr 防御:裸 agent
         # 测试(EcomAgent.__new__,不走 __init__)没有这个字段——没有就现建一个,
         # 与 _turn_stream_eligible 等字段的既有防御写法同姿态。
-        if getattr(self, "_turn_progress_gate", None) is None:
+        # L3③ 并发路径修复(Defect-2):若 orchestrator 本轮已经通过
+        # set_turn_progress_gate 注入了一把"已经推进过"的门(见该方法文档),
+        # 这里绝不能 reset 它——reset 会把 orchestrator 刚发出的 understanding/
+        # retrieving 预告从这把门的记忆里抹掉,让 engine 后续的阶段号从 -1
+        # 重新起步,回到"engine 内部单调、但整轮不单调"的老问题。只消费一次
+        # 标记,不跨轮残留(与 _turn_kb_prefetch 每轮显式覆盖同姿态)。
+        if getattr(self, "_external_progress_gate_pending", False):
+            self._external_progress_gate_pending = False
+        elif getattr(self, "_turn_progress_gate", None) is None:
             from app.agent.progress import ProgressStageGate
             self._turn_progress_gate = ProgressStageGate()
         else:
@@ -994,6 +1029,15 @@ class EcomAgent:
                 # 门控跳过:显式发 skipped 事件,门控工作与否前端一眼可见
                 self._emit({"type": "recall", "source": "kb",
                             "skipped": True, "reason": qu.intent})
+            # 任务②③:ApeRAG 调用耗时/结果观测事件——走既有 tracer/Langfuse 通道
+            # (self._emit → event_sink → sink() 里同时喂两者,见 app/api/streaming.py),
+            # 不新开一条通道。rr.kb_latency 只在 backend=="aperag" 且本轮真的发起过
+            # 一次调用时非 None(见 KbRecall.latency 的文档)——无论这次调用是并发
+            # 预取(orchestrator 后台线程,结果经 Future 传回)还是现场检索,落这条
+            # 事件的动作本身始终发生在这里(_build_messages,主线程、正确的
+            # tracer/Langfuse 上下文),不受"谁真正发起了那次 HTTP 调用"影响。
+            if rr.kb_latency is not None:
+                self._emit({"type": "kb_latency", "backend": rr.kb_backend, **rr.kb_latency})
         messages.extend(self._turn_recall[1].sections)
         if self.summary:
             messages.append(

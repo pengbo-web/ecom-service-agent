@@ -9,6 +9,7 @@
 """
 
 import logging
+import time
 from dataclasses import dataclass, field
 
 from app.config.settings import settings
@@ -24,6 +25,11 @@ class KbRecall:
     section: str | None = None                       # 可注入的 system prompt 段;无命中为 None
     hits: list[dict] = field(default_factory=list)   # [{"doc","section","score"}] 供事件/观测展示
     backend: str = "local"                           # 本轮实际使用的后端(local/aperag),供观测
+    # 本轮 ApeRAG 调用的耗时/结果观测(仅 backend=="aperag" 且真的发起过一次调用时非
+    # None)——{"legs","duration_ms","outcome","rows"},供 _build_messages 落一条
+    # kb_latency 观测事件(见 app/agent/chat.py)。backend=="local" 或本轮压根没检索
+    # (门控早退)时留 None,不虚报一次没发生的调用。
+    latency: dict | None = None
 
 
 _HEADER = (
@@ -56,23 +62,37 @@ def _local_rows(query: str) -> list[dict]:
     return result.get("results", [])
 
 
-def _fetch_rows(query: str) -> tuple[list[dict], str]:
+def _fetch_rows(query: str) -> tuple[list[dict], str, dict | None]:
     """按 kb_backend 取行。aperag 故障时:开 kb_local_fallback_enabled 则降级本地索引
     (三级降级 aperag→local→无注入);关(默认)则本轮直接无注入——体验纯 ApeRAG 行为,
-    降级不再被本地兜底悄悄掩盖,故障在前端表现为该轮没有「预召回」行。"""
+    降级不再被本地兜底悄悄掩盖,故障在前端表现为该轮没有「预召回」行。
+
+    第三个返回值 meta:仅 backend=="aperag" 时非 None——{"legs","duration_ms",
+    "outcome","rows"}(耗时观测,见 app/agent/chat.py 的 kb_latency 事件)。
+    legs 是**配置**决定的("vector" 或 "vector"+"fulltext"),不是从响应里反解的;
+    duration_ms 是这一次 aperag_search() 调用的挂钟耗时;outcome 只分 "ok"(拿到
+    结果,rows 可能是 0——真实无命中)/"unavailable"(aperag_search 返回 None,
+    即连接拒/超时/非200/解析错任一种——aperag_search 本身已经把这些收敛成一种
+    "不可用",这里不重新拆分,与该函数"任何失败都只返回 None"的容错红线一致)。"""
     if settings.kb_backend == "aperag":
         from app.agent.recall.external_kb import aperag_search
+        legs = ["vector"] + (["fulltext"] if settings.aperag_fulltext_enabled else [])
+        start = time.perf_counter()
         rows = aperag_search(query)
+        duration_ms = (time.perf_counter() - start) * 1000.0
+        meta = {"legs": legs, "duration_ms": duration_ms,
+                "outcome": "ok" if rows is not None else "unavailable",
+                "rows": len(rows) if rows is not None else 0}
         if rows is not None:
-            return rows, "aperag"
+            return rows, "aperag", meta
         if not settings.kb_local_fallback_enabled:
             logger.warning("kb backend aperag unavailable, local fallback DISABLED -> no injection this turn")
-            return [], "aperag"
+            return [], "aperag", meta
         logger.warning("kb backend aperag unavailable, fallback to local index")
-    return _local_rows(query), "local"
+    return _local_rows(query), "local", None
 
 
-def kb_fetch_rows(query: str | None) -> tuple[list[dict], str] | None:
+def kb_fetch_rows(query: str | None) -> tuple[list[dict], str, dict | None] | None:
     """只做检索取行(网络调用),不做域排序/阈值/格式化——L3①拆出这一半,
     供并发预取复用:预取阶段(orchestrator,原句、domain 未知)只需要"取到
     哪些行",域排序/裁剪要等 QU 判完 domain 才能做,且是纯本地计算,不必
@@ -121,5 +141,9 @@ def kb_recall(query: str | None, domain: str | None = None) -> KbRecall:
     fetched = kb_fetch_rows(query)
     if fetched is None:
         return KbRecall()
-    rows, backend = fetched
-    return kb_format(rows, backend, domain)
+    # *_rest 容错解包:_fetch_rows 现在返回 3 元组(多了 meta),但仍兼容任何直接
+    # 桩掉 kb_fetch_rows/_fetch_rows 返回旧 2 元组的既有测试——不强制它们跟着改。
+    rows, backend, *_rest = fetched
+    kb = kb_format(rows, backend, domain)
+    kb.latency = _rest[0] if _rest else None
+    return kb
