@@ -4,13 +4,21 @@
 search_knowledge 面向非结构化文本（退换货政策、配送说明、FAQ 等），
 返回 Top-K 命中片段及其来源，由 LLM 引用回答。
 
-向量后端由 settings.rag_backend 切换：
+检索源由 settings.kb_backend 切换（ApeRAG 接入，第一步：只换检索源，
+不改工具的名字/参数/返回形状，五个 persona 与 process-return 等 skill
+无需改动）：
+- local ：项目内向量索引，行为与接入 ApeRAG 之前逐字节一致
+- aperag：外部 ApeRAG（向量+全文混合检索），不可用时是否降级本地由
+          settings.kb_local_fallback_enabled 决定（见 _search_aperag 旁注）
+
+local 分支下，向量后端再由 settings.rag_backend 切换：
 - numpy ：手写余弦相似度，零依赖，教学透明
 - chroma：嵌入式向量数据库，HNSW 索引，工程代表性
 
 为避免每次进程启动都重建索引，单例缓存 Retriever。
 """
 
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -19,7 +27,10 @@ from app.agent.rag.backends import create_backend
 from app.agent.rag.embedder import Embedder
 from app.agent.rag.errors import EmbeddingIndexMismatchError
 from app.agent.rag.retriever import KnowledgeRetriever
+from app.agent.recall.external_kb import aperag_search
 from app.observability.embedding_health import record_embedding_failure
+
+logger = logging.getLogger(__name__)
 
 _retriever: Optional[KnowledgeRetriever] = None
 
@@ -63,24 +74,13 @@ def reset_retriever() -> None:
     _retriever = None
 
 
-def search_knowledge(query: str, top_k: int = 3) -> dict:
-    """检索退换货政策、配送说明、会员权益、FAQ 等知识库内容。
+def _search_local(query: str, top_k: int) -> dict:
+    """kb_backend=local 时的检索路径。
 
-    Returns:
-        {
-          "success": bool,
-          "backend": "numpy" | "chroma",
-          "query": str,
-          "results": [
-            {"doc": "...", "section": "...", "score": 0.83, "text": "..."},
-            ...
-          ],
-          "error": "..."  # 仅失败时存在
-        }
+    与接入 ApeRAG 之前逐字节一致——把原来 search_knowledge 里的全部逻辑
+    原样搬到这里，供默认路径与 aperag 故障降级路径共用同一份实现，避免
+    两处各写一遍、行为跑偏。top_k 由调用方(search_knowledge)clamp 好后传入。
     """
-    if not query or not query.strip():
-        return {"success": False, "error": "query 不能为空", "query": query, "results": []}
-
     try:
         retriever = _get_retriever()
     except FileNotFoundError as e:
@@ -105,7 +105,6 @@ def search_knowledge(query: str, top_k: int = 3) -> dict:
             "results": [],
         }
 
-    top_k = max(1, min(int(top_k or 3), 5))
     try:
         hits = retriever.search(query, top_k=top_k)
     except EmbeddingIndexMismatchError:
@@ -134,3 +133,92 @@ def search_knowledge(query: str, top_k: int = 3) -> dict:
             for h in hits
         ],
     }
+
+
+def _search_aperag(query: str, top_k: int) -> Optional[dict]:
+    """kb_backend=aperag 时的检索路径。返回 None 表示服务不可用(由调用方决定
+    是否降级本地)，否则返回已套好本工具既有返回形状的结果字典。
+
+    aperag_search 内部已经把"未配置/连接拒/超时/非200/解析错"统一兜底为
+    None——这里不重复判断失败原因，只做"服务给出结果" → 映射成
+    doc/section/score/text 标准行，与本地路径的返回形状完全一致，模型/
+    调用方无需区分来源。ApeRAG 服务端按 vector_search/fulltext_search 各自
+    的 topk 融合排序，理论上不会超过 top_k，这里仍显式切片一次做兜底，
+    确保 top_k 语义在两条路径上一致可信。
+    """
+    rows = aperag_search(query, top_k=top_k)
+    if rows is None:
+        return None
+    return {
+        "success": True,
+        "backend": "aperag",
+        "query": query,
+        "results": [
+            {
+                "doc": r.get("doc", ""),
+                "section": r.get("section", ""),
+                "score": round(float(r.get("score", 0.0)), 4),
+                "text": r.get("text", ""),
+            }
+            for r in rows[:top_k]
+        ],
+    }
+
+
+def search_knowledge(query: str, top_k: int = 3) -> dict:
+    """检索退换货政策、配送说明、会员权益、FAQ 等知识库内容。
+
+    检索源由 settings.kb_backend 决定：
+    - aperag：先查外部 ApeRAG；服务不可用(返回 None)时，
+      settings.kb_local_fallback_enabled 决定是否降级本地索引再试一次，
+      默认关闭——参见模块顶部与下方降级决策的注释。
+    - local (默认)：与接入 ApeRAG 之前完全一致，走本地向量索引。
+
+    Returns:
+        {
+          "success": bool,
+          "backend": "aperag" | "numpy" | "chroma",  # 老实汇报"这次实际是谁答的"
+          "query": str,
+          "results": [
+            {"doc": "...", "section": "...", "score": 0.83, "text": "..."},
+            ...
+          ],
+          "error": "..."  # 仅失败时存在
+        }
+    """
+    if not query or not query.strip():
+        return {"success": False, "error": "query 不能为空", "query": query, "results": []}
+
+    top_k = max(1, min(int(top_k or 3), 5))
+
+    if settings.kb_backend == "aperag":
+        result = _search_aperag(query, top_k)
+        if result is not None:
+            return result
+        # 降级决策(记录在案，非拍脑袋)：
+        # 本方法是五个 persona 都挂着的 agent 可调用工具，process-return 等
+        # skill 把"调用 search_knowledge 检索政策"写成必经步骤——工具在这里
+        # 硬失败，意味着 ApeRAG 一旦不可用，退货退款这类流程当场卡死，用户
+        # 侧体验是"客服突然答不出退货政策"。但 owner 的既定方向是最终删掉
+        # 本地 RAG，本方法现在加的任何兜底代码都是将来要删的技术债。
+        # 权衡结果：默认不新增行为——遵循 kb.py(统一召回层)已经用同一个
+        # settings.kb_local_fallback_enabled 定的口径，两条调用路径(工具
+        # 直调 / 预召回)行为一致，不搞两套降级策略。默认 False：
+        # ApeRAG 不可用时工具"干净失败"(success=False + error，不抛异常、
+        # 不把"服务挂了"悄悄说成"没查到政策")，保持"纯 ApeRAG 体验，故障
+        # 可感知"，也不多留一份将来必须清理的本地兜底代码路径。运维/owner
+        # 想在 ApeRAG 不稳的过渡期临时保住退货流程不中断，可随时把这一个
+        # 已存在的开关打开(True)，工具会和 kb.py 一样降级本地索引再试一次
+        # ——是否降级仍完全由这一个配置项决定，不是本方法自己另起一套判断。
+        if settings.kb_local_fallback_enabled:
+            logger.warning("search_knowledge: ApeRAG 不可用，降级本地索引")
+            return _search_local(query, top_k)
+        return {
+            "success": False,
+            "error": "ApeRAG 服务不可用(kb_backend=aperag 且未开启本地降级)",
+            "backend": "aperag",
+            "query": query,
+            "results": [],
+        }
+
+    return _search_local(query, top_k)

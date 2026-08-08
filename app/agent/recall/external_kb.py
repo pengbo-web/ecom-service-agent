@@ -17,18 +17,25 @@ from app.config.settings import settings
 logger = logging.getLogger(__name__)
 
 
-def aperag_search(query: str) -> list[dict] | None:
+def aperag_search(query: str, top_k: int | None = None) -> list[dict] | None:
+    """调用 ApeRAG collection-search API,返回归一化行或 None(服务不可用)。
+
+    top_k:留空则沿用 settings.recall_kb_top_k(KB 预召回的既有调用方式，
+    行为不变);显式传入时同时覆盖 vector_search/fulltext_search 的 topk——
+    供 search_knowledge 工具把自己收到的 top_k 一路带下去。
+    """
     if not settings.aperag_api_key or not settings.aperag_collection_id:
         logger.warning("kb_backend=aperag 但缺少 api_key/collection_id,降级本地")
         return None
+    topk = top_k if isinstance(top_k, int) and top_k > 0 else settings.recall_kb_top_k
     url = (f"{settings.aperag_base_url.rstrip('/')}/api/v1/collections/"
            f"{settings.aperag_collection_id}/searches")
     payload = {
         "query": query,
         # similarity 在 OpenAPI 里标可选,但服务端 VectorSearchInput 必填——缺省会整体 500
-        "vector_search": {"topk": settings.recall_kb_top_k,
+        "vector_search": {"topk": topk,
                           "similarity": settings.aperag_min_similarity},
-        "fulltext_search": {"topk": settings.recall_kb_top_k},
+        "fulltext_search": {"topk": topk},
         "rerank": settings.aperag_rerank,
     }
     try:
