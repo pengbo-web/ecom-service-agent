@@ -55,23 +55,50 @@ def test_streams_when_no_rewriting_guard_active(monkeypatch):
     assert agent.eligible is True
 
 
-def test_rewriting_guard_active_emits_zero_incremental_frames(monkeypatch):
-    """命中变换类护栏(默认 pipeline 的 SensitiveInfoGuard/ContactInfoGuard)
-    ⇒ eligible=False,agent 完全不发 reply_delta——即"这一轮命中改写类护栏时
-    不发 reply_delta"这条硬约束,在 streaming.py 编排层面就已经堵死,不依赖
-    生成出来的具体文本是否真的触发正则匹配(见 app/guardrails/pipeline.py
-    `has_rewriting_output_guard` 的分类式判断)。"""
+def test_rewriting_guard_active_still_streams_with_incremental_redaction(monkeypatch):
+    """E1b:默认 pipeline 的 SensitiveInfoGuard/ContactInfoGuard 都证明是
+    "局部脱敏"(暴露 PATTERNS 且宽度可静态算出,见
+    `GuardPipeline.local_redaction_holdback`)——不再像 E1 报告里那样直接
+    判 eligible=False、整条不流,而是 eligible=True + IncrementalRedactor
+    顶一层缓冲:reply_delta 照常逐块流出(这正是本任务要解决的"46 秒空白屏"
+    问题),敏感号码在流式分片里也已经脱敏,终帧同样干净。"""
     monkeypatch.setattr(settings, "stream_reply_enabled", True)
     p = build_default_pipeline()
     assert p.has_rewriting_output_guard() is True   # 前提:默认 pipeline 确实是变换类
+    assert p.local_redaction_holdback() is not None  # 前提:且都证明是局部脱敏
     agent = StreamAwareFakeAgent(["您的手机号 ", "13812345678", " 已登记"])
     events = list(run_agent_streaming(agent, "查一下", guard_pipeline=p))
     types = [e["type"] for e in events]
-    assert "reply_delta" not in types
-    assert agent.eligible is False
-    # 全量生成后护栏跑完、脱敏生效,一次性发出终帧——跟现状行为一致
+    assert agent.eligible is True   # E1b:不再因为存在变换类护栏就整体禁流
     reply = [e for e in events if e["type"] == "reply"][0]
     assert "13812345678" not in reply["content"]
+    # 无论 reply_delta 是否因为 holdback 缓冲而暂未提交,已经发出去的每一个
+    # 分片里都不能出现完整的原始手机号——这是"不泄漏"这条硬约束落到流式
+    # 分片层面的验证,不依赖它有没有真的发出增量帧。
+    deltas = [e for e in events if e["type"] == "reply_delta"]
+    for d in deltas:
+        assert "13812345678" not in d["content"]
+
+
+def test_long_clean_reply_streams_incrementally_under_default_guards(monkeypatch):
+    """E1b(Part3):正常买家轮次(无敏感内容、够长)在默认护栏配置下必须真的
+    逐块吐字,不能只是"架构对了但从不触发"——这正是 E1 报告点名的残余风险,
+    这里补一条会失败的旧行为回归测试。"""
+    monkeypatch.setattr(settings, "stream_reply_enabled", True)
+    p = build_default_pipeline()
+    holdback = p.local_redaction_holdback()
+    assert holdback is not None
+    # 造一段明显长过 holdback 的干净文本,拆成很多小 chunk(模拟真实 token 流)
+    long_text = "您的订单已经发货，预计三到五天送达，如有问题欢迎随时联系我们客服团队为您跟进物流详情。" * 3
+    assert len(long_text) > holdback
+    chunks = [long_text[i:i + 2] for i in range(0, len(long_text), 2)]
+    agent = StreamAwareFakeAgent(chunks, reply=long_text)
+    events = list(run_agent_streaming(agent, "我的订单发货了吗", guard_pipeline=p))
+    deltas = [e for e in events if e["type"] == "reply_delta"]
+    assert len(deltas) > 1   # 真的产生了不止一条增量帧——不是"从不触发"
+    assert "".join(d["content"] for d in deltas) != ""
+    reply = [e for e in events if e["type"] == "reply"][0]
+    assert reply["content"] == long_text
 
 
 def test_switch_off_matches_current_frame_sequence(monkeypatch):

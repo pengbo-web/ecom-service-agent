@@ -150,7 +150,12 @@ def test_stream_first_step_final_answer_concatenates(monkeypatch):
 
 
 def test_stream_falls_back_when_first_step_calls_tool(monkeypatch):
+    """E1b:reply_pipeline_enabled=True(默认)时,第 1 步(已经调用过工具)
+    恒非流式——因为 complex_turn 必然为 True,H1 回复流水线一定会至少跑一次
+    真实 LLM 润色,这跟输出护栏"事后改写"是同一类风险,见
+    `EcomAgent._can_stream_step` 的 docstring。"""
     monkeypatch.setattr(settings, "stream_reply_enabled", True)
+    monkeypatch.setattr(settings, "reply_pipeline_enabled", True)
     tm = FakeToolManager()
     a = make_agent([
         _StreamResp([
@@ -163,11 +168,41 @@ def test_stream_falls_back_when_first_step_calls_tool(monkeypatch):
     assert out == "您的订单已发货。"
     assert _deltas(a) == []                     # 工具调用步骤不发任何 reply_delta
     assert tm.executed == [("query_order", {"order_id": "O1"})]
-    # 第 0 步 stream=True,第 1 步(已经过 step 0)恒非流式、不带 stream
+    # 第 0 步 stream=True,第 1 步(已经过 step 0,且回复流水线开着)恒非流式、不带 stream
     assert a.client.calls == [
         {"tools": True, "stream": True},
         {"tools": True, "stream": False},
     ]
+
+
+def test_stream_continues_past_first_step_when_reply_pipeline_disabled(monkeypatch):
+    """E1b(Part3 收窄):reply_pipeline_enabled=False 时,H1 回复流水线
+    `run()` 一进来就原样返回草稿(不看 complex_turn),不存在"生成完再被改写
+    一遍"的风险——已经调用过工具的第 1 步也可以放开流式,不必再恒非流式。
+    这是相对 E1 报告"第 1 步及以后恒非流式"的收窄,证明它不是放之四海皆准
+    的硬限制,而是绑定在 reply_pipeline_enabled 这个开关上的。"""
+    monkeypatch.setattr(settings, "stream_reply_enabled", True)
+    monkeypatch.setattr(settings, "reply_pipeline_enabled", False)
+    tm = FakeToolManager()
+    a = make_agent([
+        _StreamResp([
+            _Chunk(_Delta(tool_calls=[_DeltaToolCall(0, id="1", name="query_order")])),
+            _Chunk(_Delta(tool_calls=[_DeltaToolCall(0, arguments='{"order_id":"O1"}')])),
+        ]),
+        _StreamResp([
+            _Chunk(_Delta(content="您的")),
+            _Chunk(_Delta(content="订单已发货。")),
+        ]),
+    ], tm=tm)
+    out = a._react_loop()
+    assert out == "您的订单已发货。"
+    assert tm.executed == [("query_order", {"order_id": "O1"})]
+    # 第 0 步(工具调用,不发 delta)+ 第 1 步(终答,发 delta)都走 stream=True
+    assert a.client.calls == [
+        {"tools": True, "stream": True},
+        {"tools": True, "stream": True},
+    ]
+    assert [d["content"] for d in _deltas(a)] == ["您的", "订单已发货。"]
 
 
 def test_stream_switch_off_is_byte_identical_to_non_streaming(monkeypatch):

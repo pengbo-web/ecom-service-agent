@@ -227,8 +227,12 @@ class Tracer:
             # started_at` 就是"首字时间"(time to first chunk),与总时长
             # (trace.latency_ms)分开看才能验证"是不是从生成一开始就在吐字"，
             # 不是等全量生成完再假装分块发。复用既有 reply_delta 事件本身
-            # (`_can_stream_first_step`/`_llm_create_streaming` 已经在发的
-            # 那个事件)判断，没有另开一条通道。
+            # (`_can_stream_step`/`_llm_create_streaming` 已经在发的那个事件)
+            # 判断，没有另开一条通道。E1b 之后 app/api/streaming.py 的
+            # IncrementalRedactor 可能会扣住/合并部分要发给买家的增量分片，
+            # 但那一层只作用于送进 SSE 队列的事件——tracer 这里拿到的是
+            # sink() 转发的原始事件，"首字时间"衡量的仍是引擎真实吐出第一个
+            # token 的时刻，不受买家侧 holdback 缓冲影响。
             now = self._now()
             trace.spans.append(Span(
                 span_id=self._id(), trace_id=trace.trace_id,

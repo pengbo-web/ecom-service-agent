@@ -82,12 +82,38 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
     from app.observability.langfuse_bridge import langfuse_turn
     lf_turn = langfuse_turn(session_id, getattr(agent, "user_id", None), user_input)
 
+    # E1b(Part1,流式安全脱敏):变换类输出护栏如果证明是"局部脱敏"(见
+    # GuardPipeline.local_redaction_holdback),逐块吐字给买家的 reply_delta
+    # 就不必再整体禁流——套一层 IncrementalRedactor,扣住尾部 holdback 个
+    # 字符不发,其余部分边生成边脱敏边吐。holdback=None 时(存在证明不了
+    # "只改局部"的变换类护栏,比如没暴露 PATTERNS 的自定义护栏)保持老规矩:
+    # 这一路完全不吐 reply_delta,由下面 _normal_flow 里的 stream_eligible
+    # 判定直接堵住(引擎那边压根不会 stream=True 发起生成)。
+    _holdback = guard_pipeline.local_redaction_holdback() if guard_pipeline is not None else 0
+    _redactor = None
+    if guard_pipeline is not None and _holdback is not None and _holdback >= 0:
+        from app.guardrails.streaming_redactor import IncrementalRedactor
+        _redactor = IncrementalRedactor(
+            guard_pipeline.local_redaction_patterns(), _holdback,
+            guard_pipeline.sanitize_fragment,
+        )
+
     def sink(ev: dict) -> None:
+        # tracer/Langfuse 是运营侧观测,不是买家——始终喂原始事件(未经增量
+        # 脱敏缓冲),保留真实的"首字时间"等信号不失真;真正决定买家能看到
+        # 什么的只有下面推进 SSE 队列 `q` 这一步。
         if tracer is not None:
             tracer.on_event(ev)
         if lf_turn is not None:
             lf_turn.on_event(ev)
-        q.put(ev)
+        out_ev = ev
+        if _redactor is not None and ev.get("type") == "reply_delta":
+            safe_text = _redactor.feed(ev.get("content", ""))
+            if safe_text is None:
+                return   # 还在 holdback 区间内,这次没有新的、确认安全的内容可以发给买家
+            out_ev = dict(ev)
+            out_ev["content"] = safe_text
+        q.put(out_ev)
 
     # ── 观察/变换阶段(observe):不能否决已发生的动作,只做变换与埋点 ──
     def _finalize(reply: str, _sink) -> str:
@@ -138,19 +164,20 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         return "human_request"
 
     def _normal_flow(_sink) -> str:
-        # E1(回复流式化):是否允许 ReAct 第 0 步逐块吐字给买家,必须在 chat()
-        # 开始生成**之前**拍板——guard_pipeline 是否含"变换类"输出护栏这件事
-        # 引擎(EcomAgent)自己判断不了(它拿不到 guard_pipeline),只能由这里
-        # 判完再注入。见 app/guardrails/pipeline.py `has_rewriting_output_guard`
-        # 与 app/guardrails/base.py `OutputGuard` 的分类说明——ContactInfoGuard
-        # 命中时是整段替换回复,已经流出去的前缀事后没法收回,所以只要 pipeline
-        # 里存在任何一个变换类 guard,这一轮就整体降级为非流式(先全量生成→
-        # 护栏跑完→一次性发,跟现状一致),不去猜"这段具体文本会不会真的命中"。
+        # E1b:是否允许 ReAct 第 0 步逐块吐字给买家,必须在 chat() 开始生成
+        # **之前**拍板——guard_pipeline 的输出护栏能不能被"证明是局部脱敏"
+        # 这件事引擎(EcomAgent)自己判断不了(它拿不到 guard_pipeline),只能
+        # 由这里判完再注入。见 app/guardrails/pipeline.py
+        # `local_redaction_holdback`:只要每一个变换类护栏都暴露了 PATTERNS
+        # 且宽度可静态算出(局部脱敏、有界),这一轮就能流式——真正的安全网
+        # 是上面 sink() 里的 IncrementalRedactor(扣住尾部缓冲,逐块脱敏后再
+        # 发),不是靠"这一轮到底会不会命中"去猜。只有当存在证明不了局部脱敏
+        # 的变换类护栏(holdback 为 None,比如整段替换类)时才整体退化为非
+        # 流式(先全量生成→护栏跑完→一次性发,跟改造前的现状一致)。
         # 用 getattr 防御:测试/旧版桩 agent(如 FakeAgent)没有这个方法很常见，
         # 没有就说明它压根不是走真实 ReAct 引擎，直接跳过、不影响它原有行为。
         stream_eligible = (settings.stream_reply_enabled
-                           and not (guard_pipeline is not None
-                                    and guard_pipeline.has_rewriting_output_guard()))
+                           and (guard_pipeline is None or _holdback is not None))
         _set_eligible = getattr(agent, "set_turn_stream_eligible", None)
         if callable(_set_eligible):
             _set_eligible(stream_eligible)

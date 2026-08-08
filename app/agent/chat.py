@@ -150,11 +150,12 @@ class EcomAgent:
         self._turn_qu = qu
 
     def set_turn_stream_eligible(self, eligible: bool) -> None:
-        """E1:streaming.py 每轮在调 chat() 前注入——这一轮的输出护栏是否
-        含"变换类"(见 app/guardrails/pipeline.py `has_rewriting_output_guard`)。
-        引擎本身不持有 guard_pipeline，这条判断天然只能由上层(streaming.py)
-        做完再告诉它；引擎这边只再叠加一条它自己知道、上层不知道的条件——
-        是否是本轮第一步(见 `_can_stream_first_step`)。"""
+        """E1b:streaming.py 每轮在调 chat() 前注入——这一轮的输出护栏能不能
+        被证明是"局部脱敏"(见 app/guardrails/pipeline.py
+        `local_redaction_holdback`)。引擎本身不持有 guard_pipeline，这条
+        判断天然只能由上层(streaming.py)做完再告诉它；引擎这边只再叠加一条
+        它自己知道、上层不知道的条件——本回合是否已经执行过工具(见
+        `_can_stream_step`)。"""
         self._turn_stream_eligible = bool(eligible)
 
     def chat(self, user_input: str) -> CustomerServiceResponse:
@@ -353,29 +354,53 @@ class EcomAgent:
             kwargs["tools"] = self.tool_manager.tool_definitions
         return self.client.chat.completions.create(**kwargs)
 
-    def _can_stream_first_step(self) -> bool:
-        """E1:ReAct 第 0 步是否可以流式发起。只看**生成开始前就已知**的静态
-        信号，不做任何"猜内容"的预测——为什么不能猜见
-        app/guardrails/base.py `OutputGuard` 的分类说明：ContactInfoGuard
-        命中时是整段替换回复，已经流出去的前缀事后没法收回，所以"要不要
-        流式"必须在按下生成键之前就拍板，不能等边生成边看内容再决定。
+    def _can_stream_step(self) -> bool:
+        """E1b:当前 ReAct 步是否可以流式发起。只看**生成开始前就已知**的
+        静态信号，不做任何"猜内容"的预测——为什么不能猜见
+        app/guardrails/base.py `OutputGuard` 的分类说明：一个证明不了"只改
+        局部"的变换类护栏一旦命中就可能整段改写回复，已经流出去的前缀事后
+        没法收回，所以"要不要流式"必须在按下生成键之前就拍板，不能等边生成
+        边看内容再决定。
 
           1) 总开关 `settings.stream_reply_enabled`；
           2) `_turn_stream_eligible`——streaming.py 在调 `chat()` 前已经把
-             "这一轮的输出护栏是否含变换类 guard"判完并注入（引擎本身不
-             持有 guard_pipeline，没有能力、也不该在这里重复判断）。
+             "这一轮的输出护栏能不能被证明是局部脱敏"判完并注入（引擎本身
+             不持有 guard_pipeline，没有能力、也不该在这里重复判断；局部
+             脱敏护栏真正的安全网是 streaming.py 里的 IncrementalRedactor，
+             这里只需要知道"能不能流"这个二元结论）。
 
-        引擎这边只再叠加一条上层不知道、只有引擎自己知道的条件——调用方
-        `_react_loop` 只在 `step == 0` 时问这个方法，因为只有第 0 步能保证
-        "生成完 self._step_seq 仍是 0"，进而保证 chat() 里回复流水线的
-        `complex_turn` 必然是 False（否则 H1 评估/重写/润色会在买家已经看到
-        的字之后再改一遍，跟输出护栏是同一类"事后被改写"的风险）。
+        引擎这边再叠加一条上层不知道、只有引擎自己知道的条件——H1 回复流水
+        线（`self._reply_pipeline`）的 `complex_turn` 参数在 chat() 里传的是
+        `self._step_seq > 0`，即"本回合是否已经执行过工具"。这个值只会在
+        执行工具后递增，从不减少，所以：
+
+          - 当前步开始前 `self._step_seq == 0`（本回合到这一步为止还没执行
+            过任何工具）：如果这一步恰好就是终答（不再调用工具），
+            `complex_turn` 必然是 False，回复流水线 `run()` 会在最开头直接
+            原样返回草稿——不存在"生成完再被 H1 改一遍"的风险，可以流。
+            （如果这一步反而调用了工具，`_llm_create_streaming` 检测到
+            `tool_calls` 后会自动停发 `reply_delta`，不会误流出过程性文字。）
+          - 当前步开始前 `self._step_seq > 0`（更早的某一步已经执行过工具）：
+            只要 `settings.reply_pipeline_enabled`（默认开）没关，
+            `complex_turn` 必然是 True——回复流水线**一定**会至少跑一次
+            真实 LLM 润色（`_run_loop` 收敛路径必经 polish），这正是"生成完
+            还要被改写"的风险，跟输出护栏是同一类问题，不能流。只有当运营
+            方主动关掉 `reply_pipeline_enabled`（回复流水线总开关）时，
+            complex_turn 的值才不再重要（`run()` 直接原样返回草稿），这种
+            配置下已经调用过工具的步骤也可以放开流式——这是相对 E1 报告里
+            "第 1 步及以后恒非流式"的收窄，不是漏做：默认配置下这条收窄
+            不生效（因为 reply_pipeline 默认开），是诊断后的诚实结论，不是
+            实现缺口。
         """
         # getattr 防御:裸 agent 测试(EcomAgent.__new__,不走 __init__)可能
         # 压根没设过这个属性——没设等价于"没被上层判定过 eligible",按 False
         # 处理(=不流式),与老行为一致,不因为新增字段炸掉既有测试。
-        return bool(settings.stream_reply_enabled
-                    and getattr(self, "_turn_stream_eligible", False))
+        if not (settings.stream_reply_enabled
+                and getattr(self, "_turn_stream_eligible", False)):
+            return False
+        if self._step_seq == 0:
+            return True
+        return not settings.reply_pipeline_enabled
 
     def _llm_create_streaming(self, messages: list[dict]) -> "_StreamedMessage":
         """E1:真流式发起 ReAct 第 0 步生成——token 级增量通过 `reply_delta`
@@ -466,13 +491,14 @@ class EcomAgent:
     def _react_loop(self) -> str:
         """ReAct 循环：调用 LLM → 执行工具 → 观察结果 → 重复，直到模型给出最终回答。
 
-        E1(回复流式化):仅在 `step == 0` 且 `_can_stream_first_step()` 时改走
-        `_llm_create_streaming`——原因见该方法的 docstring：只有第 0 步能保证
-        "生成完 self._step_seq 仍是 0"，第 1 步及以后恒走原有非流式路径。
+        E1b(回复流式化):每一步都问一次 `_can_stream_step()`——原因见该方法
+        的 docstring：默认配置下(`reply_pipeline_enabled=True`)只有第 0 步
+        能通过(与 E1 报告的行为一致)，但关掉回复流水线总开关后，后续步骤
+        （已经调用过工具的那些）也能流，不再是硬编码的"仅 step==0"。
         """
         for step in range(self.max_react_steps):
             messages = self._build_messages()
-            if step == 0 and self._can_stream_first_step():
+            if self._can_stream_step():
                 assistant_msg = self._llm_create_streaming(messages)
             else:
                 response = self._llm_create(messages, use_tools=True)
