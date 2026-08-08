@@ -497,57 +497,116 @@ class EcomAgent:
                 total += len(piece)
         return "\n".join(reversed(collected))
 
+    # E2:QU(查询理解节点,app/agent/understanding.py)七类中文粗粒度路由标签 →
+    # 业务侧 IntentType 细分枚举的映射。两套分类体系本来就不是一一对应,映射
+    # 天然有损;拿不准的一律落 OTHER,不硬猜。"政策咨询"额外结合 QU 已经判定
+    # 的 domain 再细分一层(见 _intent_from_qu),因为它本身太粗,直接落单一枚举
+    # 会把"退货流程"和"优惠券规则"这类完全不同的业务问题混进同一个桶。
+    _QU_INTENT_MAP: dict = {
+        "投诉": IntentType.COMPLAINT,
+        "闲聊寒暄": IntentType.GREETING,
+        "商品咨询": IntentType.PRODUCT_CONSULT,
+        "订单事务": IntentType.ORDER_QUERY,
+        "转人工": IntentType.OTHER,   # 无对应细分枚举;是否转人工由 requires_human 字段承载
+        "其他": IntentType.OTHER,
+    }
+
+    # confidence 字段的定义(schemas/response.py)是"意图识别的置信度"，不是
+    # "回复内容靠不靠谱"。零 LLM 后没有模型自评这个数字了,改用诚实、可解释的
+    # 常量:按 QU 判定意图时走的是哪条路径给分——规则命中(确定性正则)最高,
+    # LLM 判定次之,QU 自身兜底/未注入 QU(意图来源不明)最低,与
+    # settings.hitl_confidence_threshold(默认 0.6)的关系也刻意保留:后两种
+    # 情形仍能触发"置信度过低"规则升级,不是形同虚设的常量。
+    _QU_SOURCE_CONFIDENCE: dict = {"rule": 0.95, "llm": 0.8, "fallback": 0.5}
+    _CONFIDENCE_NO_QU = 0.5   # 引擎独立运行、未注入 QU 时:意图来源不明,与 QU 兜底同档
+
+    # 系统提示词(prompts/customer_service.py)规定,模型"查不到/无把握/超出能力"时
+    # 必须使用含"转人工/人工客服"字样的统一兜底话术——这段文字本身已经带着
+    # "该转人工"的信号,不需要再额外花一次 LLM 调用去"读出"它。
+    _HUMAN_HANDOFF_MARKERS = ("转人工", "人工客服")
+
+    def _intent_from_qu(self) -> IntentType:
+        """E2:复用 QU 在生成*之前*就判定好的意图,替代生成之后再问模型一次。
+
+        QU 的分类不会被回复内容污染(它先于 ReAct 循环产生),这一点比旧版
+        "模型看着自己刚生成的回复再自评一次"更站得住脚。"""
+        qu = getattr(self, "_turn_qu", None)
+        if qu is None:
+            return IntentType.OTHER
+        intent = getattr(qu, "intent", None)
+        if intent == "政策咨询":
+            domain = getattr(qu, "domain", None)
+            if domain == "aftersale":
+                return IntentType.RETURN_REQUEST
+            if domain == "presale":
+                return IntentType.PROMOTION
+            return IntentType.OTHER
+        return self._QU_INTENT_MAP.get(intent, IntentType.OTHER)
+
+    def _confidence_from_qu(self) -> float:
+        qu = getattr(self, "_turn_qu", None)
+        if qu is None:
+            return self._CONFIDENCE_NO_QU
+        source = getattr(qu, "source", None)
+        return self._QU_SOURCE_CONFIDENCE.get(source, self._CONFIDENCE_NO_QU)
+
+    @classmethod
+    def _requires_human_from_text(cls, text: str) -> bool:
+        """回复文案里命中转人工话术即视为需要转人工,信号来源与旧版(读同一段
+        文字判断)实质相同,只是不再为"读它"单花一次 LLM 调用。"""
+        t = text or ""
+        return any(marker in t for marker in cls._HUMAN_HANDOFF_MARKERS)
+
     def _extract_structured_response(self, text: str) -> CustomerServiceResponse:
-        """从最终文本中提取结构化元数据（意图、置信度等）。"""
+        """从本轮已有信号组装结构化元数据（意图/置信度/是否转人工），不再二次调用 LLM。
+
+        E2:原实现在 reply 已经生成之后,把这段文字整段喂给模型再跑一次
+        `beta.chat.completions.parse`,只为拿 intent/confidence/requires_human
+        三个字段——它自己的 system prompt 还写着"reply 字段直接使用原文，
+        不要修改或缩减"，即压根不改回复，纯粹为元数据多付一次 round trip
+        (~5s，约占全轮延迟的 10%)。改为零 LLM 派生：
+          - intent:复用 QU 已经判定好的意图（_intent_from_qu）。
+          - confidence:字段本义是"意图识别置信度"，按 QU 判定路径给诚实常量
+            （_confidence_from_qu），不再假装能读出一个"0.87"这种看似精确、
+            实际编造的数字。
+          - requires_human:HITL 规则层（app/api/streaming.py `_normal_flow`）
+            本来就会在这之后按规则重新 OR 一次
+            （`requires_human_out = result.requires_human or bool(reasons)`），
+            模型自报从来不是权威判定；这里改用零成本的文本关键词命中
+            （_requires_human_from_text），不丢系统提示词规定的统一兜底话术
+            这一类信号。
+          - follow_up_question:不再有模型从文本里抽取的追问句，前端也未消费
+            该字段（MetadataChips 未渲染），统一 None，与其它非模型分支
+            （blocked/human_request/replay）同口径。
+
+        任何异常都不放行——落到 _extract_structured_fallback，保证这一轮
+        永远有结构化结果可用，绝不因为元数据组装本身出错而炸掉整轮回复。
+        """
         try:
-            response = self.client.beta.chat.completions.parse(
-                model=self.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "基于以下客服回复内容，提取结构化信息。"
-                            "reply 字段直接使用原文，不要修改或缩减。"
-                        ),
-                    },
-                    {"role": "user", "content": text},
-                ],
-                temperature=0.0,
-                response_format=CustomerServiceResponse,
+            return CustomerServiceResponse(
+                intent=self._intent_from_qu(),
+                confidence=self._confidence_from_qu(),
+                reply=text,
+                requires_human=self._requires_human_from_text(text),
+                follow_up_question=None,
             )
-            return response.choices[0].message.parsed
         except Exception:
             return self._extract_structured_fallback(text)
 
     def _extract_structured_fallback(self, text: str) -> CustomerServiceResponse:
-        """当 response_format 不被 API 支持时，用 prompt 引导 JSON 输出。"""
-        intent_values = ", ".join(f'"{e.value}"' for e in IntentType)
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "基于以下客服回复内容，提取结构化信息并输出 JSON。\n"
-                        "reply 字段直接使用原文，不要修改或缩减。\n\n"
-                        "必须严格按照以下 JSON 格式输出（不要加 markdown 代码块）：\n"
-                        "{\n"
-                        f'  "intent": <从以下选择: {intent_values}>,\n'
-                        '  "confidence": <0.0到1.0的浮点数>,\n'
-                        '  "reply": <原文回复内容>,\n'
-                        '  "requires_human": <true或false>,\n'
-                        '  "follow_up_question": <追问问题或null>\n'
-                        "}"
-                    ),
-                },
-                {"role": "user", "content": text},
-            ],
-            temperature=0.0,
+        """E2:等效安全网——原版在 response_format 不被 API 支持时改用 prompt 引导
+        JSON 输出（仍是一次 LLM 调用）；现在整条元数据组装路径已不含 LLM 调用，
+        这里的"解析失败"改指 _extract_structured_response 自身出错（如 QU 对象
+        形状异常），安全网也相应改为零 LLM 的硬编码兜底——不管前面出了什么错，
+        这里保证必定返回一个合法的 CustomerServiceResponse，不再有第二条网络请求
+        可能失败。"""
+        return CustomerServiceResponse(
+            intent=IntentType.OTHER,
+            confidence=self._CONFIDENCE_NO_QU,
+            reply=text,
+            requires_human=self._requires_human_from_text(text),
+            follow_up_question=None,
         )
-        raw = response.choices[0].message.content.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        return CustomerServiceResponse.model_validate_json(raw)
 
     def _preload_skill(self, user_input: str) -> None:
         """确定性预加载:按关键词判定本轮该用哪个 skill,程序化加载并记进本轮轨迹。
