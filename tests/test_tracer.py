@@ -200,6 +200,30 @@ def test_marker_events_each_produce_expected_span(tmp_path):
         assert sp["started_at"] == sp["ended_at"]
 
 
+def test_reply_delta_first_chunk_marks_time_to_first_chunk(tmp_path):
+    """E1(回复流式化):首个 reply_delta(first=True)记一条零时长标记 span，
+    meta 里带 time_to_first_chunk_ms——观测层据此看"从生成开始到第一个字
+    出屏花了多久"，不是只有总时长(latency_ms)可看。后续 delta(没有
+    first)不重复记，不把一条 trace 灌满几十上百条零信息量的 span。"""
+    tracer, store = _tracer(tmp_path)
+    with tracer.start_trace("sess1", "你好") as t:
+        tracer.on_event({"type": "reply_delta", "content": "您", "first": True})
+        tracer.on_event({"type": "reply_delta", "content": "好"})
+        tracer.on_event({"type": "reply_delta", "content": "呀"})
+
+    saved = store.get_trace(t.trace_id)
+    reply_delta_spans = [s for s in saved["spans"] if s["kind"] == "reply_delta"]
+    assert len(reply_delta_spans) == 1          # 只记首块,不是每块一条
+    sp = reply_delta_spans[0]
+    assert sp["name"] == "reply_delta:first"
+    assert sp["latency_ms"] == 0.0
+    # 确定性时钟:start_trace 消耗一次(=0)→ trace.started_at=0；
+    # 第一条 on_event 再消耗一次(=1)→ sp.started_at=1 → 首字用时 1000ms。
+    assert saved["started_at"] == 0
+    assert sp["started_at"] == 1
+    assert _meta(sp)["time_to_first_chunk_ms"] == 1000.0
+
+
 def test_tracer_failure_cannot_break_a_turn(tmp_path, monkeypatch):
     """观测层内部炸了(比如某个新事件类型的处理逻辑有 bug)：on_event 必须自己
     吞掉，绝不能让异常冒泡到调用方(streaming.py 的 sink 那里没有额外的

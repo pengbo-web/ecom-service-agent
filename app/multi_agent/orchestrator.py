@@ -58,6 +58,13 @@ class MultiAgentOrchestrator:
         # 供 streaming 层设置/透传(与 EcomAgent 接口一致)
         self.event_sink = None
         self.client = self.engine.client
+        self._turn_stream_eligible = False   # E1:见 set_turn_stream_eligible
+
+    def set_turn_stream_eligible(self, eligible: bool) -> None:
+        """E1:streaming.py 每轮在调 chat() 前对着总控注入(它才是
+        run_agent_streaming 拿到的 agent);chat() 里再原样转给真正跑
+        ReAct 循环的引擎(self.engine)。"""
+        self._turn_stream_eligible = bool(eligible)
 
     def chat(self, user_input: str):
         # 统一查询理解(默认):一次调用出 domain/intent/need_kb/kb_query,
@@ -77,6 +84,11 @@ class MultiAgentOrchestrator:
             qu.domain = key          # 粘性解析结果回填:检索过滤拿到确定域
         self.engine.set_turn_understanding(qu)
         profile = self.profiles.get(key) or next(iter(self.profiles.values()))
+        # E1:streaming.py 对着「总控」调 set_turn_stream_eligible(它才是
+        # run_agent_streaming 传入的 agent),这里原样转给真正跑 ReAct 循环
+        # 的引擎——否则生产路径(app.py 走的就是这个总控)永远读不到这个开关,
+        # 只有裸 EcomAgent 测试才会生效。
+        self.engine.set_turn_stream_eligible(getattr(self, "_turn_stream_eligible", False))
         if self.event_sink:
             event = {"type": "route", "agent": profile["name"], "key": key}
             if qu is not None:

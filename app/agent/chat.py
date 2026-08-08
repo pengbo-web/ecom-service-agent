@@ -14,6 +14,29 @@ from app.agent.tools.bargain import set_current_session
 from app.agent.reply_pipeline import ReplyPipeline
 
 
+# E1(回复流式化):OpenAI 流式 delta 里 tool_calls 是分片到达的(每片只带
+# 一小段 name/arguments 字符串,按 index 累加),下面三个是最小的"仿造"容器，
+# 拼完之后跟非流式 `response.choices[0].message` 形状一致——下游
+# `_parse_tool_calls`/`_react_loop` 读的是 `.content` / `.tool_calls[i].id`
+# / `.function.name` / `.function.arguments`，零改动即可复用。
+class _StreamedFunction:
+    def __init__(self, name: str, arguments: str):
+        self.name = name
+        self.arguments = arguments
+
+
+class _StreamedToolCall:
+    def __init__(self, id_: str, name: str, arguments: str):
+        self.id = id_
+        self.function = _StreamedFunction(name, arguments)
+
+
+class _StreamedMessage:
+    def __init__(self, content: str, tool_calls: Optional[list]):
+        self.content = content
+        self.tool_calls = tool_calls or None
+
+
 class EcomAgent:
     """内部 ReAct 引擎,由总控 Agent(MultiAgentOrchestrator)驱动;不再作为独立运行模式。
 
@@ -43,6 +66,11 @@ class EcomAgent:
         self._turn_item_ctx = None   # (item_id, 商品块) 每轮缓存:同商品不重复请求 hmdp
         self._turn_skill_ctx = None   # (skill_name, instructions) 本轮预加载的技能流程
         self._turn_qu = None       # 查询理解结果(orchestrator 每轮注入;引擎独立运行时 None=老行为)
+        # E1:这一轮是否允许 ReAct 第一步流式吐字给买家——由 streaming.py 在
+        # 调 chat() 前注入(见 set_turn_stream_eligible),已经把"输出护栏是否
+        # 含改写类 guard"这件事在生成前判完。引擎本身拿不到 guard_pipeline，
+        # 默认 False(与既有裸 agent 测试/未注入场景保持"不流式"的老行为)。
+        self._turn_stream_eligible = False
         self.history_threshold = settings.history_threshold
         self.history_keep_recent = settings.history_keep_recent
         self.max_react_steps = settings.max_react_steps
@@ -120,6 +148,14 @@ class EcomAgent:
     def set_turn_understanding(self, qu) -> None:
         """orchestrator 每轮注入查询理解结果(QueryUnderstanding);None=退回默认行为。"""
         self._turn_qu = qu
+
+    def set_turn_stream_eligible(self, eligible: bool) -> None:
+        """E1:streaming.py 每轮在调 chat() 前注入——这一轮的输出护栏是否
+        含"变换类"(见 app/guardrails/pipeline.py `has_rewriting_output_guard`)。
+        引擎本身不持有 guard_pipeline，这条判断天然只能由上层(streaming.py)
+        做完再告诉它；引擎这边只再叠加一条它自己知道、上层不知道的条件——
+        是否是本轮第一步(见 `_can_stream_first_step`)。"""
+        self._turn_stream_eligible = bool(eligible)
 
     def chat(self, user_input: str) -> CustomerServiceResponse:
         """处理用户输入：ReAct 循环 → 结构化提取 → 返回结果"""
@@ -317,6 +353,91 @@ class EcomAgent:
             kwargs["tools"] = self.tool_manager.tool_definitions
         return self.client.chat.completions.create(**kwargs)
 
+    def _can_stream_first_step(self) -> bool:
+        """E1:ReAct 第 0 步是否可以流式发起。只看**生成开始前就已知**的静态
+        信号，不做任何"猜内容"的预测——为什么不能猜见
+        app/guardrails/base.py `OutputGuard` 的分类说明：ContactInfoGuard
+        命中时是整段替换回复，已经流出去的前缀事后没法收回，所以"要不要
+        流式"必须在按下生成键之前就拍板，不能等边生成边看内容再决定。
+
+          1) 总开关 `settings.stream_reply_enabled`；
+          2) `_turn_stream_eligible`——streaming.py 在调 `chat()` 前已经把
+             "这一轮的输出护栏是否含变换类 guard"判完并注入（引擎本身不
+             持有 guard_pipeline，没有能力、也不该在这里重复判断）。
+
+        引擎这边只再叠加一条上层不知道、只有引擎自己知道的条件——调用方
+        `_react_loop` 只在 `step == 0` 时问这个方法，因为只有第 0 步能保证
+        "生成完 self._step_seq 仍是 0"，进而保证 chat() 里回复流水线的
+        `complex_turn` 必然是 False（否则 H1 评估/重写/润色会在买家已经看到
+        的字之后再改一遍，跟输出护栏是同一类"事后被改写"的风险）。
+        """
+        # getattr 防御:裸 agent 测试(EcomAgent.__new__,不走 __init__)可能
+        # 压根没设过这个属性——没设等价于"没被上层判定过 eligible",按 False
+        # 处理(=不流式),与老行为一致,不因为新增字段炸掉既有测试。
+        return bool(settings.stream_reply_enabled
+                    and getattr(self, "_turn_stream_eligible", False))
+
+    def _llm_create_streaming(self, messages: list[dict]) -> "_StreamedMessage":
+        """E1:真流式发起 ReAct 第 0 步生成——token 级增量通过 `reply_delta`
+        事件吐给买家（走既有 `self._emit` 通道，tracer/langfuse 桥/SSE 队列
+        原样收到，不是另开的第二条通道）。
+
+        若模型这一步实际决定调用工具（delta 带 `tool_calls`），从检测到的
+        那一刻起不再发任何 `reply_delta`，只静默把 content/tool_calls 攒
+        完，拼成与非流式版本形状一致的 message 对象交回上层——`_parse_tool_
+        calls`/工具执行逻辑零改动。
+
+        已知残余风险（记在报告里，不是本任务要堵的那类泄露）：如果模型在
+        真正落到 tool_calls 之前先流出几个字的过渡评论（比如"让我查一
+        下"），这几个字会被当成 reply_delta 先发出去——跟"输出护栏改写"是
+        两类问题：护栏改写是"买家看到了本该被换掉的文本"，这里是"买家看到
+        了一句后来被完整回复覆盖的过渡话"，终帧(`reply`)照样会覆盖它。
+
+        首个 `reply_delta` 带 `first: True`，供观测层记"首字时间"。
+        """
+        kwargs = dict(model=self.model, messages=messages, temperature=self.temperature,
+                      tools=self.tool_manager.tool_definitions, stream=True)
+        stream = self.client.chat.completions.create(**kwargs)
+        content_parts: list[str] = []
+        tool_calls_acc: dict[int, dict] = {}
+        is_tool_call = False
+        emitted_first = False
+        for chunk in stream:
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            delta = choices[0].delta
+            delta_tool_calls = getattr(delta, "tool_calls", None)
+            if delta_tool_calls:
+                is_tool_call = True   # 一旦出现 tool_calls,这一步不是终答,后面不再发 reply_delta
+                for tcd in delta_tool_calls:
+                    idx = getattr(tcd, "index", 0) or 0
+                    slot = tool_calls_acc.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    if getattr(tcd, "id", None):
+                        slot["id"] = tcd.id
+                    fn = getattr(tcd, "function", None)
+                    if fn is not None:
+                        if getattr(fn, "name", None):
+                            slot["name"] += fn.name
+                        if getattr(fn, "arguments", None):
+                            slot["arguments"] += fn.arguments
+            delta_content = getattr(delta, "content", None)
+            if delta_content:
+                content_parts.append(delta_content)
+                if not is_tool_call:
+                    event = {"type": "reply_delta", "content": delta_content}
+                    if not emitted_first:
+                        event["first"] = True
+                        emitted_first = True
+                    self._emit(event)
+        tool_calls = None
+        if tool_calls_acc:
+            tool_calls = [
+                _StreamedToolCall(v["id"], v["name"], v["arguments"])
+                for _, v in sorted(tool_calls_acc.items())
+            ]
+        return _StreamedMessage("".join(content_parts), tool_calls)
+
     def _answer_without_tools(self) -> str:
         """不带 tools 再问一次,让模型用自然语言直接作答(循环兜底/畸形降级共用)。"""
         response = self._llm_create(self._build_messages(), use_tools=False)
@@ -343,11 +464,19 @@ class EcomAgent:
         return parsed, False
 
     def _react_loop(self) -> str:
-        """ReAct 循环：调用 LLM → 执行工具 → 观察结果 → 重复，直到模型给出最终回答。"""
+        """ReAct 循环：调用 LLM → 执行工具 → 观察结果 → 重复，直到模型给出最终回答。
+
+        E1(回复流式化):仅在 `step == 0` 且 `_can_stream_first_step()` 时改走
+        `_llm_create_streaming`——原因见该方法的 docstring：只有第 0 步能保证
+        "生成完 self._step_seq 仍是 0"，第 1 步及以后恒走原有非流式路径。
+        """
         for step in range(self.max_react_steps):
             messages = self._build_messages()
-            response = self._llm_create(messages, use_tools=True)
-            assistant_msg = response.choices[0].message
+            if step == 0 and self._can_stream_first_step():
+                assistant_msg = self._llm_create_streaming(messages)
+            else:
+                response = self._llm_create(messages, use_tools=True)
+                assistant_msg = response.choices[0].message
 
             if assistant_msg.content:
                 self._emit({"type": "thought", "content": assistant_msg.content})

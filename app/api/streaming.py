@@ -5,6 +5,7 @@ import queue
 import threading
 from typing import Iterator
 
+from app.config.settings import settings
 from app.guardrails.base import SAFE_FALLBACK
 
 _SENTINEL = object()
@@ -137,6 +138,22 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         return "human_request"
 
     def _normal_flow(_sink) -> str:
+        # E1(回复流式化):是否允许 ReAct 第 0 步逐块吐字给买家,必须在 chat()
+        # 开始生成**之前**拍板——guard_pipeline 是否含"变换类"输出护栏这件事
+        # 引擎(EcomAgent)自己判断不了(它拿不到 guard_pipeline),只能由这里
+        # 判完再注入。见 app/guardrails/pipeline.py `has_rewriting_output_guard`
+        # 与 app/guardrails/base.py `OutputGuard` 的分类说明——ContactInfoGuard
+        # 命中时是整段替换回复,已经流出去的前缀事后没法收回,所以只要 pipeline
+        # 里存在任何一个变换类 guard,这一轮就整体降级为非流式(先全量生成→
+        # 护栏跑完→一次性发,跟现状一致),不去猜"这段具体文本会不会真的命中"。
+        # 用 getattr 防御:测试/旧版桩 agent(如 FakeAgent)没有这个方法很常见，
+        # 没有就说明它压根不是走真实 ReAct 引擎，直接跳过、不影响它原有行为。
+        stream_eligible = (settings.stream_reply_enabled
+                           and not (guard_pipeline is not None
+                                    and guard_pipeline.has_rewriting_output_guard()))
+        _set_eligible = getattr(agent, "set_turn_stream_eligible", None)
+        if callable(_set_eligible):
+            _set_eligible(stream_eligible)
         # normal flow 恒不授权任何风险动作(风险动作只走 _replay_flow 的确定性重放)。
         # 空 scope 是 fail-closed 的显式表达:模型当轮无法直接执行退款/取消等不可逆动作。
         with consent_scope(frozenset()):

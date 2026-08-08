@@ -126,6 +126,12 @@ class Settings(BaseSettings):
     # 安全护栏（W3）
     guardrails_enabled: bool = True
 
+    # 回复流式化(E1):买家可见的最终回复逐块吐字,而不是等全量生成完再一次性给。
+    # 关闭时行为与现状逐字节一致(ReAct 循环仍用非流式调用)。是否真的流式还要看
+    # 这一轮是否命中"改写类"输出护栏(见 app/guardrails/pipeline.py
+    # `has_rewriting_output_guard`)——命中则本开关也救不回来,原样降级非流式。
+    stream_reply_enabled: bool = True
+
     # 人机协作 HITL（W3）
     hitl_enabled: bool = True
     hitl_confidence_threshold: float = 0.6

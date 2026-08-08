@@ -221,6 +221,22 @@ class Tracer:
                       "skipped": event.get("skipped"), "reason": event.get("reason")},
                 parent_span_id=self._parent(trace),
             ))
+        elif etype == "reply_delta" and event.get("first"):
+            # E1(回复流式化):只记**第一块**——每块都记会把一条 trace 灌满
+            # 上百条零信息量的 span。这一条零时长标记的 `started_at - trace.
+            # started_at` 就是"首字时间"(time to first chunk),与总时长
+            # (trace.latency_ms)分开看才能验证"是不是从生成一开始就在吐字"，
+            # 不是等全量生成完再假装分块发。复用既有 reply_delta 事件本身
+            # (`_can_stream_first_step`/`_llm_create_streaming` 已经在发的
+            # 那个事件)判断，没有另开一条通道。
+            now = self._now()
+            trace.spans.append(Span(
+                span_id=self._id(), trace_id=trace.trace_id,
+                name="reply_delta:first", kind="reply_delta",
+                started_at=now, ended_at=now, latency_ms=0.0,
+                meta={"time_to_first_chunk_ms": (now - trace.started_at) * 1000.0},
+                parent_span_id=self._parent(trace),
+            ))
         elif etype == "handoff":
             now = self._now()
             trace.spans.append(Span(

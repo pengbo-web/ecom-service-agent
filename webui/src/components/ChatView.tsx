@@ -15,7 +15,14 @@ import {
   type ConsolidateResult, type ConversationMeta, type HistoryTurn, type Product,
 } from "@/lib/api";
 
-type Turn = { id: number; userText: string; activity: SSEEvent[]; reply?: string; meta?: Meta; handoff?: string[] };
+type Turn = {
+  id: number; userText: string; activity: SSEEvent[]; reply?: string; meta?: Meta; handoff?: string[];
+  // E1(回复流式化):正在逐块接收买家可见回复——渲染打字光标。终帧(reply
+  // 事件)到达时以其全文覆盖已拼接的内容并清掉这个标记,防丢块导致内容错乱
+  // (哪怕中途掉了一块,买家最终看到的也是服务端认定的"标准答案"，不是
+  // 拼接出来的半成品)。
+  streamingReply?: boolean;
+};
 
 export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversation, onBuy }: {
   sessionId: string; userId: string; itemId?: string; onUserId: (uid: string) => void;
@@ -108,7 +115,11 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
         }
       }
       else if (["thought", "tool_call", "tool_result", "guard", "route", "select", "evaluate", "polish", "recall", "faq_cache"].includes(e.type)) patch((t) => ({ ...t, activity: [...t.activity, e] }));
-      else if (e.type === "reply") patch((t) => ({ ...t, reply: e.content }));
+      // E1:逐块追加——按到达顺序拼接,渲染打字光标(streamingReply=true)。
+      else if (e.type === "reply_delta") patch((t) => ({ ...t, reply: (t.reply || "") + (e.content || ""), streamingReply: true }));
+      // 终帧:不管前面有没有流式过、流式拼接是否完整,都用这份全文覆盖——
+      // 这一句本身就是"防丢块/防护栏改写后内容不一致"的兜底,清掉打字光标。
+      else if (e.type === "reply") patch((t) => ({ ...t, reply: e.content, streamingReply: false }));
       else if (e.type === "metadata") patch((t) => ({ ...t, meta: { intent: e.intent, confidence: e.confidence, requires_human: e.requires_human, follow_up_question: e.follow_up_question,
         // N2:情绪信号是附加字段,老后端/规则快筛轮次可能不带——同任务其余
         // 各处一致地按 neutral/0 兜底,不是留 undefined 让下游各自猜。
@@ -116,7 +127,7 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
       else if (e.type === "handoff") patch((t) => ({ ...t, handoff: e.reasons || [] }));
       else if (e.type === "error") {
         if (e.status === 401) { clearToken(); location.reload(); return; }
-        patch((t) => ({ ...t, reply: "⚠️ 出错了：" + e.message }));
+        patch((t) => ({ ...t, reply: "⚠️ 出错了：" + e.message, streamingReply: false }));
       }
     },
   });
@@ -306,7 +317,7 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
                 {t.userText && <MessageBubble role="user">{t.userText}</MessageBubble>}
                 {t.activity.length > 0 && <AgentActivity events={t.activity} defaultOpen={!t.reply} />}
                 {t.handoff && <div className="rounded-md bg-accent/15 px-3 py-2 text-sm text-accent">🎧 已转人工，原因：{t.handoff.join("、")}</div>}
-                {t.reply && <MessageBubble role="assistant">{t.reply}</MessageBubble>}
+                {t.reply && <MessageBubble role="assistant" streaming={t.streamingReply}>{t.reply}</MessageBubble>}
                 {t.meta && <MetadataChips meta={t.meta} />}
               </div>
             </Fragment>

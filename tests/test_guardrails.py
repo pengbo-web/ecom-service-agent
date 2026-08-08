@@ -1,6 +1,7 @@
+from app.guardrails.base import GuardResult, OutputGuard
 from app.guardrails.input_guards import PromptInjectionGuard
 from app.guardrails.output_guards import SensitiveInfoGuard, ContactInfoGuard
-from app.guardrails.pipeline import build_default_pipeline
+from app.guardrails.pipeline import GuardPipeline, build_default_pipeline
 
 
 # ---------- 输入护栏 ----------
@@ -84,3 +85,38 @@ def test_pipeline_output_clean():
     text, results = p.check_output("您的订单已发货")
     assert text == "您的订单已发货"
     assert results == []
+
+
+# ---------- E1(回复流式化):护栏"变换类 vs 观察/拦截类"分类 ----------
+def test_output_guards_are_classified_as_rewriting():
+    """SensitiveInfoGuard/ContactInfoGuard 的 check() 都可能返回改写后的
+    text(局部脱敏 / 整段替换),两者都必须标记为变换类。"""
+    assert SensitiveInfoGuard.REWRITES_OUTPUT is True
+    assert ContactInfoGuard.REWRITES_OUTPUT is True
+
+
+def test_input_guard_is_not_a_rewriting_output_guard():
+    """PromptInjectionGuard 是输入侧、只 block/pass,不改回复文本,不在这套
+    "输出护栏改写"分类体系里——用基类默认值(False)读它,不应误判为变换类。"""
+    assert getattr(PromptInjectionGuard, "REWRITES_OUTPUT", False) is False
+
+
+def test_default_pipeline_has_rewriting_output_guard():
+    """默认 pipeline 的两个输出护栏都是变换类 → has_rewriting_output_guard()
+    必须为 True(E1 据此判定:命中就整体降级为非流式)。"""
+    p = build_default_pipeline()
+    assert p.has_rewriting_output_guard() is True
+
+
+def test_pipeline_without_rewriting_guard_reports_false():
+    """假想一个只读/记录类输出护栏(REWRITES_OUTPUT=False,只 pass,不改
+    text)——pipeline 应正确判定"不含变换类护栏",这一轮才有可能被判定为
+    流式 eligible。"""
+    class _ObserveOnlyGuard(OutputGuard):
+        name = "observe_only"
+
+        def check(self, text: str) -> GuardResult:
+            return GuardResult(action="pass", guard=self.name)
+
+    p = GuardPipeline(input_guards=[], output_guards=[_ObserveOnlyGuard()])
+    assert p.has_rewriting_output_guard() is False

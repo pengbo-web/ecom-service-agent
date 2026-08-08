@@ -179,6 +179,21 @@ def test_skill_preloaded_recall_faq_cache_thought_evaluate_polish_select_are_ins
                              "thought", "evaluate", "polish", "select"]
 
 
+def test_reply_delta_first_chunk_is_instant_others_are_noop():
+    """E1(回复流式化):首个 reply_delta(first=True)记一条即时观察
+    (reply_delta:first)——供 Langfuse UI 用它的时间戳与根 trace 的起点算出
+    首字时间;没有 first 的后续 delta 不重复记(否则一条长回复会把 trace
+    灌满几十条零信息量的观察)。"""
+    fake = _FakeLangfuse()
+    t = _turn(fake)
+    fake.log.clear()
+    t.on_event({"type": "reply_delta", "content": "您", "first": True})
+    t.on_event({"type": "reply_delta", "content": "好"})
+    t.on_event({"type": "reply_delta", "content": "呀"})
+    instant_names = [x[2] for x in fake.log if x[0] == "instant"]
+    assert instant_names == ["reply_delta:first"]
+
+
 def test_recall_records_hits_or_skip_reason_in_output():
     fake = _FakeLangfuse()
     t = _turn(fake)

@@ -244,6 +244,15 @@ class _LangfuseTurn:
                 input={"next": ev.get("next"), "reason": ev.get("reason")},
             )
             obs.end()
+        elif etype == "reply_delta" and ev.get("first"):
+            # E1(回复流式化):首字时间——即时观察,记一次就够(每块都记会把
+            # trace 灌满)。用 Langfuse 原生的时间戳字段而不是塞进 input/output
+            # 文本里,这样 UI 能直接对着这条观察本身的 start_time 与根 trace
+            # 的 start_time 算出"生成开始到第一块出屏"经过了多久。
+            obs = self._client.start_observation(
+                as_type="span", name="reply_delta:first",
+            )
+            obs.end()
         elif etype == "reply":
             self._root.update(output=ev.get("content"))
         elif etype == "metadata":

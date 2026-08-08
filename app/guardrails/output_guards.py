@@ -25,6 +25,11 @@ _CONTACT_REMINDER = "【安全提醒】为保障您的权益，请通过并夕�
 
 class SensitiveInfoGuard:
     name = "sensitive_info"
+    # E1:变换类——命中时用 .sub() 就地替换匹配到的号码片段,是"改写"而不是
+    # "拒绝/记录"。哪怕只改了文本里一小段,也已经是"买家会看到跟护栏跑之前
+    # 不一样的字"，所以跟 ContactInfoGuard 一样必须在流式吐字前就排除掉
+    # (见 app/guardrails/base.py OutputGuard 的分类说明)。
+    REWRITES_OUTPUT = True
 
     def check(self, text: str) -> GuardResult:
         original = text or ""
@@ -40,6 +45,13 @@ class SensitiveInfoGuard:
 
 class ContactInfoGuard:
     name = "contact_info"
+    # E1:变换类，而且是这三个护栏里最危险的一种——命中时不是局部脱敏，
+    # 是**整段回复替换**成 _CONTACT_REMINDER。哪怕已经流式吐出去的前缀
+    # 看起来"干净"，只要后面任何一小段文字命中了引导站外联系的模式，
+    # 全文就要被推翻重来——已经出屏的字没有办法收回。这正是"决定是否
+    # 流式必须在生成开始前拍板，不能等边生成边判"的第一手证据：任何
+    # "先流一部分、发现命中再退化"的增量方案在这个护栏面前都不成立。
+    REWRITES_OUTPUT = True
 
     def check(self, text: str) -> GuardResult:
         original = text or ""
