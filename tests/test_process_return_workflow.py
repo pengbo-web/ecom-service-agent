@@ -73,3 +73,15 @@ def test_loaded_instructions_carry_hard_constraints():
     result = mgr.load_skill("process-return")
     assert "硬约束" in result["instructions"]
     assert "退货退款处理流程" in result["instructions"]   # 原 body 未丢
+
+
+def test_first_step_looks_up_orders_before_asking_for_order_number():
+    """L4/P1-4:买家只描述商品、没给订单号时,先调 list_user_orders 列候选
+    让买家确认,而不是让买家自己报订单号——这是话术/流程变更,不是新能力。
+    改动后仍须过校验器(test_skill_file_passes_validator)与既有工作流守卫
+    (本文件其余用例),二者均不依赖本条正文措辞。"""
+    mgr = SkillManager(skills_dir="app/agent/skills/definitions", enabled=True)
+    result = mgr.load_skill("process-return")
+    instructions = result["instructions"]
+    assert "不要开口问用户要订单号" in instructions
+    assert "list_user_orders" in instructions

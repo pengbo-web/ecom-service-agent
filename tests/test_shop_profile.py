@@ -102,3 +102,29 @@ def test_buyer_profiles_still_importable_with_default_tone():
     from app.prompts.agents import PRESALE_PROMPT, MIDSALE_PROMPT, AFTERSALE_PROMPT
     for p in (PRESALE_PROMPT, MIDSALE_PROMPT, AFTERSALE_PROMPT):
         assert "不要替顾客下单" in p
+
+
+def test_format_baseline_present_with_default_tone():
+    """默认场景(店主未自定义语气)下,排版底线本来就该在。"""
+    block = sp.render_style_block({})
+    assert "不使用加粗小标题" in block
+    assert "1~3 句话说清一个点" in block
+
+
+def test_format_baseline_survives_custom_formal_tone(db):
+    """L4 复盘的核心回归:店主保存了一段完全不提排版的"非常正式"语气后,
+    排版/篇幅底线必须仍然出现在渲染结果里——不能被店主的 tone 文本整段替换掉。
+    这正是买家实测收到"加粗小标题+分点+六句话"回复的根因。"""
+    db.set_shop_profile(
+        {"tone": "说话要非常正式,一律用「您」,不要用任何 emoji。",
+         "shop_name": "并夕夕旗舰店"}, updated_by="admin")
+    block = sp.render_style_block(sp.load_profile())
+    assert "不使用加粗小标题" in block
+    assert "1~3 句话说清一个点" in block
+    assert "非常正式" in block   # 店主的语气本身也还在,两者是叠加而非互相替换
+
+
+def test_format_baseline_is_not_stored_inside_tone_field():
+    """排版底线不应该寄居在可被店主整段替换的 tone/DEFAULT_TONE 字段里
+    ——否则店主一自定义语气,底线就消失,这正是之前失效的根因。"""
+    assert sp.FORMAT_BASELINE not in sp.DEFAULT_TONE

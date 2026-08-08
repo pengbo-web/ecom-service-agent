@@ -224,6 +224,8 @@ class EcomAgent:
             self._grounding_context(), self._step_seq > 0, self._emit,
         )
 
+        self._check_internal_leak(final_text)
+
         result = self._extract_structured_response(final_text)
 
         self.memory_manager.update_short_term(self.raw_messages[-6:],
@@ -265,6 +267,23 @@ class EcomAgent:
                 emotion_level=getattr(qu, "emotion_level", 0) if qu is not None else 0,
                 requires_human=result.requires_human,
             )
+        except Exception:  # noqa: BLE001 埋点失败绝不影响本轮回复
+            pass
+
+    def _check_internal_leak(self, text: str) -> None:
+        """L4:出话检查——回复里若出现 skill 名或内部黑话,发一条观测事件。
+
+        只做"看见",不阻断、不改写回复文本本身(要不要拦/怎么改是下一阶段的
+        决策,这一步先让"发生过"这件事可被观测到)。旁路埋点,与
+        `_record_skill_turn`/`_record_turn_signal` 同姿态:任何异常都吞掉,
+        绝不能因为检测器自己出错而影响本轮回复。
+        """
+        try:
+            from app.agent.jargon_guard import detect_internal_leak
+            names = self.skill_manager.skill_names if self.skill_manager else []
+            hits = detect_internal_leak(text, names)
+            if hits:
+                self._emit({"type": "guard", "kind": "internal_leak", "hits": hits})
         except Exception:  # noqa: BLE001 埋点失败绝不影响本轮回复
             pass
 
