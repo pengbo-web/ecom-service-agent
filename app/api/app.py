@@ -270,6 +270,17 @@ def create_app(session_manager: Optional[SessionManager] = None,
     if session_manager is None and settings.auto_consolidate_enabled:
         manager.start_reaper(settings.reaper_interval, settings.session_idle_ttl)
 
+    # W1 服务化 L2:后台预热进程级构造成本(MCP 连接/LLM 传输层/FAQ 缓存/本地
+    # 知识库索引),不让"第一个真实用户"单独承担这笔冷启动开销。与上面的
+    # reaper 同一个判断:只在生产路径(未注入 manager)启动,测试注入
+    # session_manager 时不会多起这个后台线程。挂到 app.state 供测试内省
+    # (断言线程已启动/存活),create_app() 本身不等它跑完——见
+    # app/api/warmup.py 顶部"绝不阻塞服务就绪"的铁律。
+    app.state.warmup_thread = None
+    if session_manager is None and settings.startup_warmup_enabled:
+        from app.api.warmup import warm_process_in_background
+        app.state.warmup_thread = warm_process_in_background()
+
     store = trace_store
     tracer = None
     if settings.obs_enabled or trace_store is not None:

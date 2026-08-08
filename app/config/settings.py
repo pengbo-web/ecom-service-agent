@@ -170,6 +170,11 @@ class Settings(BaseSettings):
     # 下次打开由 open_or_reuse 复用原会话(持久会话式,更贴 Web 聊天习惯)。
     conversation_idle_close_enabled: bool = False
 
+    # W1 服务化 L2:进程启动预热(把原本摊在"第一个真实用户"身上的 MCP 连接/
+    # LLM 传输层/FAQ 缓存/本地知识库索引构造成本提前搬到启动阶段,后台线程跑,
+    # 不阻塞服务就绪;失败不影响服务可用性,见 app/api/warmup.py)。
+    startup_warmup_enabled: bool = True
+
     # 生产加固（W3.5）
     admin_token: str = ""              # 管理接口令牌；空=本地不鉴权
     rate_limit_per_min: int = 20       # 每会话每分钟最大请求数

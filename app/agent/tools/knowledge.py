@@ -74,6 +74,21 @@ def reset_retriever() -> None:
     _retriever = None
 
 
+def warm_local_retriever() -> None:
+    """启动预热用:构造并加载本地向量索引 + embedder 客户端(process 级单例，
+    见 `_get_retriever`)。只碰本地文件/构造 HTTP 客户端，绝不发真实网络请求
+    (embedder 只在真正 encode 时才调用 Embeddings 接口)，也绝不触达外部
+    ApeRAG——`kb_backend=aperag` 时本地索引只是三级降级的最后一级，与
+    ApeRAG 是否可达无关。
+
+    本地索引文件不存在(从未跑过 `build_kb_index.py`)是正常状态而非故障，
+    这里不做特殊吞掉——直接让 `FileNotFoundError` 原样抛给调用方；
+    预热框架(`app/api/warmup.py`)本来就按步骤各自 try/except，一步"没有
+    可暖的东西"不该算成功也不该拖垮其它预热步骤。
+    """
+    _get_retriever()
+
+
 def _search_local(query: str, top_k: int) -> dict:
     """kb_backend=local 时的检索路径。
 
