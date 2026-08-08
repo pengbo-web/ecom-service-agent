@@ -47,12 +47,58 @@ class QueryUnderstanding:
 
 
 # (意图, 判定正则, 规则可确定的 domain——None=交给粘性路由)
+# 这四条是改造前的基线,不受 L3② 扩展开关影响,恒生效。
 _RULE_TABLE = [
     ("闲聊寒暄", re.compile(r"^(嗯+|哦+|噢|好的?|好嘞|行吧?|可以|ok|okay|收到|明白了?|知道了)[\s!！~。.,，]*$", re.IGNORECASE), None),
     ("闲聊寒暄", re.compile(r"^(你好|您好|哈喽|嗨|在吗|再见|拜拜|谢谢|感谢)[\s!！~。.,，]*$", re.IGNORECASE), None),
     # 纯订单号≈查单/物流意图,定向 midsale——粘在 presale 会缺 query_order/query_logistics 工具
     ("订单事务", re.compile(r"^ORD-\d{8}-\d{3}$", re.IGNORECASE), "midsale"),
     ("转人工", re.compile(r"^(转人工|人工客服|找人工|叫真人|人工)[\s!！~。.]*$"), None),
+]
+
+# L3②:扩展规则(settings.qu_fast_path_extended_enabled 门控,关=只保留上面 4 条基线)。
+# 取材:session_archive 里真实出现过的短句(≤20 字)+ 常见问题FAQ.md 的原句措辞。
+# 每条都按"宁漏勿错杀"逐一核实过——不匹配任何可能被错误分流到别的领域画像/
+# 因 need_kb=False 而漏检索的变体,只收"改写/加长后仍不会引出不同处理方式"的
+# 精确锚定句式(^...$),模棱两可的一律不收(如"那运费呢"这类要靠上文指代消解
+# 的追问、"我要退货,一步步教我怎么操作"这类既可能是问政策也可能是要发起
+# 退货流程的双关句都没有收)。
+#
+# domain 取值的取舍:
+#   - 订单查询("查我的订单"类):list_user_orders 三域画像都有,不存在"分错域
+#     就少工具"的风险,因此不强制域,domain=None 交粘性路由,最大化安全边际;
+#   - 议价("能便宜点吗,帮我砍砍价"):negotiate_price 只在 presale 画像里,
+#     不强制域就可能真的少了这一步要用的工具——理由与既有"纯订单号→midsale"
+#     那条完全同构,故此处沿用同一标准强制 domain="presale";
+#   - 政策类直击原句("退货政策是什么"等):同一句话可能发生在售前(决定要不要
+#     买之前先问清政策)或售后(正在退货过程中问),强制域有真实的"分错域丢
+#     工具"风险,因此保留 domain=None——这类规则省的是 3.2s 的 QU LLM 调用,
+#     不省域判定,domain 仍交给粘性路由(与关这条扩展开关前的兜底路径一致)。
+_EXTENDED_RULE_TABLE = [
+    # 订单查询类:"查(一下)?...订单(都)?(有哪些)?" / "我(的)?(都)?有哪些订单" 两种语序,
+    # 均为纯粹的"列出我的订单"动作,靠 list_user_orders 工具即可,不涉政策检索。
+    ("订单事务",
+     re.compile(r"^(帮我)?查(一下)?(我的|我|你)?(名下的?)?订单(都)?(有哪些)?[？?！!。.]*$"),
+     None, False),
+    ("订单事务",
+     re.compile(r"^我(的)?(名下)?(都)?(有哪些订单|订单有哪些)[？?！!。.]*$"),
+     None, False),
+    # 议价:negotiate_price 是 presale 专属工具,本轮就要用,强制域(理由见上)。
+    ("商品咨询",
+     re.compile(r"^(这个|这|该商品)?能便宜(一)?点(吗)?[,，]?(帮我)?砍(一)?砍价[？?！!。.]*$"),
+     "presale", False),
+    # 商品信息/价格/规格类询问:靠商品上下文/查询商品工具即可回答,不查知识库。
+    ("商品咨询", re.compile(r"^这(个|是)?(是)?什么[？?！!~。.]*$"), None, False),
+    ("商品咨询", re.compile(r"^多少钱[？?！!。.]*$"), None, False),
+    ("商品咨询", re.compile(r"^(这个)?商品有(哪些|什么)规格(和属性)?[？?！!。.]*$"), None, False),
+    ("商品咨询", re.compile(r"^你有(什么|哪些)商品[？?！!。.]*$"), None, False),
+    # 政策类高频原句:自包含(无需消解上文指代),need_kb=True + kb_query=原句,
+    # 省的是 QU 那次 LLM 调用,检索/域判定路径与老兜底一致不变。
+    ("政策咨询", re.compile(r"^(退货|退换货)(政策|流程|完整流程)是(什么|啥)[？?！!。.]*$"), None, True),
+    ("政策咨询", re.compile(r"^怎么退货[？?！!。.]*$"), None, True),
+    ("政策咨询", re.compile(r"^价保多久[？?！!。.]*$"), None, True),
+    ("政策咨询", re.compile(r"^退款(多久到账|怎么(还)?没到账)[？?！!。.]*$"), None, True),
+    ("政策咨询", re.compile(r"^(大件家电)?退货运费怎么算[？?！!。.]*$"), None, True),
 ]
 
 # Finding-3:情绪判据的文字描述(下面这一段)由 _EMOTION_UNHAPPY_MIN/
@@ -127,14 +173,29 @@ def _parse_emotion(data: dict) -> tuple[str, int]:
     return emotion, level
 
 
+def _match_rules(text: str) -> QueryUnderstanding | None:
+    """依次扫基线表(恒生效)与扩展表(受 settings.qu_fast_path_extended_enabled
+    门控);两表内均按声明顺序取第一个命中,不命中返回 None 交给 LLM 层。"""
+    for intent, pat, domain in _RULE_TABLE:
+        if pat.match(text):
+            return QueryUnderstanding(domain=domain, intent=intent,
+                                      need_kb=False, source="rule")
+    if settings.qu_fast_path_extended_enabled:
+        for intent, pat, domain, need_kb in _EXTENDED_RULE_TABLE:
+            if pat.match(text):
+                return QueryUnderstanding(
+                    domain=domain, intent=intent, need_kb=need_kb,
+                    kb_query=(text if need_kb else None), source="rule")
+    return None
+
+
 def understand(user_input: str, history: list[dict], client, model: str) -> QueryUnderstanding:
     """三层查询理解;任何失败兜底为"多检索、走默认"。"""
     text = (user_input or "").strip()
     if len(text) <= _RULE_MAX_CHARS:
-        for intent, pat, domain in _RULE_TABLE:
-            if pat.match(text):
-                return QueryUnderstanding(domain=domain, intent=intent,
-                                          need_kb=False, source="rule")
+        matched = _match_rules(text)
+        if matched is not None:
+            return matched
 
     users = [m.get("content", "") for m in (history or []) if m.get("role") == "user"]
     context = "\n".join(f"- {u}" for u in users[-5:] if u) or "(无)"

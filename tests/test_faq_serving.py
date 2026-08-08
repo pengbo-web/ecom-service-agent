@@ -30,7 +30,7 @@ def _stub_recall_and_llm(agent, monkeypatch, reply_text: str):
     monkeypatch.setattr(agent.memory_manager, "update_short_term", lambda *a, **k: None)
     monkeypatch.setattr(agent._reply_pipeline, "run", lambda *a, **k: a[3])
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections",
-                        lambda mm, q, include_kb=True, kb_domain=None:
+                        lambda mm, q, include_kb=True, kb_domain=None, kb_prefetch=None:
                         __import__("app.agent.recall.service", fromlist=["RecallResult"]).RecallResult())
 
 

@@ -146,6 +146,39 @@ def test_kb_retriever_warm_never_touches_external_aperag(monkeypatch):
         pass
 
 
+def test_aperag_warm_noop_when_backend_not_aperag(monkeypatch):
+    from app.config.settings import settings
+    monkeypatch.setattr(settings, "kb_backend", "local")
+
+    called = []
+    monkeypatch.setattr("app.agent.recall.external_kb.aperag_search",
+                        lambda q: called.append(q))
+    warmup._warm_aperag()
+    assert called == []   # local 后端时压根不该碰 ApeRAG
+
+
+def test_aperag_warm_fires_once_when_backend_is_aperag(monkeypatch):
+    from app.config.settings import settings
+    monkeypatch.setattr(settings, "kb_backend", "aperag")
+
+    called = []
+    monkeypatch.setattr("app.agent.recall.external_kb.aperag_search",
+                        lambda q: called.append(q) or [{"doc": "d", "text": "t"}])
+    warmup._warm_aperag()
+    assert len(called) == 1   # 真的替买家发了一次预热查询
+
+
+def test_aperag_warm_raises_when_unreachable(monkeypatch):
+    """与 _warm_mcp 同姿态:aperag_search 本身 fail-soft(不可达返回 None),
+    预热这一层要转成显式失败,好让 warm_process() 如实统计。"""
+    from app.config.settings import settings
+    monkeypatch.setattr(settings, "kb_backend", "aperag")
+    monkeypatch.setattr("app.agent.recall.external_kb.aperag_search", lambda q: None)
+
+    with pytest.raises(RuntimeError):
+        warmup._warm_aperag()
+
+
 def test_faq_cache_warm_is_idempotent_and_local_only():
     """FAQ 缓存预热只读本地文件,重复调用应该拿到同一个单例(不会每次预热
     都重新解析一遍文件)。"""

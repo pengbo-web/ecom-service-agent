@@ -259,6 +259,25 @@ class Settings(BaseSettings):
     # (改写能力已并入本节点,回退路径检索用原句)
     query_understanding_enabled: bool = True
 
+    # L3①:查询理解(QU)与知识召回(KB)并发发起——QU 判需要的是"这轮该不该
+    # 检索、检索什么",但检索只需要原句就能先跑;两者并发,用原句先起一次
+    # KB 检索,QU 出结果后按 need_kb/kb_query 决定复用/丢弃/二次检索(见
+    # app/multi_agent/orchestrator.py `_understand_and_prefetch`)。
+    # 关=完全回退老串行路径(QU 先跑完,KB 检索在 react 第一步才起),逐字节
+    # 一致,用于对比测量或怀疑并发引入问题时快速回退。
+    qu_recall_concurrent_enabled: bool = True
+
+    # L3②:app/agent/understanding.py 规则快筛表的"扩展规则"总开关——覆盖
+    # 原有 4 条之外新增的高频无歧义短句规则(订单查询/议价/商品信息类零检索
+    # 意图 + 政策类直击原句免 LLM 判定)。关=只保留改造前的 4 条基线规则,
+    # 逐字节回退,用于对比"扩展规则到底省了多少次 LLM 查询理解调用"。
+    qu_fast_path_extended_enabled: bool = True
+
+    # L3③:生成前进度事件——在查询理解/知识检索/生成三个阶段各发一条
+    # `progress` SSE 帧(前端渲染"正在为您查询订单…"等真实阶段文案),不影响
+    # 既有帧。关=不发这类事件,回到旧的"空白等待"体验,用于问题定位时快速排除。
+    progress_events_enabled: bool = True
+
     # 运行环境:dev(默认,教学/本机)/ production。production 下强制安全密钥(见 verify_production_secrets)
     environment: str = "dev"
 

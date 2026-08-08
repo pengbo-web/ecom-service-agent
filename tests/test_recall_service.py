@@ -74,3 +74,51 @@ def test_include_kb_false_skips_kb_entirely(monkeypatch):
     assert [x["content"] for x in r.sections] == ["记忆事实", "短期摘要"]
     assert r.kb_hits == [] and r.kb_backend == "skipped"
     assert called == []
+
+
+# ---- L3①:kb_prefetch(并发预取复用)与现场检索必须产出逐字节一致的结果 ----
+
+def test_kb_prefetch_matches_fresh_kb_recall_for_same_query(monkeypatch):
+    """核心正确性证明:同一个 query,"直接调 kb_recall"和"先 kb_fetch_rows
+    再喂给 build_recall_sections 的 kb_prefetch"必须产出完全相同的 RecallResult
+    ——这是"并发不改变检索结果"这条约束的直接测试(不打真实网络,只验证
+    两条路径共用同一段格式化代码)。"""
+    monkeypatch.setattr(settings, "memory_profile_enabled", False)
+    import app.agent.recall.kb as kb_mod
+    monkeypatch.setattr(kb_mod, "search_knowledge",
+                        lambda q, top_k: {"success": True, "results": [
+                            {"doc": "退换货政策", "section": "七天无理由",
+                             "score": 0.8, "text": "签收7天内可退"}]})
+
+    rows_backend = kb_mod.kb_fetch_rows("退货政策是什么")
+    assert rows_backend is not None
+    rows, backend = rows_backend
+
+    r_fresh = svc.build_recall_sections(None, "退货政策是什么", kb_domain="aftersale")
+    r_prefetch = svc.build_recall_sections(None, "退货政策是什么", kb_domain="aftersale",
+                                           kb_prefetch=(rows, backend))
+    assert r_fresh.sections == r_prefetch.sections
+    assert r_fresh.kb_hits == r_prefetch.kb_hits
+    assert r_fresh.kb_backend == r_prefetch.kb_backend
+
+
+def test_kb_prefetch_used_does_not_call_kb_recall(monkeypatch):
+    """有可复用的预取时,build_recall_sections 不该再触发一次现场检索
+    (svc.kb_recall 完全不该被调用)——否则"并发省时间"这件事就是假的。"""
+    monkeypatch.setattr(settings, "memory_profile_enabled", False)
+    called = []
+    monkeypatch.setattr(svc, "kb_recall", lambda q, domain=None: called.append(q))
+    r = svc.build_recall_sections(
+        None, "q", kb_domain=None,
+        kb_prefetch=([{"doc": "d", "section": "s", "score": 0.9, "text": "命中内容"}], "local"))
+    assert called == []                      # 没有现场检索
+    assert "命中内容" in r.sections[0]["content"]
+
+
+def test_kb_prefetch_none_falls_back_to_fresh_kb_recall(monkeypatch):
+    """kb_prefetch=None(未开并发/未命中预取)时行为与改造前完全一致。"""
+    monkeypatch.setattr(settings, "memory_profile_enabled", False)
+    called = []
+    monkeypatch.setattr(svc, "kb_recall", lambda q, domain=None: called.append(q) or KbRecall())
+    svc.build_recall_sections(None, "q", kb_domain=None, kb_prefetch=None)
+    assert called == ["q"]

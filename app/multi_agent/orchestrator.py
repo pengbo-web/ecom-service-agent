@@ -15,6 +15,21 @@ from app.multi_agent.agents import AGENT_CONFIGS
 from app.multi_agent.router import DEFAULT_AGENT, Router
 from app.agent.tools.manager import ToolManager
 
+# L3①:KB 并发预取专用的进程级共享线程池——惰性单例,daemon 线程不阻塞进程退出。
+# 只提交一类任务(kb_fetch_rows,纯读:只读 settings + 买家原句,发一次独立的
+# 检索 HTTP 请求,不 touch 任何每轮可变状态),max_workers 给够并发会话量级,
+# 避免高并发下互相排队反而比不并发还慢。
+_KB_PREFETCH_EXECUTOR = None
+
+
+def _kb_prefetch_executor():
+    global _KB_PREFETCH_EXECUTOR
+    if _KB_PREFETCH_EXECUTOR is None:
+        import concurrent.futures
+        _KB_PREFETCH_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+            max_workers=32, thread_name_prefix="kb-prefetch")
+    return _KB_PREFETCH_EXECUTOR
+
 
 class MultiAgentOrchestrator:
     """**总控 Agent(Controller Agent)**:系统对外的唯一 Agent 入口。
@@ -70,19 +85,47 @@ class MultiAgentOrchestrator:
         # 统一查询理解(默认):一次调用出 domain/intent/need_kb/kb_query,
         # 替代独立路由;关开关=回退老 Router(每轮必检索,无门控无改写)
         if settings.query_understanding_enabled:
+            from app.agent.progress import emit_progress
             from app.agent import understanding
+            emit_progress(self.event_sink, "understanding")   # L3③:如实上报——这一步真的要调 LLM 了
+            kb_future = None
+            if settings.qu_recall_concurrent_enabled:
+                # L3①(关键):KB 预取只**提交**、不在这里等它跑完——真正的并发
+                # 收益来自"understand() 这一步同步跑的时候,KB 检索已经在另一
+                # 个线程里独立推进",而不是"两边都跑完再往下走"(那样等于比
+                # 谁慢就等谁,反而可能比串行还慢——已用真实 ApeRAG 实测验证过
+                # 这个反例,教训记在报告里)。返回的 Future 交给引擎,真正消费
+                # 它(阻塞等待)的时机推迟到 `_build_messages` 真正需要检索结果
+                # 的那一刻——这中间(FAQ 缓存查询/技能预加载等)本身也要花时间,
+                # 进一步稀释了需要等待的那一段。
+                kb_future = self._submit_kb_prefetch(user_input)
+                if kb_future is not None:
+                    emit_progress(self.event_sink, "retrieving")   # 确实提交了才说"正在检索"
             # 用 self.client(streaming 层每轮注入的 TracingClient):QU 调用进当前 trace,
-            # token/延迟完整入账;engine.client 在下面 :81 才被覆盖,用它会漏记首轮
+            # token/延迟完整入账;engine.client 在下面才被覆盖,用它会漏记首轮。
+            # 这次调用本身就在"当前"线程同步执行——KB 预取(如果提交了)已经在
+            # 另一个线程独立跑着,不需要为了"并发"额外把这次调用也挪到线程里。
             qu = understanding.understand(user_input, self.engine.raw_messages,
                                           self.client, self.engine.model)
             key = qu.domain or self._last_key or DEFAULT_AGENT
         else:
             qu = None
+            kb_future = None
             key = self.router.route(user_input, self.engine.raw_messages)
         self._last_key = key
         if qu is not None and qu.domain is None:
             qu.domain = key          # 粘性解析结果回填:检索过滤拿到确定域
         self.engine.set_turn_understanding(qu)
+        # L3①:预取的 Future 是否可复用,交给 engine._build_messages 在**真正
+        # 需要检索结果的那一刻**按"最终检索 query 是否与预取时完全相同"精确
+        # 判定(见 EcomAgent.set_turn_kb_prefetch_future 的文档)——这里只负责
+        # 搬运,不阻塞。没有提交预取(关开关/QU 关闭/原句过短)时必须显式 clear,
+        # 不能让上一轮的 Future 残留在引擎上被误用(跨轮泄漏,见
+        # EcomAgent.clear_turn_kb_prefetch 的文档)。
+        if kb_future is not None:
+            self.engine.set_turn_kb_prefetch_future(user_input, kb_future)
+        else:
+            self.engine.clear_turn_kb_prefetch()
         profile = self.profiles.get(key) or next(iter(self.profiles.values()))
         # E1:streaming.py 对着「总控」调 set_turn_stream_eligible(它才是
         # run_agent_streaming 传入的 agent),这里原样转给真正跑 ReAct 循环
@@ -100,6 +143,44 @@ class MultiAgentOrchestrator:
         self.engine.event_sink = self.event_sink
         self.engine.client = self.client
         return self.engine.chat(user_input)
+
+    def _submit_kb_prefetch(self, user_input: str):
+        """L3①:把 KB 检索(用买家原句)**提交**到共享线程池,立即返回 Future,
+        不阻塞——真正的并发收益就在这个"不阻塞"上:调用方(chat())紧接着
+        同步跑 understand(),这次 LLM 调用与 KB 检索天然重叠在同一段挂钟时间
+        里,谁都不用等谁。
+
+        实测教训(第一版实现踩过的坑,记在这里免得回头复犯):第一版在这个
+        方法内部把 understand() 也扔进另一个线程,然后 `t1.join(); t2.join()`
+        两个都等完才返回——用真实 ApeRAG(2~4s,偶发到 10s+)实测后发现,当
+        QU 命中规则快筛(近 0 成本)时,总耗时被"等 KB 检索这个更慢的线程"
+        完全主导,比老的串行路径(先 QU 后检索,检索本身耗时不变但至少不用
+        多等一次线程调度)还慢——"并发"被做成了"谁慢等谁",完全违背初衷。
+        现在的写法把"等结果"这件事推迟到 `_build_messages` 真正需要检索
+        结果的那一刻(那时候 FAQ 缓存查询/技能预加载等也已经花掉了一些挂钟
+        时间,进一步缩短真正需要阻塞等待的窗口)。
+
+        return None 的两种情况,与 kb_fetch_rows 的早退分支同口径:检索总
+        开关关闭、或原句短于 recall_kb_min_query_chars——这两种情况下"提交
+        一个必然什么都不做的任务"没有意义,直接不提交,调用方不会因此发出
+        "正在检索"这类不真实的进度提示。
+        """
+        from app.agent.recall.kb import kb_fetch_rows
+
+        if not settings.recall_kb_enabled:
+            return None
+        if len((user_input or "").strip()) < settings.recall_kb_min_query_chars:
+            return None
+
+        def _run():
+            try:
+                return kb_fetch_rows(user_input)
+            except Exception:
+                # 预取失败=没有可复用的行,回退现场检索——现场检索(build_recall_
+                # sections 内部)自有一套同样的容错,不在这里重复处理/上报。
+                return None
+
+        return _kb_prefetch_executor().submit(_run)
 
     def _build_system_prompt(self, profile: dict) -> str:
         """每轮按店主当前语气组装 system prompt(N1:品牌语气可配置)。

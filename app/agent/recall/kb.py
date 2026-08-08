@@ -72,13 +72,29 @@ def _fetch_rows(query: str) -> tuple[list[dict], str]:
     return _local_rows(query), "local"
 
 
-def kb_recall(query: str | None, domain: str | None = None) -> KbRecall:
-    """对本轮用户问题做 KB 预检索,返回格式化注入段与命中明细。"""
+def kb_fetch_rows(query: str | None) -> tuple[list[dict], str] | None:
+    """只做检索取行(网络调用),不做域排序/阈值/格式化——L3①拆出这一半,
+    供并发预取复用:预取阶段(orchestrator,原句、domain 未知)只需要"取到
+    哪些行",域排序/裁剪要等 QU 判完 domain 才能做,且是纯本地计算,不必
+    在预取那一刻就做。
+
+    返回 None 表示"这一步本就不会检索"(与 kb_recall 的早退分支同口径:
+    总开关关闭 / 查询过短),调用方据此判断预取是否可用,不代表检索失败。
+    """
     if not settings.recall_kb_enabled:
-        return KbRecall()
+        return None
     if not query or len(query.strip()) < settings.recall_kb_min_query_chars:
-        return KbRecall()
-    rows, backend = _fetch_rows(query)
+        return None
+    return _fetch_rows(query)
+
+
+def kb_format(rows: list[dict], backend: str, domain: str | None = None) -> KbRecall:
+    """已取到的行 → 域排序 + 阈值 + 字符预算裁剪 + 格式化注入段(纯本地计算,无网络调用)。
+
+    与 kb_recall 共用这一段尾部逻辑:无论行是刚检索到的还是 L3① 并发预取
+    复用的,只要 (rows, backend, domain) 三元组相同,产出必定逐字节一致——
+    这是"并发不改变检索结果"这条约束的实现依据。
+    """
     from app.agent.recall.kb_tags import rank_by_domain
     rows = rank_by_domain(rows, domain)
 
@@ -98,3 +114,12 @@ def kb_recall(query: str | None, domain: str | None = None) -> KbRecall:
     if not lines:
         return KbRecall(backend=backend)
     return KbRecall(section=_HEADER + "\n" + "\n".join(lines), hits=hits, backend=backend)
+
+
+def kb_recall(query: str | None, domain: str | None = None) -> KbRecall:
+    """对本轮用户问题做 KB 预检索,返回格式化注入段与命中明细。"""
+    fetched = kb_fetch_rows(query)
+    if fetched is None:
+        return KbRecall()
+    rows, backend = fetched
+    return kb_format(rows, backend, domain)

@@ -84,12 +84,38 @@ def _warm_kb_retriever() -> None:
     warm_local_retriever()
 
 
+def _warm_aperag() -> None:
+    """L3(实跑发现,补进预热清单):ApeRAG 自身刚启动后的**第一次**查询实测
+    2.3~3.7s 稳态之外还有一次冷启动尖峰,足以超过 `aperag_timeout_s`(默认
+    10s)——如果第一次真正打到它的是买家的检索请求,这一轮买家会因超时拿
+    不到任何知识注入(该项目按设计不做本地兜底,`kb_local_fallback_enabled`
+    默认关)。这一步在服务启动阶段先替买家发一次"空跑"查询,把 ApeRAG 自己
+    的冷启动成本挪到这里付,不让第一个真实用户买单——与本文件其它几步同一
+    姿态。选择"加一步预热"而不是"调大 aperag_timeout_s":调大只是把买家
+    等待的上限拉长,并不能让第一个用户少等;预热才是把这段冷启动成本从"买家
+    的这一轮"里搬走。
+
+    只在 `kb_backend == "aperag"` 时才发起(与 `_warm_kb_retriever` 反过来的
+    条件对称:那一步绝不碰 ApeRAG,这一步只在会真正用到 ApeRAG 时才碰它);
+    查询内容不重要,只为触发一次真实的检索往返。ApeRAG 不可达/超时会被
+    warm_process() 按"这一步没成功"计入结果,不影响服务启动或其它步骤。
+    """
+    from app.config.settings import settings
+    if settings.kb_backend != "aperag":
+        return
+    from app.agent.recall.external_kb import aperag_search
+    rows = aperag_search("预热")
+    if rows is None:
+        raise RuntimeError("ApeRAG 预热查询未返回结果(不可达或超时)")
+
+
 # 每步 (名字, 函数) —— 顺序即失败时的排查顺序;互相独立,单步失败不连累其它步骤。
 _STEPS: list[tuple[str, Callable[[], None]]] = [
     ("mcp", _warm_mcp),
     ("llm_transport", _warm_llm_transport),
     ("faq_cache", _warm_faq_cache),
     ("kb_retriever", _warm_kb_retriever),
+    ("aperag", _warm_aperag),
 ]
 
 

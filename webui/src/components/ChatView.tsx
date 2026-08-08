@@ -22,6 +22,10 @@ type Turn = {
   // (哪怕中途掉了一块,买家最终看到的也是服务端认定的"标准答案"，不是
   // 拼接出来的半成品)。
   streamingReply?: boolean;
+  // L3③:生成前进度——如实反映当前阶段(理解/检索/生成),不是假的打字动效。
+  // 只保留"最新一条",收到 reply_delta 首字或终帧 reply 后清空(那之后
+  // "在等什么"这件事已经没有意义,买家看到的是真正在流出的回复本身)。
+  progress?: { stage: string; message: string };
 };
 
 export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversation, onBuy }: {
@@ -115,11 +119,14 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
         }
       }
       else if (["thought", "tool_call", "tool_result", "guard", "route", "select", "evaluate", "polish", "recall", "faq_cache"].includes(e.type)) patch((t) => ({ ...t, activity: [...t.activity, e] }));
+      // L3③:只保留最新一条阶段提示,覆盖不追加——旧阶段一旦过去就不再是"当前"。
+      else if (e.type === "progress") patch((t) => ({ ...t, progress: { stage: e.stage, message: e.message } }));
       // E1:逐块追加——按到达顺序拼接,渲染打字光标(streamingReply=true)。
-      else if (e.type === "reply_delta") patch((t) => ({ ...t, reply: (t.reply || "") + (e.content || ""), streamingReply: true }));
+      // 真正的内容开始流出,阶段提示不再有意义,一并清掉。
+      else if (e.type === "reply_delta") patch((t) => ({ ...t, reply: (t.reply || "") + (e.content || ""), streamingReply: true, progress: undefined }));
       // 终帧:不管前面有没有流式过、流式拼接是否完整,都用这份全文覆盖——
-      // 这一句本身就是"防丢块/防护栏改写后内容不一致"的兜底,清掉打字光标。
-      else if (e.type === "reply") patch((t) => ({ ...t, reply: e.content, streamingReply: false }));
+      // 这一句本身就是"防丢块/防护栏改写后内容不一致"的兜底,清掉打字光标与阶段提示。
+      else if (e.type === "reply") patch((t) => ({ ...t, reply: e.content, streamingReply: false, progress: undefined }));
       else if (e.type === "metadata") patch((t) => ({ ...t, meta: { intent: e.intent, confidence: e.confidence, requires_human: e.requires_human, follow_up_question: e.follow_up_question,
         // N2:情绪信号是附加字段,老后端/规则快筛轮次可能不带——同任务其余
         // 各处一致地按 neutral/0 兜底,不是留 undefined 让下游各自猜。
@@ -127,7 +134,7 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
       else if (e.type === "handoff") patch((t) => ({ ...t, handoff: e.reasons || [] }));
       else if (e.type === "error") {
         if (e.status === 401) { clearToken(); location.reload(); return; }
-        patch((t) => ({ ...t, reply: "⚠️ 出错了：" + e.message, streamingReply: false }));
+        patch((t) => ({ ...t, reply: "⚠️ 出错了：" + e.message, streamingReply: false, progress: undefined }));
       }
     },
   });
@@ -315,6 +322,14 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
               {cardIndex === i && product && <ProductCard product={product} onAsk={onSend} onBuy={onBuy} />}
               <div className="flex flex-col gap-1">
                 {t.userText && <MessageBubble role="user">{t.userText}</MessageBubble>}
+                {/* L3③:生成前进度——没有回复也没有转人工横幅时,如实告诉买家现在在做什么,
+                    不是假的打字动效。reply 到达(哪怕是流式首字)就会被上面 onEvent 清掉。 */}
+                {!t.reply && !t.handoff && t.progress && (
+                  <div data-testid="progress-indicator" className="flex items-center gap-2 px-1 text-xs text-muted-foreground">
+                    <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-primary" aria-hidden="true" />
+                    {t.progress.message}
+                  </div>
+                )}
                 {t.activity.length > 0 && <AgentActivity events={t.activity} defaultOpen={!t.reply} />}
                 {t.handoff && <div className="rounded-md bg-accent/15 px-3 py-2 text-sm text-accent">🎧 已转人工，原因：{t.handoff.join("、")}</div>}
                 {t.reply && <MessageBubble role="assistant" streaming={t.streamingReply}>{t.reply}</MessageBubble>}

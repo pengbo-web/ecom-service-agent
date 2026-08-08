@@ -17,7 +17,7 @@ import logging
 from dataclasses import dataclass, field
 
 from app.config.settings import settings
-from app.agent.recall.kb import KbRecall, kb_recall
+from app.agent.recall.kb import KbRecall, kb_recall, kb_format
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +49,17 @@ def _short_term_section(memory_manager, query):
 
 def build_recall_sections(memory_manager, query: str | None,
                           include_kb: bool = True,
-                          kb_domain: str | None = None) -> RecallResult:
+                          kb_domain: str | None = None,
+                          kb_prefetch: tuple[list[dict], str] | None = None) -> RecallResult:
     """统一召回入口:按源顺序检索,合并为注入段列表;单源失败隔离。
-    include_kb=False(查询理解判定本轮无需知识)时跳过 KB 源,记忆源照常。"""
+    include_kb=False(查询理解判定本轮无需知识)时跳过 KB 源,记忆源照常。
+
+    kb_prefetch(L3①):调用方(EcomAgent._build_messages)已经用**同一个** query
+    并发取到的 (rows, backend),这里只需按 kb_domain 做本地排序/裁剪/格式化
+    (kb_format),不再重新发起检索请求——与直接调 kb_recall(query, kb_domain)
+    相比,只是把"取行"这一步挪到了更早、并发的时间点,格式化尾部代码完全
+    共用,因此两条路径在同一 query 下产出逐字节一致(不改变检索结果,只改
+    变检索发起的时间点)。None(默认)= 老行为,现场调 kb_recall。"""
     result = RecallResult()
     memory_on = memory_manager is not None and getattr(memory_manager, "memory_enabled", False)
     if memory_on:
@@ -67,7 +75,11 @@ def build_recall_sections(memory_manager, query: str | None,
         result.kb_backend = "skipped"
         return result
     try:
-        kb = kb_recall(query, domain=kb_domain)
+        if kb_prefetch is not None:
+            rows, backend = kb_prefetch
+            kb = kb_format(rows, backend, kb_domain)
+        else:
+            kb = kb_recall(query, domain=kb_domain)
     except Exception:
         logger.warning("recall source kb failed", exc_info=True)
         kb = KbRecall()

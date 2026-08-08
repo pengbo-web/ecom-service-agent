@@ -13,7 +13,7 @@ def _orch(tmp_path, monkeypatch):
     o.engine.memory_manager.update_short_term = lambda *a, **k: None
     o.engine._reply_pipeline.run = lambda *a, **k: a[3]
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections",
-                        lambda mm, q, include_kb=True, kb_domain=None: RecallResult())
+                        lambda mm, q, include_kb=True, kb_domain=None, kb_prefetch=None: RecallResult())
     return o
 
 

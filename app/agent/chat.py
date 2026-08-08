@@ -66,6 +66,14 @@ class EcomAgent:
         self._turn_item_ctx = None   # (item_id, 商品块) 每轮缓存:同商品不重复请求 hmdp
         self._turn_skill_ctx = None   # (skill_name, instructions) 本轮预加载的技能流程
         self._turn_qu = None       # 查询理解结果(orchestrator 每轮注入;引擎独立运行时 None=老行为)
+        # L3①:orchestrator 每轮注入的 KB 并发预取结果——(用于预取的 query, rows, backend)。
+        # 只有当 _build_messages 里最终要用的检索 query 与预取时的 query **完全相同**才会被
+        # 复用(见下方 _build_messages);不同则原地丢弃,回退成一次新的现场检索,不冒充。
+        self._turn_kb_prefetch = None
+        # L3③:本轮进度阶段单调门(见 app/agent/progress.py ProgressStageGate)。
+        # 每轮 chat() 开始时 reset 一次,防止上一轮的阶段位置残留误判本轮。
+        from app.agent.progress import ProgressStageGate
+        self._turn_progress_gate = ProgressStageGate()
         # E1:这一轮是否允许 ReAct 第一步流式吐字给买家——由 streaming.py 在
         # 调 chat() 前注入(见 set_turn_stream_eligible),已经把"输出护栏是否
         # 含改写类 guard"这件事在生成前判完。引擎本身拿不到 guard_pipeline，
@@ -149,6 +157,40 @@ class EcomAgent:
         """orchestrator 每轮注入查询理解结果(QueryUnderstanding);None=退回默认行为。"""
         self._turn_qu = qu
 
+    def set_turn_kb_prefetch_future(self, query: str, future) -> None:
+        """L3①:orchestrator 提交的 KB 并发预取任务——`future` 是用**原始用户
+        输入**发起的检索任务的 concurrent.futures.Future(此刻可能还没跑完)。
+
+        存的是 Future 本身,不在这里阻塞等结果——真正调用 `future.result()`
+        (可能阻塞)推迟到 `_build_messages` 判定"这次要用的检索 query 与预取
+        时完全相同"之后才做(见 `_build_messages`);不相同则这个 Future 会被
+        原样丢弃(不 cancel,让它在后台自然跑完退出,不影响正确性,只是白算
+        了一次——成本记在报告里),现场按改写后的 kb_query 重新检索一次。"""
+        self._turn_kb_prefetch = (query, future)
+
+    def _emit_progress(self, stage: str, domain: str | None = None) -> None:
+        """L3③:走本引擎既有的 `_emit` 通道发一条 progress 帧(见
+        app/agent/progress.py)。经 `_turn_progress_gate` 单调门:阶段号倒退
+        的帧会被吞掉,不会让买家看到"退回上一阶段"的假象(见该门的文档)。
+
+        getattr 防御:裸 agent 测试(EcomAgent.__new__,不走 __init__,或直接
+        单测 `_react_loop`/`_answer_without_tools` 而不经 `chat()`)可能压根
+        没有这个字段——没有就现建一个,与 `_turn_stream_eligible` 等字段的
+        既有防御写法同姿态,不因为新增字段炸掉既有测试。"""
+        gate = getattr(self, "_turn_progress_gate", None)
+        if gate is None:
+            from app.agent.progress import ProgressStageGate
+            gate = ProgressStageGate()
+            self._turn_progress_gate = gate
+        gate.emit(self._emit, stage, domain)
+
+    def clear_turn_kb_prefetch(self) -> None:
+        """orchestrator 在"本轮不复用预取"的每一条分支都必须显式调用这个方法
+        (而不是放着不管)——否则上一轮残留的 (query, rows, backend) 会被
+        `_build_messages` 的字符串匹配误当成本轮的检索结果复用,是一类真实的
+        跨轮泄漏(与 memory 工具 manager 每轮刷新是同一类教训)。"""
+        self._turn_kb_prefetch = None
+
     def set_turn_stream_eligible(self, eligible: bool) -> None:
         """E1b:streaming.py 每轮在调 chat() 前注入——这一轮的输出护栏能不能
         被证明是"局部脱敏"(见 app/guardrails/pipeline.py
@@ -172,6 +214,20 @@ class EcomAgent:
         self._turn_recall = None   # 新一轮:召回缓存作废,按本轮问题重检索
         self._turn_item_ctx = None
         self._turn_skill_ctx = None
+        # 新一轮:阶段单调门归零,不带着上一轮的阶段位置。getattr 防御:裸 agent
+        # 测试(EcomAgent.__new__,不走 __init__)没有这个字段——没有就现建一个,
+        # 与 _turn_stream_eligible 等字段的既有防御写法同姿态。
+        if getattr(self, "_turn_progress_gate", None) is None:
+            from app.agent.progress import ProgressStageGate
+            self._turn_progress_gate = ProgressStageGate()
+        else:
+            self._turn_progress_gate.reset()
+        # 注意:_turn_kb_prefetch 不在这里清——orchestrator.chat() 在调 engine.chat()
+        # **之前**就已经调用 set_turn_kb_prefetch/clear_turn_kb_prefetch 注入或清空本轮
+        # 结果(与 set_turn_understanding 同样的时序),这里若清空反而会把刚注入的值
+        # 抹掉。跨轮残留风险由 orchestrator 侧兜底:它在"本轮不预取"的每一条分支都
+        # 显式调用 clear_turn_kb_prefetch(而不是不闻不问留着上一轮的值),裸引擎
+        # (不经 orchestrator 直接测试/使用)则该字段恒为 None,同样不存在残留。
         from app.agent.skills.execution_trace import SkillTurn
         self._skill_turn = SkillTurn()   # G2:新一轮 skill 执行轨迹(旁路埋点)
         self._checkpoint("in_flight")   # 回合开始:持久化用户消息 + 标记进行中
@@ -213,20 +269,52 @@ class EcomAgent:
                 self._status = "complete"
                 self.store.save(self.session_path, self._session_state())
                 self._write_snapshot()
-                # Finding-1修复:FAQ 秒答是 chat() 里唯一提前 return 的分支(已核实
-                # 全函数无其它早退路径),之前直接在这里返回,跳过了末尾的
-                # _record_skill_turn/_record_turn_signal——而 FAQ 缓存命中的前提
-                # 正是 need_kb=True,即本轮已经过 LLM 查询理解、情绪已判定,结果
-                # 被直接丢弃,turn_signals 的分母因此系统性缺这一类轮次。
-                # 两个方法本身是幂等的旁路埋点(开关/异常都 fail-soft),在这里调用
-                # 一次、末尾正常路径调用一次,两处互斥(此分支必 return,不会同时
-                # 落两次),不会重复写库。
+                # Finding-1修复:两个方法本身是幂等的旁路埋点(开关/异常都
+                # fail-soft),在这里调用一次、末尾正常路径调用一次,与下面的
+                # 闲聊寒暄零 LLM 分支互斥(每轮只会真正走到其中一个 return,
+                # 不会重复落库)。
+                self._record_skill_turn(result)
+                self._record_turn_signal(result)
+                return result
+
+        # L3②(实测发现的真实缺口):闲聊寒暄类"问候/感谢/告别"命中规则快筛后,
+        # 查询理解本身零 LLM,但**生成回复**原来仍要走一次完整 ReAct/生成调用——
+        # 规则只免了理解那一步,没免生成那一步,买家还是要为一句"你好"全额
+        # 付一次生成延迟。这正是 app/hardening/fast_path.py 已经解决过的同一类
+        # 问题(同一份规则、同一份已审过的文案),只是那道快路径只挂在 HTTP
+        # 入口(app.py),编排器/引擎被其它入口复用时(测试驱动/未来的非 HTTP
+        # 调用方)会绕开它。这里复用**同一个** match_fast_path 判定 + 同一份
+        # 文案在引擎层再兜一次,不新造一套未经审过的话术,也不放宽到规则表里
+        # 其它含糊的"闲聊寒暄"匹配(如确认语气词"好的"/"嗯"——这些没有对应的
+        # 安全文案,不强行套用,继续走生成)。
+        if (settings.fast_path_enabled and self._turn_qu is not None
+                and self._turn_qu.source == "rule" and self._turn_qu.intent == "闲聊寒暄"):
+            from app.hardening.fast_path import match_fast_path
+            fp = match_fast_path(user_input)
+            if fp is not None:
+                result = CustomerServiceResponse(
+                    intent=self._intent_from_qu(), confidence=self._confidence_from_qu(),
+                    reply=fp["reply"], requires_human=False, follow_up_question=None)
+                self.raw_messages.append(
+                    {"role": "assistant", "content": result.model_dump_json()})
+                self._status = "complete"
+                self.store.save(self.session_path, self._session_state())
+                self._write_snapshot()
                 self._record_skill_turn(result)
                 self._record_turn_signal(result)
                 return result
 
         self._preload_skill(user_input)
 
+        # L3③ Defect-1 修复:"正在为您生成回复"这条进度**不在这里发**——这里
+        # 只是"决定要不要走 ReAct 循环",messages 还没组装,而组装 messages
+        # (_build_messages,在 _react_loop 第一步内)本身可能触发一次真实的
+        # KB 检索(_emit_progress("retrieving", ...)),那次检索在事实上*先于*
+        # 生成发生。之前在这里(ReAct 循环开始前)就无条件发"正在生成",实测
+        # 出现过"generating 在 retrieving 之前到达"的倒序帧(检索其实还没做完,
+        # 却已经说"正在生成")——比不显示还糟的那种"倒退的进度提示"。现在把
+        # 这条提示挪到 _react_loop 第一步、_build_messages() **返回之后**才发
+        # (见 _react_loop),用代码结构本身保证时序正确,不再是猜时机。
         # stage 事件:供观测层(自研 tracer/Langfuse 桥)组装阶段 span 树
         self._emit({"type": "stage", "status": "start", "name": "react"})
         try:
@@ -533,6 +621,14 @@ class EcomAgent:
         """
         for step in range(self.max_react_steps):
             messages = self._build_messages()
+            if step == 0:
+                # L3③ Defect-1 修复:messages 组装完(任何真实检索——见
+                # _build_messages 里的 _emit_progress("retrieving", ...)——
+                # 已经发生完毕)才说"正在生成",时序由代码顺序保证,不是猜的。
+                # 只在第 0 步发一次:同一轮内 messages 里的检索段只算一次
+                # (_turn_recall 缓存),后续步骤不会再触发新的检索,也不需要
+                # 重复提示"正在生成"。
+                self._emit_progress("generating")
             if self._can_stream_step():
                 assistant_msg = self._llm_create_streaming(messages)
             else:
@@ -861,9 +957,35 @@ class EcomAgent:
             qu = self._turn_qu
             include_kb = qu.need_kb if qu is not None else True
             recall_query = (qu.kb_query if qu is not None and qu.kb_query else last_user)
+            domain = qu.domain if qu is not None else None
+            # L3①:orchestrator 并发预取的 KB 检索 Future——只有当预取时用的
+            # query 与本轮**最终**要用的检索 query(recall_query,可能已被 QU
+            # 改写)完全相同,才认为可以直接复用(不是"差不多"就用,是逐字
+            # 相等才用);否则原样丢弃(不 cancel,让它自然跑完退出),走下面
+            # else 分支现场检索——与老串行行为完全一致,不冒充结果。
+            # 只在这一刻才真正阻塞等待(`.result()`)——到这里之前 FAQ 缓存
+            # 查询/技能预加载等已经花掉了一些挂钟时间,这段时间与并发检索
+            # 天然重叠,真正需要等待的窗口因此被压缩,而不是从头到尾白等。
+            _pf = self._turn_kb_prefetch
+            kb_prefetch = None
+            if include_kb and _pf is not None and _pf[0] == recall_query:
+                try:
+                    fetched = _pf[1].result()
+                except Exception:
+                    fetched = None   # Future 里的任务已自行 fail-soft;这里再兜一层防御
+                if fetched is not None:
+                    kb_prefetch = fetched   # (rows, backend)
+                # fetched is None:预取本就判定"这轮不会检索"(见 kb_fetch_rows
+                # 的早退分支)或取行失败——kb_prefetch 留 None,走下面现场检索,
+                # 它会按同样的门控再判一次,结论必然一致,不会因此多注入内容。
+            if kb_prefetch is None and include_kb:
+                # 没有可复用的预取(未开并发 / kb_query 改写导致不一致 / 未命中):
+                # 这一步即将真正发起一次(可能是本轮唯一一次)KB 检索,如实上报
+                # "正在检索"这个阶段——不是猜,是这行代码接下来确实要做的事。
+                self._emit_progress("retrieving", domain)
             rr = build_recall_sections(self.memory_manager, recall_query,
                                        include_kb=include_kb,
-                                       kb_domain=(qu.domain if qu is not None else None))
+                                       kb_domain=domain, kb_prefetch=kb_prefetch)
             self._turn_recall = (last_user, rr)
             if rr.kb_hits:   # 命中才发正常事件(前端思考面板+tracer 各消费一次)
                 self._emit({"type": "recall", "source": "kb", "backend": rr.kb_backend,

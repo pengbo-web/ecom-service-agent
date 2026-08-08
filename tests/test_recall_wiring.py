@@ -15,7 +15,7 @@ def _agent():
 
 
 def _fake_recall(calls):
-    def fake(mm, query, include_kb=True, kb_domain=None):
+    def fake(mm, query, include_kb=True, kb_domain=None, kb_prefetch=None):
         calls.append(query)
         return RecallResult(
             sections=[{"role": "system", "content": "【平台知识(自动检索)】测试片段"}],
@@ -60,7 +60,7 @@ def test_new_user_turn_recomputes(monkeypatch):
 
 def test_no_hits_no_event(monkeypatch):
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections",
-                        lambda mm, q, include_kb=True, kb_domain=None: RecallResult())
+                        lambda mm, q, include_kb=True, kb_domain=None, kb_prefetch=None: RecallResult())
     agent = _agent()
     events = []
     agent.event_sink = events.append
@@ -75,7 +75,7 @@ def test_recall_uses_qu_kb_query_and_event_carries_it(monkeypatch):
     from app.agent.understanding import QueryUnderstanding
     calls = []
 
-    def fake_recall(mm, query, include_kb=True, kb_domain=None):
+    def fake_recall(mm, query, include_kb=True, kb_domain=None, kb_prefetch=None):
         calls.append((query, include_kb))
         return RecallResult(
             sections=[{"role": "system", "content": "【平台知识(自动检索)】X"}],
@@ -102,7 +102,7 @@ def test_qu_need_kb_false_skips_and_emits_skipped(monkeypatch):
     from app.agent.understanding import QueryUnderstanding
     calls = []
 
-    def fake_recall(mm, query, include_kb=True, kb_domain=None):
+    def fake_recall(mm, query, include_kb=True, kb_domain=None, kb_prefetch=None):
         calls.append((query, include_kb))
         return RecallResult(kb_backend="skipped")
 
@@ -124,7 +124,7 @@ def test_qu_need_kb_true_no_hits_emits_nothing(monkeypatch):
     """qu 存在且要检索但无命中:既不发正常事件也不发 skipped(防 elif 被改破)。"""
     from app.agent.understanding import QueryUnderstanding
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections",
-                        lambda mm, q, include_kb=True, kb_domain=None: RecallResult())
+                        lambda mm, q, include_kb=True, kb_domain=None, kb_prefetch=None: RecallResult())
     agent = _agent()
     events = []
     agent.event_sink = events.append
@@ -140,7 +140,7 @@ def test_no_qu_defaults_to_old_behavior(monkeypatch):
     """引擎独立运行(无 orchestrator 注入 QU):原句检索,include_kb=True。"""
     calls = []
 
-    def fake_recall(mm, query, include_kb=True, kb_domain=None):
+    def fake_recall(mm, query, include_kb=True, kb_domain=None, kb_prefetch=None):
         calls.append((query, include_kb))
         return RecallResult()
 
@@ -157,7 +157,7 @@ def test_chat_passes_qu_domain_to_recall(monkeypatch):
     from app.agent.understanding import QueryUnderstanding
     captured = {}
 
-    def fake_recall(mm, query, include_kb=True, kb_domain=None):
+    def fake_recall(mm, query, include_kb=True, kb_domain=None, kb_prefetch=None):
         captured.update(query=query, kb_domain=kb_domain)
         return RecallResult()
 
