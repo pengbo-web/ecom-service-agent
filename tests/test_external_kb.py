@@ -125,11 +125,11 @@ def test_fulltext_leg_included_when_enabled(monkeypatch):
 # 任务②:超时值 —— 默认值本身 + 超时确实按这个值传给 httpx,超时不致命
 # ---------------------------------------------------------------------------
 
-def test_default_timeout_is_3s():
-    """锁定本次任务的超时选择(见 app/config/settings.py aperag_timeout_s 注释:
-    owner 实测纯向量路 p90=1.11s/最坏=2.36s,3s≈2.7×p90 且仍高于实测最坏值)。
-    这条测试的意义是防止今后有人不经讨论就把默认值悄悄改回旧的 10s。"""
-    assert settings.aperag_timeout_s == 3.0
+def test_default_timeout_is_6s():
+    """锁定超时选择(见 app/config/settings.py aperag_timeout_s 注释:两组实测
+    纯向量路最坏值 2.36s / 3.83s,6s 留约 1.6× 余量)。这条测试防两个方向的悄悄改动:
+    改回旧的 10s(慢到掩盖真实变慢),或收到实测最坏值以内(超时=该轮零知识注入)。"""
+    assert settings.aperag_timeout_s == 6.0
 
 
 def test_timeout_exception_returns_none_not_raised(monkeypatch):
@@ -146,7 +146,8 @@ def test_timeout_exception_returns_none_not_raised(monkeypatch):
 
 def test_timeout_value_passed_to_httpx_matches_setting(monkeypatch):
     _cfg(monkeypatch)
-    monkeypatch.setattr(settings, "aperag_timeout_s", 3.0)
+    # 刻意用一个不等于默认值的数,否则默认值恰好相等时这条测试会假passed
+    monkeypatch.setattr(settings, "aperag_timeout_s", 7.5)
     captured = {}
 
     def fake_post(url, json=None, headers=None, timeout=None):
@@ -155,4 +156,4 @@ def test_timeout_value_passed_to_httpx_matches_setting(monkeypatch):
 
     monkeypatch.setattr(ext.httpx, "post", fake_post)
     aperag_search("退货政策")
-    assert captured["timeout"] == 3.0
+    assert captured["timeout"] == 7.5

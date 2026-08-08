@@ -267,12 +267,14 @@ class Settings(BaseSettings):
     # 变慢"的折中。选紧不选松是刻意的:owner 已声明 ApeRAG 无本地兜底,超时=
     # 这一轮直接零注入进入生成(见 kb_local_fallback_enabled False 时的行为)——
     # 让买家等 10s 才等到"这轮没有知识库",比现在就没有更糟,该失败就快失败。
-    # 本次复核(见 .superpowers/sdd/task-aperag-latency-report.md)用同一台本机
-    # ApeRAG 复测时观测到比 owner 基准更高的延迟与更大的方差(该机器当时负载不同),
-    # 但仍以 owner 提供的基准分布定这个值——如果上线后 kb_latency 观测事件里
-    # outcome=timeout 的占比持续偏高,应该按那时的真实分布再调,而不是按这次复测
-    # 的一次性噪声顺势放宽。
-    aperag_timeout_s: float = 3.0
+    # 定值依据两组实测(见 .superpowers/sdd/task-aperag-latency-report.md),两组都是
+    # 去掉全文腿之后的纯向量路:A 组 p90 1.11s/最坏 2.36s,B 组(同机器、负载更高)
+    # p90 2.86s/最坏 3.83s。取 6.0s = 高于两组最坏值约 1.6 倍的余量。
+    # 一度收到 3.0s,但那个值低于 B 组实测最坏值,复测 12 次里 2 次直接超时——
+    # 无兜底时超时就是这一轮零知识注入,拿 17% 的知识丢失换几秒延迟不划算。
+    # "该失败就快失败"仍然成立,只是失败线要划在真实分布之外而不是之内。
+    # 后续按 kb_latency 观测事件里 outcome=timeout 的真实占比再调。
+    aperag_timeout_s: float = 6.0
 
     # 统一查询理解节点(意图识别):一次 LLM 调用出 domain/intent/need_kb/kb_query,
     # 吃掉独立路由与改写调用;闲聊轮免检索。关=回退老 Router 路由+每轮必检索
