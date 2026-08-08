@@ -55,3 +55,13 @@ class VectorBackend(ABC):
     @abstractmethod
     def expected_embedding_model(self) -> str:
         """已持久化索引使用的 embedding 模型名（用于校验）。"""
+
+    def expected_embedding_dim(self) -> int:
+        """已持久化索引的向量维度（用于校验，配合 expected_embedding_model）。
+
+        非抽象方法，给一个安全默认值 0（表示"未知/不校验"）——旧索引文件
+        没有这个字段时不应该因为加了新校验就直接报错炸掉，只有真正记录了
+        维度且不一致时才报错。子类（NumpyBackend/ChromaBackend）在持久化时
+        写入维度后重写本方法返回真实值。
+        """
+        return 0

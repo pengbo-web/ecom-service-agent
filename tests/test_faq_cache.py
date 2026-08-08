@@ -1,8 +1,14 @@
-"""FAQ 语义缓存:命中/阈值/容错/单例。"""
+"""FAQ 语义缓存:命中/阈值/容错/单例/三态区分/维度模型加载期校验(W1 L1)。"""
+
+import json
+
+import pytest
 
 import app.agent.faq_cache as fc
 from app.agent.faq_cache import FaqCache
+from app.agent.rag.errors import EmbeddingIndexMismatchError
 from app.config.settings import settings
+from app.observability import embedding_health
 
 
 def _cache(tmp_path, monkeypatch, entries=None):
@@ -71,3 +77,111 @@ def test_singleton_reset(tmp_path, monkeypatch):
     assert a is fc.get_faq_cache()
     fc.reset_faq_cache()
     assert a is not fc.get_faq_cache()
+
+
+# ---------------------------------------------------------------------------
+# W1 L1:持久化文件记录 embedding 模型/维度 + 加载期不一致校验
+# ---------------------------------------------------------------------------
+
+def test_save_persists_current_model_and_dim(tmp_path, monkeypatch):
+    c = _cache(tmp_path, monkeypatch, [("下单后多久发货", "48小时内出库")])
+    data = json.loads((tmp_path / "faq.json").read_text(encoding="utf-8"))
+    assert data["embedding_model"] == settings.embedding_model
+    assert data["embedding_dim"] == settings.embedding_dimension
+
+
+def test_load_raises_on_model_mismatch(tmp_path, monkeypatch):
+    p = tmp_path / "mismatch.json"
+    p.write_text(json.dumps({
+        "embedding_model": "some-other-model",
+        "embedding_dim": settings.embedding_dimension,
+        "entries": [{"q": "q", "a": "a", "emb": [0.1] * settings.embedding_dimension}],
+    }), encoding="utf-8")
+    with pytest.raises(EmbeddingIndexMismatchError, match="重建"):
+        FaqCache(str(p))
+
+
+def test_load_raises_on_dim_mismatch(tmp_path, monkeypatch):
+    p = tmp_path / "mismatch.json"
+    p.write_text(json.dumps({
+        "embedding_model": settings.embedding_model,
+        "embedding_dim": 1536,
+        "entries": [{"q": "q", "a": "a", "emb": [0.1] * 1536}],
+    }), encoding="utf-8")
+    with pytest.raises(EmbeddingIndexMismatchError, match="重建"):
+        FaqCache(str(p))
+
+
+def test_load_tolerates_legacy_file_without_metadata(tmp_path, monkeypatch):
+    """升级前的老文件没有 embedding_model/embedding_dim 字段:按"未知,不校验"
+    处理,不能因为加了新校验就把历史文件直接炸掉。"""
+    p = tmp_path / "legacy.json"
+    p.write_text(json.dumps({"entries": [{"q": "q", "a": "a", "emb": [0.1, 0.2]}]}),
+                 encoding="utf-8")
+    c = FaqCache(str(p))            # 不应抛
+    assert len(c.entries) == 1
+
+
+def test_load_matching_metadata_does_not_raise(tmp_path, monkeypatch):
+    p = tmp_path / "ok.json"
+    p.write_text(json.dumps({
+        "embedding_model": settings.embedding_model,
+        "embedding_dim": settings.embedding_dimension,
+        "entries": [],
+    }), encoding="utf-8")
+    FaqCache(str(p))                # 不应抛
+
+
+# ---------------------------------------------------------------------------
+# W1 L1:三态区分(hit / miss / unavailable)+ 失败计数
+# ---------------------------------------------------------------------------
+
+def test_lookup_with_state_hit(tmp_path, monkeypatch):
+    c = _cache(tmp_path, monkeypatch, [("下单后多久发货", "48小时内出库")])
+    outcome = c.lookup_with_state("下单多久能发货?")
+    assert outcome.state == "hit"
+    assert outcome.hit["answer"] == "48小时内出库"
+    assert outcome.error is None
+
+
+def test_lookup_with_state_miss(tmp_path, monkeypatch):
+    c = _cache(tmp_path, monkeypatch, [("下单后多久发货", "48小时内出库")])
+    outcome = c.lookup_with_state("价保多久")
+    assert outcome.state == "miss"
+    assert outcome.hit is None
+
+
+def test_lookup_with_state_unavailable_on_embed_failure(tmp_path, monkeypatch):
+    """三态的关键一条:embedding 调用失败必须是 unavailable,不能跟 miss 混在
+    一起——这正是过去 FAQ 缓存整体失效很久没人发现的原因。"""
+    c = _cache(tmp_path, monkeypatch, [("下单后多久发货", "48小时内出库")])
+
+    def boom(t):
+        raise RuntimeError("404 model_not_found")
+
+    monkeypatch.setattr(c, "_embed", boom)
+    outcome = c.lookup_with_state("下单多久能发货?")
+    assert outcome.state == "unavailable"
+    assert "404" in outcome.error
+    # 兼容旧接口:lookup() 仍然只返回 None,不区分 miss/unavailable
+    assert c.lookup("下单多久能发货?") is None
+
+
+def test_embed_failure_is_counted(tmp_path, monkeypatch):
+    """embedding 失败必须留下计数痕迹,不能"发生了没人知道"。"""
+    embedding_health.reset_embedding_failure_stats()
+    c = _cache(tmp_path, monkeypatch, [("下单后多久发货", "48小时内出库")])
+
+    def boom(t):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(c, "_embed", boom)
+    c.lookup_with_state("下单多久能发货?")
+    stats = embedding_health.embedding_failure_stats()
+    assert stats["total"] == 1
+    assert stats["by_source"]["faq_cache"] == 1
+    assert "boom" in stats["last_error"]
+
+    c.lookup_with_state("再来一次")
+    assert embedding_health.embedding_failure_stats()["total"] == 2
+    embedding_health.reset_embedding_failure_stats()

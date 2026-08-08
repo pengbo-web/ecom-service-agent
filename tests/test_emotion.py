@@ -134,10 +134,11 @@ def test_faq_cache_hit_still_records_turn_signal(db, tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "faq_cache_enabled", True)
     monkeypatch.setattr(settings, "emotion_trace_enabled", True)
     monkeypatch.setattr("app.db.get_db", lambda: db)
+    from app.agent.faq_cache import FaqLookupOutcome
     monkeypatch.setattr(
         "app.agent.faq_cache.get_faq_cache",
-        lambda: SimpleNamespace(lookup=lambda q: {
-            "question": "下单后多久发货", "answer": "48小时内出库", "score": 0.95}),
+        lambda: SimpleNamespace(lookup_with_state=lambda q: FaqLookupOutcome(
+            state="hit", hit={"question": "下单后多久发货", "answer": "48小时内出库", "score": 0.95})),
     )
 
     agent = EcomAgent(session_path=str(tmp_path / "s.json"), session_id="s-faq-1",

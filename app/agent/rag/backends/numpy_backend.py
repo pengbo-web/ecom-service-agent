@@ -31,6 +31,7 @@ class NumpyBackend(VectorBackend):
         self._chunks: list[Chunk] = []
         self._vectors: list[list[float]] = []
         self._embedding_model: str = ""
+        self._embedding_dim: int = 0
 
     def upsert(
         self,
@@ -45,10 +46,12 @@ class NumpyBackend(VectorBackend):
         self._chunks = list(chunks)
         self._vectors = list(vectors)
         self._embedding_model = embedding_model
+        self._embedding_dim = len(vectors[0]) if vectors else 0
 
         self._index_path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "embedding_model": embedding_model,
+            "embedding_dim": self._embedding_dim,   # 与模型名一起记录,加载时两项都要校验
             "chunks": [c.to_dict() for c in chunks],
             "vectors": vectors,
         }
@@ -92,13 +95,24 @@ class NumpyBackend(VectorBackend):
             )
         data = json.loads(self._index_path.read_text(encoding="utf-8"))
         self._embedding_model = data.get("embedding_model", "")
-        self._chunks = [Chunk(**c) for c in data["chunks"]]
+        # 旧索引文件(本次修复之前构建的)没有这个字段:取不到时用实际向量长度
+        # 兜底,而不是留 0——否则一份真实是 1536 维的旧索引会被当成"未知/不校验"
+        # 放过，恰好复现"换了模型却继续用旧索引"这个静默 bug。
         self._vectors = data["vectors"]
+        self._chunks = [Chunk(**c) for c in data["chunks"]]
+        self._embedding_dim = data.get("embedding_dim") or (
+            len(self._vectors[0]) if self._vectors else 0
+        )
 
     def expected_embedding_model(self) -> str:
         if not self._embedding_model and self._index_path.exists():
             self.load()
         return self._embedding_model
+
+    def expected_embedding_dim(self) -> int:
+        if not self._embedding_dim and self._index_path.exists():
+            self.load()
+        return self._embedding_dim
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

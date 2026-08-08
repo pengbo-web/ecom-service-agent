@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from app.agent.rag.backends.base import RetrievedChunk, VectorBackend
 from app.agent.rag.embedder import Embedder
+from app.agent.rag.errors import EmbeddingIndexMismatchError
+from app.config.settings import settings
 
 __all__ = ["KnowledgeRetriever", "RetrievedChunk"]
 
@@ -38,11 +40,24 @@ class KnowledgeRetriever:
             return
         self._backend.load()
 
-        expected = self._backend.expected_embedding_model()
-        if expected and expected != self._embedder.model:
-            raise ValueError(
-                f"索引模型({expected}) 与当前 Embedder 模型"
-                f"({self._embedder.model}) 不一致，请重建索引。"
+        # 下面两处不一致都抛 EmbeddingIndexMismatchError,不能是普通异常——
+        # 上层 search_knowledge() 会显式放行这个类型，不把它并进常规的
+        # "embedding 失败=本轮无知识库"fail-soft 兜底(见 app/agent/rag/errors.py)。
+        expected_model = self._backend.expected_embedding_model()
+        if expected_model and expected_model != self._embedder.model:
+            raise EmbeddingIndexMismatchError(
+                f"知识库索引的 embedding 模型({expected_model!r})与当前配置"
+                f"(settings.embedding_model={self._embedder.model!r})不一致。"
+                f"请先运行 `python app/scripts/build_kb_index.py` 用当前模型"
+                f"重建索引，不能直接拿旧模型的向量继续检索(维度/语义空间都"
+                f"不一样，相似度会静默算错)。"
+            )
+        expected_dim = self._backend.expected_embedding_dim()
+        if expected_dim and expected_dim != settings.embedding_dimension:
+            raise EmbeddingIndexMismatchError(
+                f"知识库索引的向量维度({expected_dim})与当前配置"
+                f"(settings.embedding_dimension={settings.embedding_dimension})不一致。"
+                f"请先运行 `python app/scripts/build_kb_index.py` 用当前模型重建索引。"
             )
         self._loaded = True
 

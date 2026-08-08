@@ -180,14 +180,30 @@ class EcomAgent:
         # 命中=零 LLM 直答(毫秒级);未命中/关闭/失败走正常流程。会话落账与持久化照常。
         if (settings.faq_cache_enabled and self._turn_qu is not None
                 and self._turn_qu.need_kb):
-            from app.agent.faq_cache import get_faq_cache
+            from app.agent.faq_cache import get_faq_cache, FaqLookupOutcome
+            from app.agent.rag.errors import EmbeddingIndexMismatchError
+            # get_faq_cache() 故意放在下面的容错 try 之外:单例首次构造时若发现
+            # 持久化缓存的 embedding 模型/维度与当前配置不一致,会抛
+            # EmbeddingIndexMismatchError——这是部署错误而不是瞬时故障,必须
+            # 让它明确失败(参见 app/agent/faq_cache.py 顶部说明),不能被下面
+            # "单次 embedding 调用失败=未命中"的常规容错一起吞掉。
+            cache = get_faq_cache()
             try:
-                _hit = get_faq_cache().lookup(self._turn_qu.kb_query or user_input)
-            except Exception:      # 容错红线:缓存任何异常(如坏emb条目)=未命中,绝不打断主流程
-                _hit = None
-            if _hit is not None:
-                self._emit({"type": "faq_cache", "matched": _hit["question"],
-                            "score": _hit["score"]})
+                outcome = cache.lookup_with_state(self._turn_qu.kb_query or user_input)
+            except EmbeddingIndexMismatchError:
+                raise
+            except Exception as exc:   # 容错红线:查询过程的意外异常=不可用,绝不打断主流程
+                outcome = FaqLookupOutcome(state="unavailable", error=str(exc)[:200])
+            # 三态埋点(W1 L1):hit/miss/unavailable 每轮都发一条,trace 里才能
+            # 区分"真的没匹配到"与"这一轮 embedding 调用失败"——过去只在命中时
+            # 才发事件,后两者在 trace 里完全一样,是整个子系统坏了很久没人
+            # 发现的直接原因。
+            self._emit({"type": "faq_cache", "state": outcome.state,
+                        **({"matched": outcome.hit["question"], "score": outcome.hit["score"]}
+                           if outcome.state == "hit" else {}),
+                        **({"error": outcome.error} if outcome.state == "unavailable" else {})})
+            if outcome.state == "hit":
+                _hit = outcome.hit
                 result = CustomerServiceResponse(
                     intent=IntentType.OTHER, confidence=1.0,
                     reply=_hit["answer"] + "\n(依据《常见问题FAQ》)",

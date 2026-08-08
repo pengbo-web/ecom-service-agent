@@ -200,10 +200,17 @@ class _LangfuseTurn:
             )
             obs.end()
         elif etype == "faq_cache":
-            # 命中缓存 = 跳过了模型这一步本身就是结论,没有"耗时区间"要展示。
+            # W1 L1:三态埋点——hit(命中,跳过模型这一步)/miss(真的没匹配到)/
+            # unavailable(embedding 调用失败)。过去只在命中时才发这个事件,
+            # miss 与 unavailable 在这里(以及自研 tracer)完全等价看不出区别，
+            # 是整个子系统失效很久没人发现的原因之一，state/error 就是补上的
+            # 区分依据。level="WARNING" 让 unavailable 在 Langfuse UI 里醒目，
+            # 不用逐条展开才发现 embedding 挂了。
             obs = self._client.start_observation(
                 as_type="span", name="faq_cache",
-                input={"matched": ev.get("matched"), "score": ev.get("score")},
+                input={"matched": ev.get("matched"), "score": ev.get("score"),
+                       "state": ev.get("state"), "error": ev.get("error")},
+                level=("WARNING" if ev.get("state") == "unavailable" else "DEFAULT"),
             )
             obs.end()
         elif etype == "recall":

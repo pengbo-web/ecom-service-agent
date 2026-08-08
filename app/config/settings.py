@@ -37,7 +37,17 @@ class Settings(BaseSettings):
     demo_hmdp_nickname: str = "小鱼同学"
 
     # RAG 配置（第5期）
-    embedding_model: str = "text-embedding-3-small"
+    # W1 L1 修复:本项目 openai_base_url 实际指向阿里 DashScope 兼容端点时,
+    # OpenAI 官方的 text-embedding-3-small 在该端点返回 404 model_not_found——
+    # 端点上验证可用的是 qwen3.7-text-embedding(1024 维)。模型名只在这里配置,
+    # 代码里任何位置都不得写死;换端点/换模型只改这一行 + .env。
+    embedding_model: str = "qwen3.7-text-embedding"
+    # 上面 embedding_model 实际输出的向量维度,换模型必须连带改这个值——
+    # 索引/FAQ 缓存加载时用它做维度校验(见 app/agent/rag/retriever.py、
+    # app/agent/faq_cache.py):持久化文件里记的维度与这里不一致就明确报错
+    # 并提示重建,绝不静默用错维度算相似度(那样只会返回一堆看似正常但
+    # 全错的检索结果)。
+    embedding_dimension: int = 1024
     kb_dir: str = "app/agent/rag/knowledge"
     # 向量后端：numpy（手写余弦，教学透明，零依赖，默认）/ chroma（向量数据库，生产代表，需 pip install chromadb）
     rag_backend: str = "numpy"

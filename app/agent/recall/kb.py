@@ -12,7 +12,9 @@ import logging
 from dataclasses import dataclass, field
 
 from app.config.settings import settings
+from app.agent.rag.errors import EmbeddingIndexMismatchError
 from app.agent.tools.knowledge import search_knowledge
+from app.observability.embedding_health import record_embedding_failure
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +33,25 @@ _HEADER = (
 
 
 def _local_rows(query: str) -> list[dict]:
-    """本地向量索引取行;失败返回 []。"""
+    """本地向量索引取行;失败返回 []。
+
+    W1 L1:这里是"embedding 调用失败被当成无结果吞掉"的典型位置之一——
+    预召回每轮自动触发,不经过 ReAct 工具调用事件通道,过去失败连日志之外
+    什么可观测信号都不留。EmbeddingIndexMismatchError(索引维度/模型不匹配,
+    结构性部署错误)不在此吞,原样往外抛；其它失败(网络/超时/瞬时故障)
+    仍按原样 fail-soft 返回 []，但额外计数,不再是"发生了没人知道"。
+    """
     try:
         result = search_knowledge(query, top_k=settings.recall_kb_top_k)
-    except Exception:
+    except EmbeddingIndexMismatchError:
+        raise
+    except Exception as e:
         logger.warning("kb pre-recall search failed", exc_info=True)
+        record_embedding_failure("kb_recall", e)
         return []
     if not result.get("success"):
         logger.warning("kb pre-recall degraded: %s", result.get("error"))
+        record_embedding_failure("kb_recall", RuntimeError(result.get("error") or "unknown"))
         return []
     return result.get("results", [])
 

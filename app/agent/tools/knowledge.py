@@ -17,7 +17,9 @@ from typing import Optional
 from app.config.settings import settings
 from app.agent.rag.backends import create_backend
 from app.agent.rag.embedder import Embedder
+from app.agent.rag.errors import EmbeddingIndexMismatchError
 from app.agent.rag.retriever import KnowledgeRetriever
+from app.observability.embedding_health import record_embedding_failure
 
 _retriever: Optional[KnowledgeRetriever] = None
 
@@ -89,7 +91,12 @@ def search_knowledge(query: str, top_k: int = 3) -> dict:
             "query": query,
             "results": [],
         }
+    except EmbeddingIndexMismatchError:
+        # 维度/模型不匹配是部署错误，不是瞬时故障——绝不能在这里当成
+        # "本轮无知识库"悄悄兜底，必须原样往外抛，让调用方明确失败。
+        raise
     except Exception as e:
+        record_embedding_failure("kb_search", e)
         return {
             "success": False,
             "error": f"知识库初始化失败: {e}",
@@ -99,7 +106,19 @@ def search_knowledge(query: str, top_k: int = 3) -> dict:
         }
 
     top_k = max(1, min(int(top_k or 3), 5))
-    hits = retriever.search(query, top_k=top_k)
+    try:
+        hits = retriever.search(query, top_k=top_k)
+    except EmbeddingIndexMismatchError:
+        raise
+    except Exception as e:
+        record_embedding_failure("kb_search", e)
+        return {
+            "success": False,
+            "error": f"知识库检索失败: {e}",
+            "backend": settings.rag_backend,
+            "query": query,
+            "results": [],
+        }
 
     return {
         "success": True,

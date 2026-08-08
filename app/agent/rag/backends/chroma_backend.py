@@ -23,6 +23,7 @@ from app.agent.rag.backends.base import RetrievedChunk, VectorBackend
 from app.agent.rag.chunker import Chunk
 
 _EMBEDDING_MODEL_KEY = "embedding_model"
+_EMBEDDING_DIM_KEY = "embedding_dim"
 
 
 class ChromaBackend(VectorBackend):
@@ -34,6 +35,7 @@ class ChromaBackend(VectorBackend):
         self._client = None
         self._collection = None
         self._embedding_model: str = ""
+        self._embedding_dim: int = 0
         self._size_cache: int | None = None
 
     def _ensure_client(self):
@@ -71,11 +73,13 @@ class ChromaBackend(VectorBackend):
             # 不存在则忽略
             pass
 
+        embedding_dim = len(vectors[0]) if vectors else 0
         # cosine 距离：score = 1 - distance，越大越相似
         self._collection = self._client.create_collection(
             name=self._collection_name,
             metadata={
                 _EMBEDDING_MODEL_KEY: embedding_model,
+                _EMBEDDING_DIM_KEY: embedding_dim,   # 与模型名一起记录,加载时两项都要校验
                 "hnsw:space": "cosine",
             },
         )
@@ -91,6 +95,7 @@ class ChromaBackend(VectorBackend):
         )
 
         self._embedding_model = embedding_model
+        self._embedding_dim = embedding_dim
         self._size_cache = len(chunks)
 
     def search(self, query_vector: list[float], top_k: int) -> list[RetrievedChunk]:
@@ -142,6 +147,7 @@ class ChromaBackend(VectorBackend):
 
         meta = self._collection.metadata or {}
         self._embedding_model = meta.get(_EMBEDDING_MODEL_KEY, "")
+        self._embedding_dim = int(meta.get(_EMBEDDING_DIM_KEY, 0) or 0)
         self._size_cache = None  # 等需要时再 count
 
     def expected_embedding_model(self) -> str:
@@ -151,3 +157,11 @@ class ChromaBackend(VectorBackend):
             except FileNotFoundError:
                 return ""
         return self._embedding_model
+
+    def expected_embedding_dim(self) -> int:
+        if not self._embedding_dim and self._collection is None:
+            try:
+                self.load()
+            except FileNotFoundError:
+                return 0
+        return self._embedding_dim
