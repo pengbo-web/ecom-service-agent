@@ -13,6 +13,7 @@ import logging
 import httpx
 
 from app.config.settings import settings
+from app.net.internal_http import internal_client
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +46,15 @@ def aperag_search(query: str, top_k: int | None = None) -> list[dict] | None:
     if settings.aperag_fulltext_enabled:
         payload["fulltext_search"] = {"topk": topk}
     try:
-        resp = httpx.post(url, json=payload,
-                          headers={"Authorization": f"Bearer {settings.aperag_api_key}"},
-                          timeout=settings.aperag_timeout_s)
+        # 内网地址绕过系统代理(`internal_client`,模块级导入)。这条是**买家每轮
+        # 都走的热路径**:开发/部署机上挂着 HTTP_PROXY 而 NO_PROXY 没带回环时,
+        # 每一次召回都被塞进代理隧道 → 502/超时,而本函数 fail-soft 返回 None,
+        # 表现为"知识库里什么都没有"——客服照常回答,只是答案里没有任何政策依据。
+        # 实测同一份代码在有 NO_PROXY 的终端里全通、在 uvicorn 进程里全挂。
+        # 见 app/net/internal_http.py。
+        with internal_client(url, timeout=settings.aperag_timeout_s) as c:
+            resp = c.post(url, json=payload,
+                          headers={"Authorization": f"Bearer {settings.aperag_api_key}"})
         if resp.status_code != 200:
             logger.warning("aperag search http %s: %s", resp.status_code, resp.text[:200])
             return None

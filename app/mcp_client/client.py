@@ -47,17 +47,32 @@ class MCPClient:
     async def _run(self, tool_definitions: list[dict], error_holder: list[Exception]):
         """后台协程：建立连接 → 发现工具 → 保持存活等待调用。"""
         try:
-            async with streamable_http_client(self._server_url) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    self._session = session
+            # 注入内网客户端:MCP Server 与本服务同机(默认 127.0.0.1:9123),而
+            # SDK 默认建的 httpx.AsyncClient 是 `trust_env=True`。开发/部署机上
+            # 挂着 HTTP_PROXY 而 NO_PROXY 没带回环时,这条连接会失败,
+            # `_init_mcp` 随即**静默降级到本地工具**。
+            #
+            # 后果不是"少了几个工具"这么轻:本地工具读的是 agent 自己的订单库,
+            # 而页面(我的订单 / 坐席客户面板)读的是 hmdp。实测同一个买家,
+            # AI 说"您名下共 2 笔订单",而他自己的订单页里有 9 笔——AI 还会
+            # 据此回答"未找到订单 ORD-xxx",而那笔单在 hmdp 里明明是已发货。
+            # 见 app/net/internal_http.py。
+            from app.net.internal_http import internal_async_client
 
-                    tools_result = await session.list_tools()
-                    openai_tools = mcp_tools_to_openai(tools_result.tools)
-                    tool_definitions.extend(openai_tools)
+            async with internal_async_client(self._server_url) as http_client:
+                async with streamable_http_client(
+                    self._server_url, http_client=http_client
+                ) as (read, write, _):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        self._session = session
 
-                    self._connected.set()
-                    await self._close_event.wait()
+                        tools_result = await session.list_tools()
+                        openai_tools = mcp_tools_to_openai(tools_result.tools)
+                        tool_definitions.extend(openai_tools)
+
+                        self._connected.set()
+                        await self._close_event.wait()
         except Exception as e:
             error_holder.append(e)
             self._connected.set()

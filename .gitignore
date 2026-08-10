@@ -49,3 +49,8 @@ webui/node_modules
 app/agent/skills/definitions/_candidates/
 app/agent/skills/definitions/_archive/
 app/agent/skills/definitions/_swap/
+# 转正/驳回后的候选归档(与上面三个同类:运行期产物,内容随真实流量变化)。
+# 它们是"这个候选当时长什么样"的本地证据,不是源码——留在版本库里只会让
+# 每次点一次转正就多出一堆 diff。
+app/agent/skills/definitions/_promoted/
+app/agent/skills/definitions/_rejected/

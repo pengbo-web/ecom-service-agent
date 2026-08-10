@@ -26,9 +26,19 @@ class HmdpClient:
         return data if isinstance(data, dict) else {"success": False, "errorMsg": "hmdp 返回格式异常"}
 
     def _call(self, method: str, path: str, **kw) -> dict:
+        # 内网地址绕过系统代理。这是 AI **全部** hmdp 工具(查订单/物流/退款/
+        # 下单)的唯一出口:开发机上挂着 HTTP_PROXY 而 NO_PROXY 没带回环时,
+        # 这一层会整片超时,而每个工具的降级文案都是"无法连接 hmdp",
+        # Agent 拿到的是一句错误、买家拿到的是一段临场编出来的解释。
+        # 见 app/net/internal_http.py。
+        from app.net.internal_http import internal_client, warn_if_proxy_would_break
+
+        url = self.base_url + path
         try:
-            resp = httpx.request(method, self.base_url + path, timeout=self.timeout, **kw)
+            with internal_client(url, timeout=self.timeout) as c:
+                resp = c.request(method, url, **kw)
         except httpx.HTTPError as e:
+            warn_if_proxy_would_break(url)
             return {"success": False, "errorMsg": f"无法连接 hmdp:{e.__class__.__name__}"}
         return self._safe(resp)
 

@@ -1,8 +1,41 @@
-"""ApeRAG 适配器:映射/容错/未配置短路。"""
+"""ApeRAG 适配器:映射/容错/未配置短路。
+
+打桩点是 `ext.internal_client` 而不是 `httpx.post`:这条调用改走内网客户端了
+(内网地址绕过系统代理——不改的话 uvicorn 进程里每次召回都被代理吃掉,而
+fail-soft 会把它表现成"知识库里什么都没有")。**打桩点跟着接缝走**,不让生产
+代码为了迁就测试保留旧形状。见 app/net/internal_http.py 与 tests/_fake_internal_client.py。
+"""
 
 import httpx
 
 import app.agent.recall.external_kb as ext
+from tests._fake_internal_client import patch_internal_client
+
+
+def _patch(monkeypatch, module, post_fn):
+    """把 `module.internal_client` 换掉,POST 转给原来那个 fake 函数。
+
+    保留各用例原有的 fake 签名 `(url, json=, headers=, timeout=)`,只是 timeout
+    现在由 client 持有(内网客户端在构造时收 timeout),所以从记录里补回去。
+    """
+    holder = {}
+
+    def handler(method, url, kwargs):
+        return post_fn(url, json=kwargs.get("json"), headers=kwargs.get("headers"),
+                       timeout=holder.get("timeout"))
+
+    rec = patch_internal_client(monkeypatch, module, handler)
+    holder["rec"] = rec
+
+    # client 构造时的 timeout 要能被 handler 看到
+    orig = module.internal_client
+
+    def _wrap(url, timeout=None, **kw):
+        holder["timeout"] = timeout
+        return orig(url, timeout=timeout, **kw)
+
+    monkeypatch.setattr(module, "internal_client", _wrap)
+    return rec
 from app.agent.recall.external_kb import aperag_search
 from app.config.settings import settings
 
@@ -33,7 +66,7 @@ def test_maps_items_to_standard_rows(monkeypatch):
              "source": "docs/退换货政策.md", "recall_type": "vector_search"},
         ]})
 
-    monkeypatch.setattr(ext.httpx, "post", fake_post)
+    _patch(monkeypatch, ext, fake_post)
     rows = aperag_search("退货政策")
     assert rows == [{"doc": "退换货政策", "section": "vector_search",   # .md 已去后缀(来源标注观感)
                      "score": 0.87, "text": "签收7天内可退"}]
@@ -47,22 +80,19 @@ def test_maps_items_to_standard_rows(monkeypatch):
 
 def test_empty_items_is_no_hit_not_degrade(monkeypatch):
     _cfg(monkeypatch)
-    monkeypatch.setattr(ext.httpx, "post",
-                        lambda *a, **k: _Resp(200, {"items": []}))
+    _patch(monkeypatch, ext, lambda *a, **k: _Resp(200, {"items": []}))
     assert aperag_search("无关问题") == []          # [] 表示正常无命中
 
 
 def test_non_dict_item_returns_none(monkeypatch):
     _cfg(monkeypatch)
-    monkeypatch.setattr(ext.httpx, "post",
-                        lambda *a, **k: _Resp(200, {"items": ["not-a-dict"]}))
+    _patch(monkeypatch, ext, lambda *a, **k: _Resp(200, {"items": ["not-a-dict"]}))
     assert aperag_search("退货政策") is None
 
 
 def test_http_error_returns_none(monkeypatch):
     _cfg(monkeypatch)
-    monkeypatch.setattr(ext.httpx, "post",
-                        lambda *a, **k: _Resp(500, text="boom"))
+    _patch(monkeypatch, ext, lambda *a, **k: _Resp(500, text="boom"))
     assert aperag_search("退货政策") is None        # None 触发降级
 
 
@@ -72,14 +102,14 @@ def test_network_exception_returns_none(monkeypatch):
     def boom(*a, **k):
         raise httpx.ConnectError("refused")
 
-    monkeypatch.setattr(ext.httpx, "post", boom)
+    _patch(monkeypatch, ext, boom)
     assert aperag_search("退货政策") is None
 
 
 def test_missing_config_short_circuits(monkeypatch):
     monkeypatch.setattr(settings, "aperag_api_key", "")
     called = []
-    monkeypatch.setattr(ext.httpx, "post", lambda *a, **k: called.append(1))
+    _patch(monkeypatch, ext, lambda *a, **k: called.append(1))
     assert aperag_search("退货政策") is None
     assert called == []                              # 未配置连请求都不发
 
@@ -99,7 +129,7 @@ def test_fulltext_leg_omitted_by_default(monkeypatch):
         captured.update(json=json)
         return _Resp(200, {"items": []})
 
-    monkeypatch.setattr(ext.httpx, "post", fake_post)
+    _patch(monkeypatch, ext, fake_post)
     aperag_search("退货政策")
     assert "fulltext_search" not in captured["json"]
     assert captured["json"]["vector_search"]["topk"] == settings.recall_kb_top_k
@@ -116,7 +146,7 @@ def test_fulltext_leg_included_when_enabled(monkeypatch):
         captured.update(json=json)
         return _Resp(200, {"items": []})
 
-    monkeypatch.setattr(ext.httpx, "post", fake_post)
+    _patch(monkeypatch, ext, fake_post)
     aperag_search("退货政策")
     assert captured["json"]["fulltext_search"] == {"topk": settings.recall_kb_top_k}
 
@@ -140,7 +170,7 @@ def test_timeout_exception_returns_none_not_raised(monkeypatch):
     def boom(*a, **k):
         raise httpx.TimeoutException("timed out")
 
-    monkeypatch.setattr(ext.httpx, "post", boom)
+    _patch(monkeypatch, ext, boom)
     assert aperag_search("退货政策") is None
 
 
@@ -154,6 +184,6 @@ def test_timeout_value_passed_to_httpx_matches_setting(monkeypatch):
         captured["timeout"] = timeout
         return _Resp(200, {"items": []})
 
-    monkeypatch.setattr(ext.httpx, "post", fake_post)
+    _patch(monkeypatch, ext, fake_post)
     aperag_search("退货政策")
     assert captured["timeout"] == 7.5
