@@ -8,24 +8,95 @@ from pathlib import Path
 from typing import Optional
 
 from app.config.settings import settings
+from app.db import dialect
 
 logger = logging.getLogger(__name__)
 
 
 class Database:
-    def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or settings.db_path
+    """业务数据层。**一份实现,两套后端**(PG3)。
 
-    def connect(self) -> sqlite3.Connection:
+    为什么不写一个平行的 `PostgresDatabase` 类:那意味着把 96 个方法抄第二遍,
+    而两份实现必然漂移——本项目已经反复吃过"一半组件做对、另一半漏了"的亏
+    (会话锁降级、`list_user_orders` 的 success 判定、conftest 漏钉 `mcp_enabled`、
+    ApeRAG 漏了代理绕行)。改成参数化之后,SQL 只有一处,方言差异收敛在
+    `app/db/dialect.py`,驱动差异收敛在 `app/db/pg_conn.py`。
+
+    `backend` 默认取 `settings.db_backend`(默认 `sqlite`),行为与改造前**逐字节
+    相同**;显式传 `backend="pg"` 才走 PG。两套后端能在同一进程共存——双后端
+    参数化测试是唯一能证明"语义一致"的手段,而它必须同时持有两个实例。
+    """
+
+    def __init__(self, db_path: Optional[str] = None,
+                 backend: Optional[str] = None, dsn: Optional[str] = None):
+        self.db_path = db_path or settings.db_path
+        self.backend = (backend or getattr(settings, "db_backend", "sqlite") or "sqlite").lower()
+        self.dsn = dsn or getattr(settings, "db_pg_dsn", "") or ""
+        #: 方言实例(不是模块级全局状态,见 dialect.py 顶部的说明)
+        self.d = dialect.get_dialect(self.backend)
+
+    @property
+    def is_pg(self) -> bool:
+        return self.backend == "pg"
+
+    def connect(self):
+        """取一条连接。**并发基座在这里**:WAL + busy_timeout。
+
+        为什么必须开 WAL:默认的 rollback journal 下写者与读者互斥,而协作
+        worker 每处理一条事件要写好几次(共享上下文 / 发事件 / 落草稿 /
+        结束事件)。一旦起草并行(见 collab.handle_insight)或起第二个 worker
+        进程,第二个写者立刻拿到 `database is locked` 而不是排队——表现为
+        "一并行就报错"。WAL 让读者不阻塞写者、写者不阻塞读者,写者之间仍
+        串行但走排队。
+
+        busy_timeout 是配套的另一半:WAL 只是让写者可以排队,**愿不愿意等**
+        由它决定。默认值下遇到锁会很快放弃;显式给一个上限(可配),让短暂的
+        写冲突自己消化掉,而不是冒泡成一次业务失败。
+
+        PRAGMA 放在 connect() 而不是 init_schema():journal_mode 虽然是数据库
+        文件的持久属性(设一次即可,已是 WAL 时这句是空操作),但 busy_timeout
+        是**连接级**的,每条新连接都得重设;而且放这里能保证任何拿连接的路径
+        都覆盖到,不会出现"某条路径绕过了初始化"。两句 PRAGMA 的开销可忽略。
+
+        fail-soft:`:memory:` 内存库不支持 WAL(执行会失败),某些只读挂载也
+        可能拒绝改 journal_mode。这两种情况下退回默认 journal 继续跑——并发
+        能力受限,但不能因为设不了一个性能 PRAGMA 就让整个数据层不可用。
+        """
+        if self.is_pg:
+            # PG 不需要 WAL/busy_timeout(那是 SQLite 的并发基座概念),也没有文件路径。
+            # 连接包装把 `?` 翻成 `%s`(见 app/db/pg_conn.py:PG1 说的"在 execute
+            # 边界做一次转换"就是那里)。
+            from app.db.pg_conn import PgConnection
+
+            if not self.dsn:
+                raise RuntimeError(
+                    "db_backend=pg 但未配置 db_pg_dsn。数据层是业务主链路,"
+                    "这里**刻意抛而不降级**:静默回落 SQLite 会让两个实例各写各的库,"
+                    "而那种数据分裂比启动失败难查得多。")
+            return PgConnection(self.dsn)
+
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                f"PRAGMA busy_timeout={max(0, int(settings.db_busy_timeout_ms))}")
+        except sqlite3.Error:
+            logger.debug("设置 WAL/busy_timeout 失败(可能是内存库或只读挂载),"
+                         "按默认 journal 继续", exc_info=True)
         return conn
 
     def init_schema(self) -> None:
+        """建表。DDL 只写一份(SQLite 语法),PG 由 `dialect.translate_schema` 后处理。
+
+        为什么不把 22 张表逐个改成 f-string:那要在一段 300 行、结构高度重复的
+        DDL 里插 30 多处 `{...}`,可读性会塌掉,而且每次加表都得记着用 f-string
+        ——漏一次就是一个**只在 PG 上炸**的错误。后处理是一处,规则可逐条测。
+        """
         conn = self.connect()
         try:
-            conn.executescript(
+            conn.executescript(dialect.translate_schema(
                 """
                 CREATE TABLE IF NOT EXISTS products (
                     product_id TEXT PRIMARY KEY,
@@ -146,13 +217,21 @@ class Database:
                     target_agent TEXT NOT NULL,
                     correlation_id TEXT,
                     status TEXT NOT NULL DEFAULT 'pending',
+                    priority INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     consumed_at TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_agent_events_target
-                    ON agent_events(target_agent, status, id);
+                    ON agent_events(target_agent, status, priority, id);
                 CREATE INDEX IF NOT EXISTS idx_agent_events_corr
                     ON agent_events(correlation_id, id);
+                CREATE TABLE IF NOT EXISTS worker_heartbeats (
+                    name TEXT PRIMARY KEY,
+                    last_success_at TEXT,
+                    last_error_at TEXT,
+                    last_error TEXT,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS shared_context (
                     key TEXT PRIMARY KEY,
                     value TEXT,
@@ -254,68 +333,125 @@ class Database:
                     ON outreach_followups(user_id, kind) WHERE status = 'active';
                 CREATE INDEX IF NOT EXISTS idx_followups_due
                     ON outreach_followups(status, next_touch_at);
-                """
-            )
-            # 兼容旧库：products 补 floor_price 列
-            cols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
-            if "floor_price" not in cols:
-                conn.execute("ALTER TABLE products ADD COLUMN floor_price REAL")
-            # 兼容旧库：orders 补 shipping_address 列
-            ocols = [r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()]
-            if "shipping_address" not in ocols:
-                conn.execute("ALTER TABLE orders ADD COLUMN shipping_address TEXT")
-            # 兼容旧库：users 补 member_level 列(券资格:会员等级)
-            cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
-            if "member_level" not in cols:
-                conn.execute("ALTER TABLE users ADD COLUMN member_level TEXT DEFAULT 'normal'")
+                """, self.d))
+            # ---- 旧库列补齐(**仅 SQLite**)----
+            # 这些 ALTER 是为了让**已经存在**的老 SQLite 文件补上后来新增的列。
+            # PG 后端是全新库,建表语句里就带着全部列,这一整段没有意义;而且
+            # `PRAGMA table_info` 是 SQLite 专有的,在 PG 上会直接语法错误。
+            if not self.is_pg:
+                # 兼容旧库：products 补 floor_price 列
+                cols = [r[1] for r in conn.execute("PRAGMA table_info(products)").fetchall()]
+                if "floor_price" not in cols:
+                    conn.execute("ALTER TABLE products ADD COLUMN floor_price REAL")
+                # 兼容旧库：orders 补 shipping_address 列
+                ocols = [r[1] for r in conn.execute("PRAGMA table_info(orders)").fetchall()]
+                if "shipping_address" not in ocols:
+                    conn.execute("ALTER TABLE orders ADD COLUMN shipping_address TEXT")
+                # 兼容旧库：users 补 member_level 列(券资格:会员等级)
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+                if "member_level" not in cols:
+                    conn.execute("ALTER TABLE users ADD COLUMN member_level TEXT DEFAULT 'normal'")
+                    conn.commit()
+                # 兼容旧库：conversations 补 updated_at 列(最后活跃时间,供工作台排序/显示)
+                ccols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
+                if "updated_at" not in ccols:
+                    conn.execute("ALTER TABLE conversations ADD COLUMN updated_at TEXT")
+                    conn.execute("UPDATE conversations SET updated_at = created_at WHERE updated_at IS NULL")
+                    conn.commit()
+                # 兼容旧库：skill_traces 补 variant 列(灰度 A/B 需区分 live/canary)
+                stcols = {r[1] for r in conn.execute("PRAGMA table_info(skill_traces)").fetchall()}
+                if "variant" not in stcols:
+                    conn.execute("ALTER TABLE skill_traces ADD COLUMN variant TEXT DEFAULT 'live'")
+                    conn.execute("UPDATE skill_traces SET variant = 'live' WHERE variant IS NULL")
+                    conn.commit()
+                # 兼容旧库：skill_traces 补 skill_version 列(0=未知,历史行无从考证)
+                stcols = {r[1] for r in conn.execute("PRAGMA table_info(skill_traces)")}
+                if "skill_version" not in stcols:
+                    conn.execute("ALTER TABLE skill_traces ADD COLUMN skill_version INTEGER DEFAULT 0")
+                    conn.execute("UPDATE skill_traces SET skill_version = 0 WHERE skill_version IS NULL")
+                    conn.commit()
+                # 兼容旧库：skill_traces 补 skill_fingerprint 列("unknown"=未知,历史行
+                # 无从考证)。与 skill_version 并存而非取代它:整数版本号只在正式(live)
+                # 目录转正/回滚时才递增,候选目录从不带 .version,灰度期读到的版本号
+                # 因此永远是"文件不存在→1"——两批不同候选的轨迹无法靠版本号区分。
+                # 指纹是被服务那棵树的内容哈希,不依赖任何人在候选创建时打标,天然
+                # 覆盖 live/candidate 两种情况。
+                stcols = {r[1] for r in conn.execute("PRAGMA table_info(skill_traces)")}
+                if "skill_fingerprint" not in stcols:
+                    conn.execute(
+                        "ALTER TABLE skill_traces ADD COLUMN skill_fingerprint TEXT DEFAULT 'unknown'")
+                    conn.execute(
+                        "UPDATE skill_traces SET skill_fingerprint = 'unknown' "
+                        "WHERE skill_fingerprint IS NULL")
+                    conn.commit()
+                # 兼容旧库:outreach_drafts 补触达归因三列(N3:发送基线/判定结果/判定
+                # 时间)。outcome 老行补 'pending'——它们从未被判定过,不能默认成
+                # 任何一个具体结论,而 pending_attribution 只挑 outcome='pending' 的
+                # 行,老行因此天然会被下一轮 worker 捞到重新走一遍判定。
+                odcols = {r[1] for r in conn.execute(
+                    "PRAGMA table_info(outreach_drafts)").fetchall()}
+                if "status_at_send" not in odcols:
+                    conn.execute("ALTER TABLE outreach_drafts ADD COLUMN status_at_send TEXT")
+                if "outcome" not in odcols:
+                    conn.execute(
+                        "ALTER TABLE outreach_drafts ADD COLUMN outcome TEXT DEFAULT 'pending'")
+                    conn.execute(
+                        "UPDATE outreach_drafts SET outcome = 'pending' WHERE outcome IS NULL")
+                if "outcome_checked_at" not in odcols:
+                    conn.execute("ALTER TABLE outreach_drafts ADD COLUMN outcome_checked_at TEXT")
                 conn.commit()
-            # 兼容旧库：conversations 补 updated_at 列(最后活跃时间,供工作台排序/显示)
-            ccols = {r[1] for r in conn.execute("PRAGMA table_info(conversations)").fetchall()}
-            if "updated_at" not in ccols:
-                conn.execute("ALTER TABLE conversations ADD COLUMN updated_at TEXT")
-                conn.execute("UPDATE conversations SET updated_at = created_at WHERE updated_at IS NULL")
-                conn.commit()
-            # 兼容旧库：skill_traces 补 variant 列(灰度 A/B 需区分 live/canary)
-            stcols = {r[1] for r in conn.execute("PRAGMA table_info(skill_traces)").fetchall()}
-            if "variant" not in stcols:
-                conn.execute("ALTER TABLE skill_traces ADD COLUMN variant TEXT DEFAULT 'live'")
-                conn.execute("UPDATE skill_traces SET variant = 'live' WHERE variant IS NULL")
-                conn.commit()
-            # 兼容旧库：skill_traces 补 skill_version 列(0=未知,历史行无从考证)
-            stcols = {r[1] for r in conn.execute("PRAGMA table_info(skill_traces)")}
-            if "skill_version" not in stcols:
-                conn.execute("ALTER TABLE skill_traces ADD COLUMN skill_version INTEGER DEFAULT 0")
-                conn.execute("UPDATE skill_traces SET skill_version = 0 WHERE skill_version IS NULL")
-                conn.commit()
-            # 兼容旧库：skill_traces 补 skill_fingerprint 列("unknown"=未知,历史行
-            # 无从考证)。与 skill_version 并存而非取代它:整数版本号只在正式(live)
-            # 目录转正/回滚时才递增,候选目录从不带 .version,灰度期读到的版本号
-            # 因此永远是"文件不存在→1"——两批不同候选的轨迹无法靠版本号区分。
-            # 指纹是被服务那棵树的内容哈希,不依赖任何人在候选创建时打标,天然
-            # 覆盖 live/candidate 两种情况。
-            stcols = {r[1] for r in conn.execute("PRAGMA table_info(skill_traces)")}
-            if "skill_fingerprint" not in stcols:
+
+                # P2:待审草稿的去重下沉到数据层(并行起草的前提)。
+                #
+                # 在此之前,"同一买家同一订单不重复排队"完全靠 collab.handle_insight
+                # 里的应用层 seen 集合 + 串行循环。串行时对;并行后两条诊断各自读到
+                # 同一份快照,同一个买家会被排两条几乎相同的草稿——店主挨个批完就是
+                # 给同一个人连发两条。本项目在 start_followup 的注释里已经把这条纪律
+                # 写死过:并发下唯一可靠的判重方式是让约束顶上去,而不是先查后插。
+                #
+                # 约束只覆盖 status='draft'(等人看的那些),与 pending_outreach_targets
+                # 的既有口径完全一致,不新造第二套语义:approved/sent 是"已经处理过的
+                # 历史",不该永久封杀对同一订单的再次触达;rejected 同理,店主驳回过的
+                # 内容换个说法重新排队是合理的。
+                #
+                # 建索引前必须先清存量重复:此前没有任何约束拦过它们,直接建唯一索引
+                # 会在这里抛 IntegrityError,导致**服务起不来**。清理保留 id 最大的
+                # 那条(最新的内容最贴近当前情境),其余置 rejected 而**不物理删除**
+                # ——审计要能看到"这条曾经存在过、因为什么被收掉"。
+                # 兼容旧库:agent_events 补 priority 列(默认 0 = 普通优先级)。
+                # 历史行补 0 是对的:它们发生时系统里没有优先级概念,追认任何非零
+                # 值都是编造。
+                aecols = {r[1] for r in conn.execute("PRAGMA table_info(agent_events)")}
+                if "priority" not in aecols:
+                    conn.execute(
+                        "ALTER TABLE agent_events ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+                    conn.execute("UPDATE agent_events SET priority = 0 WHERE priority IS NULL")
+                    conn.commit()
+
+            dup_keys = conn.execute(
+                "SELECT user_id, order_id, opportunity_type FROM outreach_drafts "
+                "WHERE status = 'draft' "
+                "GROUP BY user_id, order_id, opportunity_type HAVING COUNT(*) > 1"
+            ).fetchall()
+            for k in dup_keys:
                 conn.execute(
-                    "ALTER TABLE skill_traces ADD COLUMN skill_fingerprint TEXT DEFAULT 'unknown'")
-                conn.execute(
-                    "UPDATE skill_traces SET skill_fingerprint = 'unknown' "
-                    "WHERE skill_fingerprint IS NULL")
-                conn.commit()
-            # 兼容旧库:outreach_drafts 补触达归因三列(N3:发送基线/判定结果/判定
-            # 时间)。outcome 老行补 'pending'——它们从未被判定过,不能默认成
-            # 任何一个具体结论,而 pending_attribution 只挑 outcome='pending' 的
-            # 行,老行因此天然会被下一轮 worker 捞到重新走一遍判定。
-            odcols = {r[1] for r in conn.execute(
-                "PRAGMA table_info(outreach_drafts)").fetchall()}
-            if "status_at_send" not in odcols:
-                conn.execute("ALTER TABLE outreach_drafts ADD COLUMN status_at_send TEXT")
-            if "outcome" not in odcols:
-                conn.execute(
-                    "ALTER TABLE outreach_drafts ADD COLUMN outcome TEXT DEFAULT 'pending'")
-                conn.execute(
-                    "UPDATE outreach_drafts SET outcome = 'pending' WHERE outcome IS NULL")
-            if "outcome_checked_at" not in odcols:
-                conn.execute("ALTER TABLE outreach_drafts ADD COLUMN outcome_checked_at TEXT")
+                    "UPDATE outreach_drafts SET status = 'rejected', "
+                    "reviewed_by = 'system', reviewed_at = ?, "
+                    "needs_review_reason = COALESCE(needs_review_reason || ' / ', '') || "
+                    "'历史重复草稿,建唯一约束时自动收敛(保留最新一条)' "
+                    "WHERE status = 'draft' AND user_id = ? AND order_id = ? "
+                    "AND opportunity_type = ? AND id < ("
+                    "  SELECT MAX(id) FROM outreach_drafts WHERE status = 'draft' "
+                    "  AND user_id = ? AND order_id = ? AND opportunity_type = ?)",
+                    (self._now(), k["user_id"], k["order_id"], k["opportunity_type"],
+                     k["user_id"], k["order_id"], k["opportunity_type"]))
+            if dup_keys:
+                logger.warning("建唯一约束前收敛了 %s 组重复待审草稿(已置 rejected,"
+                               "未删除)", len(dup_keys))
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_draft_unique "
+                "ON outreach_drafts(user_id, order_id, opportunity_type) "
+                "WHERE status = 'draft'")
             conn.commit()
         finally:
             conn.close()
@@ -892,22 +1028,30 @@ class Database:
 
     # ---------- 多 Agent 协作总线(持久化 append-only 事件) ----------
     def publish_event(self, event_type: str, payload: dict, source_agent: str,
-                      target_agent: str, correlation_id: str) -> int:
+                      target_agent: str, correlation_id: str,
+                      priority: int = 0) -> int:
         """发布一条协作事件,返回自增 id。
 
         总线是**持久化**的:进程重启不丢事件,且 correlation_id 把一条协作链
         (信号→洞察→草稿→发送)串起来,全链可回溯审计。
+
+        priority 越大越先被认领(见 claim_events);默认 0 = 普通。取值由总线
+        路由表声明(见 app/multi_agent/routing.py 的 Subscription.priority),
+        不由发布方现场决定——"这条有多急"是编排层的判断,不是生产方的判断。
         """
         conn = self.connect()
         try:
             cur = conn.execute(
-                "INSERT INTO agent_events (event_type, payload, source_agent, "
-                "target_agent, correlation_id, status, created_at) "
-                "VALUES (?, ?, ?, ?, ?, 'pending', ?)",
+                self.d.returning_id(
+                    "INSERT INTO agent_events (event_type, payload, source_agent, "
+                    "target_agent, correlation_id, status, priority, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)"),
                 (event_type, json.dumps(payload or {}, ensure_ascii=False),
-                 source_agent, target_agent, correlation_id, self._now()))
+                 source_agent, target_agent, correlation_id, int(priority), self._now()))
+            # 先取回再 commit:RETURNING 的结果在游标里,提交会重置它。
+            new_id = int(cur.fetchone()["id"])
             conn.commit()
-            return int(cur.lastrowid)
+            return new_id
         finally:
             conn.close()
 
@@ -924,8 +1068,11 @@ class Database:
         conn = self.connect()
         try:
             rows = conn.execute(
+                # 优先级高的先认领;**同优先级仍严格 FIFO**(id ASC)——这一点
+                # 不能丢:同一类事件之间的先来后到是可预期性的来源,乱序会让
+                # "为什么这条比那条晚处理"变得无法解释。
                 "SELECT id FROM agent_events WHERE target_agent = ? AND status = 'pending' "
-                "ORDER BY id ASC LIMIT ?", (target_agent, limit)).fetchall()
+                "ORDER BY priority DESC, id ASC LIMIT ?", (target_agent, limit)).fetchall()
             claimed: list[dict] = []
             for row in rows:
                 cur = conn.execute(
@@ -994,6 +1141,156 @@ class Database:
         finally:
             conn.close()
 
+    def list_failed_events(self, limit: int = 50) -> list[dict]:
+        """列出处理失败的协作事件(status='failed')。
+
+        为什么需要一个专门的入口:`consume()` 刻意**不自动重试** failed 事件
+        (避免一条坏事件无限循环),注释里写的是"留在表里供人工在时间线上看到
+        并决定"。但时间线端点必须先知道 `correlation_id` 才查得到——也就是说
+        在有这个方法之前,一条失败的协作链**没有任何人会发现**:没有告警、
+        没有面板、没有列出入口。"留给人工决定"事实上是"留给没人"。
+
+        payload 保持原始 JSON 文本不解析:这些行本来就可能是因为 payload 有
+        问题才失败的,再解析一次只会在展示路径上重现同一个异常。
+        """
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT id, event_type, source_agent, target_agent, correlation_id, "
+                "       payload, created_at, consumed_at "
+                "FROM agent_events WHERE status = 'failed' "
+                "ORDER BY id DESC LIMIT ?", (max(1, int(limit)),)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def count_failed_events(self) -> int:
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM agent_events WHERE status = 'failed'").fetchone()
+            return int(row["n"] or 0)
+        finally:
+            conn.close()
+
+    def retry_failed_event(self, event_id: int) -> bool:
+        """把一条失败事件放回待处理队列(failed → pending),供人工决定重试。
+
+        条件更新(只对仍是 failed 的行生效),与 claim_events/finish_event 同一
+        套幂等纪律:连点两次、两个运营同时点,只有第一次真的改到状态。
+        `consumed_at` 一并清空,否则 `reclaim_stale_events` 会看到一条"很久以前
+        就被认领"的 pending 行——虽然它只挑 processing,但留着一个语义已经失效
+        的时间戳只会让后来者读不懂这张表。
+        """
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE agent_events SET status = 'pending', consumed_at = NULL "
+                "WHERE id = ? AND status = 'failed'", (event_id,))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def record_worker_heartbeat(self, name: str, ok: bool, error: str = "") -> None:
+        """记一次 worker 心跳。ok=True 更新 last_success_at,否则记 last_error。
+
+        为什么要有它:`reclaim_stale_events` 能救"worker 认领后崩在半路"的事件,
+        但救不了"worker 进程整个死了"——那种情况下没有任何人去调 reclaim,协作
+        静默停摆,而买家链路一切正常,不会有任何症状暴露出来。心跳是这件事唯一
+        的可观测信号。
+
+        fail-soft:心跳写不进去绝不能反过来影响那一轮真正的协作工作。
+        """
+        conn = self.connect()
+        try:
+            now = self._now()
+            if ok:
+                conn.execute(
+                    "INSERT INTO worker_heartbeats (name, last_success_at, updated_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET "
+                    "last_success_at = excluded.last_success_at, updated_at = excluded.updated_at",
+                    (name, now, now))
+            else:
+                conn.execute(
+                    "INSERT INTO worker_heartbeats (name, last_error_at, last_error, updated_at) "
+                    "VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET "
+                    "last_error_at = excluded.last_error_at, "
+                    "last_error = excluded.last_error, updated_at = excluded.updated_at",
+                    (name, now, (error or "")[:500], now))
+            conn.commit()
+        except Exception:  # noqa: BLE001 心跳失败不得影响本轮协作
+            logger.warning("写 worker 心跳失败 name=%s", name, exc_info=True)
+        finally:
+            conn.close()
+
+    def get_worker_heartbeat(self, name: str) -> Optional[dict]:
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM worker_heartbeats WHERE name = ?", (name,)).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def list_pending_for_target(self, target_agent: str, limit: int = 50) -> list[dict]:
+        """某个 target 的待处理事件(不认领,只看)。
+
+        为「人工闸」而加。路由表把 `action.drafts_ready` / `result.outreach_*`
+        都投给 `human`,声明是"需要人来看的事件投给它"——但 worker 只消费
+        analyst 与 growth 两个 target,**human 的事件没有任何消费方,也没有任何
+        界面列出它们**。实测积压 325 条,永远停在 pending。
+        与 failed 事件曾经的处境完全一样:"留给人工"事实上是"留给没人"。
+
+        用 `ORDER BY priority DESC, id ASC` 与 `claim_events` 同序:人看到的顺序
+        应当与系统认为的轻重缓急一致,不该一个按时间倒序、一个按优先级。
+        """
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM agent_events WHERE target_agent = ? AND status = 'pending' "
+                "ORDER BY priority DESC, id ASC LIMIT ?",
+                (target_agent, limit)).fetchall()
+            out = []
+            for row in rows:
+                item = dict(row)
+                try:
+                    item["payload"] = json.loads(item["payload"]) if item["payload"] else {}
+                except (json.JSONDecodeError, TypeError):
+                    item["payload"] = {}
+                out.append(item)
+            return out
+        finally:
+            conn.close()
+
+    def count_pending_for_target(self, target_agent: str) -> int:
+        conn = self.connect()
+        try:
+            return int(conn.execute(
+                "SELECT COUNT(*) c FROM agent_events "
+                "WHERE target_agent = ? AND status = 'pending'",
+                (target_agent,)).fetchone()["c"])
+        finally:
+            conn.close()
+
+    def acknowledge_event(self, event_id: int) -> bool:
+        """人工确认一条待处理事件(pending → done)。条件更新,连点两次只第一次生效。
+
+        与 `finish_event` 分开:那个只对 `processing` 生效(worker 认领后的收尾),
+        而人工闸的事件**从来不会被认领**——没有任何 worker 消费 human。
+        复用它会静默失败(0 行受影响却返回 False),看起来像"点了没反应"。
+        """
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE agent_events SET status = 'done', consumed_at = ? "
+                "WHERE id = ? AND status = 'pending'",
+                (self._now(), event_id))
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
     def list_events(self, correlation_id: Optional[str] = None,
                     limit: int = 100) -> list[dict]:
         """按 id DESC 列事件(可按协作链过滤),供时间线可视化与审计。"""
@@ -1016,6 +1313,63 @@ class Database:
                     item["payload"] = {}
                 results.append(item)
             return results
+        finally:
+            conn.close()
+
+    def list_event_chains(self, limit: int = 30) -> list[dict]:
+        """按 correlation_id 聚合出最近的协作链清单。
+
+        为什么必须有这个:`list_events(correlation_id=...)` 要求调用方**先知道**
+        correlation_id,而在此之前没有任何地方列出过它——时间线端点因此事实上
+        不可达,和失败事件"留在表里供人工决定"却没有列表入口是同一个缺陷
+        (见 `/api/admin/collab/health` 的注释)。一个查得到但没人找得着入口的
+        视图,等于不存在。
+
+        聚合发生在 SQL 里而不是取回全部事件再在 Python 里 group:事件表随时间
+        无上界增长,先取回再聚合迟早会把整张表拉进内存。
+
+        `agents` 用 group_concat 拼出这条链碰过哪些 Agent(去重在上层做——
+        SQLite 的 `group_concat(DISTINCT x)` 不支持自定义分隔符)。
+        没有 correlation_id 的事件(旧数据/直投)归不进任何链,直接排除:
+        把它们混成一条名为空串的"链"只会造出一条假的、包含无关事件的时间线。
+        """
+        sql = f"""
+            SELECT correlation_id,
+                   COUNT(*)                              AS events,
+                   MIN(created_at)                       AS started_at,
+                   MAX(COALESCE(consumed_at, created_at)) AS last_at,
+                   {self.d.count_if("status = 'failed'")}                AS failed,
+                   {self.d.count_if("status = 'pending'")}               AS pending,
+                   {self.d.count_if("status = 'skipped'")}               AS skipped,
+                   -- 这里**刻意不统计"降级"**。降级信息只存在于 shared_context,
+                   -- 不在事件表里:降级的诊断按路由规则不唤醒营销,而 resolve()
+                   -- 返回空目标时 publish() 压根不插入任何事件行——降级诊断在
+                   -- 总线上不留一丝痕迹。实测 insight.diagnosis 事件只有 2 条,
+                   -- 而 shared_context 里有 6 条诊断、其中 3 条降级。
+                   -- 在这里加一列 `SUM(payload.degraded)` 只会得到恒为 0 的假信号,
+                   -- 比不做更糟。降级统计走 /collab/health 的 degraded 段。
+                   {self.d.group_concat('source_agent')}  AS sources,
+                   {self.d.group_concat('target_agent')}  AS targets
+              FROM agent_events
+             WHERE correlation_id IS NOT NULL AND correlation_id != ''
+             GROUP BY correlation_id
+             ORDER BY MAX(id) DESC
+             LIMIT ?
+        """
+        conn = self.connect()
+        try:
+            rows = conn.execute(sql, (limit,)).fetchall()
+            out = []
+            for row in rows:
+                item = dict(row)
+                agents = [a for a in
+                          (item.pop("sources") or "").split(",") +
+                          (item.pop("targets") or "").split(",") if a]
+                # dict.fromkeys 而不是 set:保留首次出现顺序,链上的 Agent 顺序
+                # 本身就是给人看的信息(谁先动手),排序打乱它就没意义了。
+                item["agents"] = list(dict.fromkeys(agents))
+                out.append(item)
+            return out
         finally:
             conn.close()
 
@@ -1095,23 +1449,40 @@ class Database:
     def create_outreach_draft(self, opportunity_type: str, user_id: str,
                               order_id: str, content: str, offer: dict,
                               reason: str, correlation_id: str, created_by: str,
-                              needs_review_reason: str = "") -> int:
-        """落一条触达草稿(status 恒为 draft)。
+                              needs_review_reason: str = "") -> Optional[int]:
+        """落一条触达草稿(status 恒为 draft)。返回 draft_id;**已有同类待审草稿
+        时返回 None**(不是错误)。
 
         **本方法是营销 Agent 唯一的写路径**:它永远只能产 draft,发送发生在
         审批端点里。needs_review_reason 非空表示命中了承诺类敏感词,人工要重点看。
+
+        P2:同一 (user_id, order_id, opportunity_type) 在 status='draft' 下由
+        `idx_outreach_draft_unique` 保证至多一条,撞了捕获 IntegrityError 返回
+        None——与 `start_followup` 完全同一套返回约定(None = "已有一条,本次不
+        重复排",调用方据此计入跳过而不是失败)。
+        为什么让约束顶上而不是先查后插:并行起草时两个线程会读到同一份"当前
+        待审"快照,先查后插必然漏。应用层的去重集合仍然保留,但它从此只是"省一次
+        无谓的 LLM 调用"的优化,不再是正确性的唯一防线。
         """
         conn = self.connect()
         try:
             cur = conn.execute(
-                "INSERT INTO outreach_drafts (opportunity_type, user_id, order_id, "
-                "content, offer, reason, correlation_id, status, needs_review_reason, "
-                "created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)",
+                self.d.returning_id(
+                    "INSERT INTO outreach_drafts (opportunity_type, user_id, order_id, "
+                    "content, offer, reason, correlation_id, status, needs_review_reason, "
+                    "created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)"),
                 (opportunity_type, user_id, order_id, content,
                  json.dumps(offer or {}, ensure_ascii=False), reason, correlation_id,
                  needs_review_reason, created_by, self._now()))
+            new_id = int(cur.fetchone()["id"])   # RETURNING:先取回再 commit
             conn.commit()
-            return int(cur.lastrowid)
+            return new_id
+        except Exception as exc:  # noqa: BLE001 只吞唯一约束冲突,其余照抛
+            if not self.d.is_duplicate_key(exc):
+                raise
+            # 唯一索引拒绝:该买家该订单该商机类型已经有一条待审草稿。
+            # 不是错误,是去重生效——与 start_followup 同一返回约定。
+            return None
         finally:
             conn.close()
 
@@ -1250,9 +1621,10 @@ class Database:
         try:
             rows = conn.execute(
                 "SELECT * FROM outreach_drafts WHERE status = 'sent' AND outcome = 'pending' "
-                "AND sent_at IS NOT NULL AND sent_at <= datetime('now', ?) "
+                "AND sent_at IS NOT NULL AND sent_at <= "
+                f"{self.d.now_minus(max(1, int(older_than_hours)), 'hours')} "
                 "ORDER BY id ASC LIMIT ?",
-                (f"-{max(1, int(older_than_hours))} hours", max(1, int(limit)))
+                (max(1, int(limit)),)
             ).fetchall()
             return [d for d in (self._draft_from_row(r) for r in rows) if d]
         finally:
@@ -1286,7 +1658,7 @@ class Database:
         """
         conn = self.connect()
         try:
-            w = f"datetime('now', '-{max(1, int(window_days))} days')"
+            w = self.d.now_minus(max(1, int(window_days)), "days")
             row = conn.execute(
                 f"SELECT COUNT(*) AS sent, "
                 f"SUM(CASE WHEN outcome = 'converted' THEN 1 ELSE 0 END) AS converted "
@@ -1373,7 +1745,7 @@ class Database:
         """
         conn = self.connect()
         try:
-            w = f"datetime('now', '-{max(1, int(window_days))} days')"
+            w = self.d.now_minus(max(1, int(window_days)), "days")
             rows = conn.execute(
                 f"SELECT emotion, COUNT(*) AS n FROM turn_signals "
                 f"WHERE created_at >= {w} GROUP BY emotion"
@@ -1411,13 +1783,17 @@ class Database:
             if order is None or order["status"] != "delivered" or order["user"] != user_id:
                 return None
             cur = conn.execute(
-                "INSERT INTO reviews (order_id, user_id, sku, rating, content, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                self.d.returning_id(
+                    "INSERT INTO reviews (order_id, user_id, sku, rating, content, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)"),
                 (order_id, user_id, sku, int(rating), content or "", self._now()),
             )
+            new_id = int(cur.fetchone()["id"])   # RETURNING:先取回再 commit
             conn.commit()
-            return int(cur.lastrowid)
-        except sqlite3.IntegrityError:
+            return new_id
+        except Exception as exc:  # noqa: BLE001 只吞唯一约束冲突,其余照抛
+            if not self.d.is_duplicate_key(exc):
+                raise
             return None
         finally:
             conn.close()
@@ -1434,7 +1810,7 @@ class Database:
                 clauses.append("sku = ?")
                 params.append(sku)
             if window_days is not None:
-                clauses.append(f"created_at >= datetime('now', '-{max(1, int(window_days))} days')")
+                clauses.append(f"created_at >= {self.d.now_minus(max(1, int(window_days)), 'days')}")
             if clauses:
                 sql += " WHERE " + " AND ".join(clauses)
             sql += " ORDER BY id DESC LIMIT ?"
@@ -1463,7 +1839,7 @@ class Database:
         """
         conn = self.connect()
         try:
-            w = f"datetime('now', '-{max(1, int(window_days))} days')"
+            w = self.d.now_minus(max(1, int(window_days)), "days")
             row = conn.execute(
                 f"SELECT COUNT(*) AS total, COALESCE(AVG(rating), 0) AS avg_rating, "
                 f"SUM(CASE WHEN rating <= 2 THEN 1 ELSE 0 END) AS bad "
@@ -1497,6 +1873,24 @@ class Database:
                 (user_id,),
             ).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def reviewed_pairs(self, user_id: str) -> set:
+        """该买家已评过的 (order_id, sku) 集合。
+
+        给"订单在 hmdp、评价在本地"这条组合路径用:hmdp 没有评价这个概念
+        (它只有 blog 评论),所以评价合理地留在 agent 侧;但**哪些订单可评**
+        必须由买家实际看到的那份订单决定,而不是由本地订单表决定——否则
+        demo 买家的订单全在 hmdp,`reviewable_items` 永远返回空,整个评价功能
+        对默认模式不可达。
+        """
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT order_id, sku FROM reviews WHERE user_id = ?", (user_id,)
+            ).fetchall()
+            return {(r["order_id"], r["sku"]) for r in rows}
         finally:
             conn.close()
 
@@ -1602,7 +1996,7 @@ class Database:
             rows = conn.execute(
                 f"SELECT id, user_id, sku, quantity, added_at FROM carts "
                 f"WHERE status = 'active' "
-                f"  AND added_at <= datetime('now', '-{max(1, int(hours))} hours') "
+                f"  AND added_at <= {self.d.now_minus(max(1, int(hours)), 'hours')} "
                 f"ORDER BY added_at ASC LIMIT ?",
                 (max(1, int(limit)),)).fetchall()
             return [dict(r) for r in rows]
@@ -1642,12 +2036,16 @@ class Database:
         conn = self.connect()
         try:
             cur = conn.execute(
-                "INSERT INTO coupon_grants (code, user_id, draft_id, reason, "
-                "granted_by, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                self.d.returning_id(
+                    "INSERT INTO coupon_grants (code, user_id, draft_id, reason, "
+                    "granted_by, created_at) VALUES (?, ?, ?, ?, ?, ?)"),
                 (code, user_id, draft_id, reason, granted_by, self._now()))
+            new_id = int(cur.fetchone()["id"])   # RETURNING:先取回再 commit
             conn.commit()
-            return int(cur.lastrowid)
-        except sqlite3.IntegrityError:
+            return new_id
+        except Exception as exc:  # noqa: BLE001 只吞唯一约束冲突,其余照抛
+            if not self.d.is_duplicate_key(exc):
+                raise
             return None
         finally:
             conn.close()
@@ -1698,15 +2096,19 @@ class Database:
         try:
             now = self._now()
             cur = conn.execute(
-                "INSERT INTO outreach_followups (user_id, kind, correlation_id, step, "
-                "max_steps, next_touch_at, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, 1, ?, datetime('now', '+' || ? || ' hours'), "
-                "'active', ?, ?)",
+                self.d.returning_id(
+                    "INSERT INTO outreach_followups (user_id, kind, correlation_id, step, "
+                    "max_steps, next_touch_at, status, created_at, updated_at) "
+                    f"VALUES (?, ?, ?, 1, ?, {self.d.now_plus_param('hours')}, "
+                    "'active', ?, ?)"),
                 (user_id, kind, correlation_id, max(1, int(max_steps)),
                  max(0, int(interval_hours)), now, now))
+            new_id = int(cur.fetchone()["id"])   # RETURNING:先取回再 commit
             conn.commit()
-            return int(cur.lastrowid)
-        except sqlite3.IntegrityError:
+            return new_id
+        except Exception as exc:  # noqa: BLE001 只吞唯一约束冲突,其余照抛
+            if not self.d.is_duplicate_key(exc):
+                raise
             return None
         finally:
             conn.close()
@@ -1717,7 +2119,7 @@ class Database:
         try:
             rows = conn.execute(
                 "SELECT * FROM outreach_followups WHERE status = 'active' "
-                "AND next_touch_at <= datetime('now') "
+                f"AND next_touch_at <= {self.d.now()} "
                 "ORDER BY next_touch_at ASC LIMIT ?", (max(1, int(limit)),)).fetchall()
             return [dict(r) for r in rows]
         finally:
@@ -1743,7 +2145,7 @@ class Database:
             else:
                 conn.execute(
                     "UPDATE outreach_followups SET step = ?, "
-                    "next_touch_at = datetime('now', '+' || ? || ' hours'), "
+                    f"next_touch_at = {self.d.now_plus_param('hours')}, "
                     "updated_at = ? WHERE id = ?",
                     (new_step, max(0, int(interval_hours)), now, fid))
             conn.commit()

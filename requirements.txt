@@ -13,3 +13,8 @@ fakeredis>=2.0     # 测试用内存假 Redis（离线单测,不触网）
 
 # 观测平台体验(可选):Langfuse 自托管 drop-in 上报,langfuse_enabled=True 时需要
 langfuse>=3.0.0
+
+# 协作队列 PG 载体(PG2,可选):collab_bus_backend=pg 时需要。
+# [binary] 带预编译轮子,免装 libpq 与编译器。默认后端仍是 sqlite,不装它也能跑
+# (工厂会回落 SQLite 并记 warning),所以这条不是硬依赖。
+psycopg[binary]>=3.1
