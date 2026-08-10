@@ -58,7 +58,19 @@ def test_new_user_turn_recomputes(monkeypatch):
     assert calls == ["第一问", "第二问"]                      # last_user 变了要重算
 
 
-def test_no_hits_no_event(monkeypatch):
+def test_no_hits_now_emits_a_miss_event(monkeypatch):
+    """**语义已反转**:没命中现在要发 `miss` 事件,而不是什么都不发。
+
+    原用例断言"没命中就静默"——而那个静默正是一次真实故障的成因:ApeRAG 容器停了
+    24 分钟,`aperag_search` 抛 ConnectError → fail-soft 返回 None → 召回 0 条,
+    客服**照常回答**、只是答案里没有任何政策依据(退货运费之类答的是模型常识)。
+    买家侧零症状、运维侧零信号,因为这一支根本不落任何事件。
+
+    现在这一支发 `miss=True` 并带 `degraded` 判据:
+      degraded=True  → 知识库连不上/回落本地 → 去修依赖
+      degraded=False → 库是通的但这一问没有相关政策 → 可能要补文档
+    两者处置相反,所以必须是同一条事件里的两个字段,而不是"都不发"。
+    """
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections",
                         lambda mm, q, include_kb=True, kb_domain=None, kb_prefetch=None: RecallResult())
     agent = _agent()
@@ -67,7 +79,12 @@ def test_no_hits_no_event(monkeypatch):
     agent.raw_messages.append({"role": "user", "content": "你好"})
     agent._turn_recall = None
     agent._build_messages()
-    assert [e for e in events if e["type"] == "recall"] == []
+    recall = [e for e in events if e["type"] == "recall"]
+    assert len(recall) == 1
+    assert recall[0]["miss"] is True
+    assert recall[0]["hits"] == []
+    # RecallResult() 默认 backend="local"、无 latency meta → 不是降级,只是没命中
+    assert recall[0]["degraded"] is False
 
 
 def test_recall_uses_qu_kb_query_and_event_carries_it(monkeypatch):
@@ -120,8 +137,14 @@ def test_qu_need_kb_false_skips_and_emits_skipped(monkeypatch):
     assert ev["skipped"] is True and ev["reason"] == "闲聊寒暄"
 
 
-def test_qu_need_kb_true_no_hits_emits_nothing(monkeypatch):
-    """qu 存在且要检索但无命中:既不发正常事件也不发 skipped(防 elif 被改破)。"""
+def test_qu_need_kb_true_no_hits_is_a_miss_not_a_skip(monkeypatch):
+    """qu 判定要检索、但没命中 → 发 `miss`,**绝不能被记成 `skipped`**。
+
+    原用例断言"什么都不发",意图是防 elif 链被改破。那个意图保留、断言更新:
+    现在这一支要发事件,但它必须是 miss 而不是 skipped——两者在看板上进不同的
+    分母(`kb_recall_attempts` 排除 skipped),混淆会让故障率被闲聊轮无声稀释:
+    10 轮闲聊 + 1 轮真故障 = 9%,刚好躲过 10% 的红线。
+    """
     from app.agent.understanding import QueryUnderstanding
     monkeypatch.setattr("app.agent.recall.service.build_recall_sections",
                         lambda mm, q, include_kb=True, kb_domain=None, kb_prefetch=None: RecallResult())
@@ -133,7 +156,10 @@ def test_qu_need_kb_true_no_hits_emits_nothing(monkeypatch):
     agent.raw_messages.append({"role": "user", "content": "某政策"})
     agent._turn_recall = None
     agent._build_messages()
-    assert [e for e in events if e["type"] == "recall"] == []
+    recall = [e for e in events if e["type"] == "recall"]
+    assert len(recall) == 1
+    assert recall[0]["miss"] is True
+    assert not recall[0].get("skipped"), "要检索却没命中,不是门控跳过"
 
 
 def test_no_qu_defaults_to_old_behavior(monkeypatch):

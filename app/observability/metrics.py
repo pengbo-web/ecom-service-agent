@@ -50,6 +50,25 @@ def compute_metrics(store, window_hours: Optional[float] = None) -> dict:
 
     hitl_spans = [s for s in spans if s["kind"] == "hitl"]
 
+    # KB 召回:**这是本项目最后一条没有出口的降级路径**。
+    #
+    # 实测过它的后果:ApeRAG 容器停了 24 分钟,`aperag_search` 抛 ConnectError →
+    # fail-soft 返回 None → 召回 0 条,而客服照常回答、只是答案里没有任何政策依据
+    # (退货运费之类答的是模型常识)。**买家侧零症状,运维侧零信号。**
+    #
+    # 三个数分开报,因为处置完全不同:
+    #   degraded → 知识库连不上/回落本地 → 去修依赖
+    #   miss     → 库是通的但这一问没有相关政策 → 可能要补文档
+    #   skipped  → 查询理解判定这轮不需要 KB → 正常,不是问题
+    # 合成一个"召回率"会把这三件事糊在一起,而只有第一个是故障。
+    recall_spans = [s for s in spans if s["kind"] == "recall"]
+    kb_spans = [s for s in recall_spans if "kb" in (s.get("name") or "")]
+    kb_degraded = sum(1 for s in kb_spans
+                      if s.get("meta") and '"degraded": true' in s["meta"].lower())
+    kb_skipped = sum(1 for s in kb_spans
+                     if s.get("meta") and '"skipped": true' in s["meta"].lower())
+    kb_attempted = len(kb_spans) - kb_skipped
+
     intent_dist: dict = {}
     for t in traces:
         key = t["intent"] or "unknown"
@@ -73,6 +92,12 @@ def compute_metrics(store, window_hours: Optional[float] = None) -> dict:
         "block_rate": (guard_blocks / total) if total else 0.0,
         "handoffs": len(hitl_spans),
         "escalation_rate": (len(hitl_spans) / total) if total else 0.0,
+        # KB 召回降级:分母是**真正尝试过检索的轮次**(排除门控跳过的),
+        # 否则闲聊轮会把这个比率无声稀释——而稀释后的数字正好会在故障时看起来没事。
+        "kb_recall_attempts": kb_attempted,
+        "kb_recall_degraded": kb_degraded,
+        "kb_degraded_rate": (kb_degraded / kb_attempted) if kb_attempted else 0.0,
+        "kb_recall_skipped": kb_skipped,
         "intent_distribution": intent_dist,
         # 口径必须跟着数字一起下发。一个百分比脱离了统计窗口就没有意义,而这
         # 几个数字正是运维判断"要不要去看一眼"的依据——看板不能让人自己猜

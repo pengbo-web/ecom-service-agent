@@ -1073,13 +1073,45 @@ class EcomAgent:
             if prefetch_failed:
                 rr.kb_backend = "unavailable"
             self._turn_recall = (last_user, rr)
+            # 降级判据抽出来:**命中分支也可能是降级的**——ApeRAG 挂掉、本地索引
+            # 兜底顶上时,这一轮有命中(走命中分支)但依据来自本地旧索引而不是
+            # 线上知识库。实测就是这个形态:停掉 aperag-api 后仍然 hits=2、
+            # backend=local。只在 miss 分支标 degraded 会漏掉**最常见的那一种**
+            # (kb_local_fallback_enabled 默认开着)。
+            _meta = rr.kb_latency or {}
+            _degraded = (_meta.get("outcome") == "unavailable"
+                         or bool(_meta.get("fell_back_to_local"))
+                         or rr.kb_backend == "unavailable")
             if rr.kb_hits:   # 命中才发正常事件(前端思考面板+tracer 各消费一次)
                 self._emit({"type": "recall", "source": "kb", "backend": rr.kb_backend,
-                            "query": recall_query, "hits": rr.kb_hits})
+                            "query": recall_query, "hits": rr.kb_hits,
+                            "degraded": _degraded,
+                            **({"outcome": _meta["outcome"]} if _meta.get("outcome") else {})})
             elif qu is not None and not qu.need_kb:
                 # 门控跳过:显式发 skipped 事件,门控工作与否前端一眼可见
                 self._emit({"type": "recall", "source": "kb",
                             "skipped": True, "reason": qu.intent})
+            else:
+                # **没命中且不是门控跳过 —— 这一支此前什么都不发,于是"知识库连不上"
+                # 在看板上完全看不见。**
+                #
+                # 实测过这个后果:ApeRAG 容器停了 24 分钟,`aperag_search` 抛
+                # ConnectError → fail-soft 返回 None → 召回 0 条,而客服照常回答、
+                # 只是答案里**没有任何政策依据**(退货运费之类答的是模型常识)。
+                # 买家侧零症状,运维侧零信号。
+                #
+                # 两种"0 条"必须分开,它们的处置完全相反:
+                #   degraded=True  → 知识库连不上/后端不可用 → 去修依赖
+                #   degraded=False → 库是通的但这一问没有相关政策 → 可能要补文档
+                # 合成一个"召回 0 条"会让前者被读成后者,而前者是故障。
+                # 判据优先用 `kb_latency`(即 kb.py 那个 meta)里的 `outcome`——它是
+                # **调用侧的事实**("这次 HTTP 到底成没成"),而 `kb_backend` 只是
+                # "最终用了哪个后端":ApeRAG 挂掉后回落本地时 backend 会是 "local",
+                # 光看它分不出"本来就配 local"和"aperag 挂了兜底顶上"。
+                self._emit({"type": "recall", "source": "kb",
+                            "backend": rr.kb_backend, "query": recall_query,
+                            "hits": [], "miss": True, "degraded": _degraded,
+                            **({"outcome": _meta["outcome"]} if _meta.get("outcome") else {})})
             # 任务②③:ApeRAG 调用耗时/结果观测事件——走既有 tracer/Langfuse 通道
             # (self._emit → event_sink → sink() 里同时喂两者,见 app/api/streaming.py),
             # 不新开一条通道。rr.kb_latency 只在 backend=="aperag" 且本轮真的发起过

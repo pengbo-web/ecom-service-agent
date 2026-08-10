@@ -88,7 +88,12 @@ def _fetch_rows(query: str) -> tuple[list[dict], str, dict | None]:
         if not settings.kb_local_fallback_enabled:
             logger.warning("kb backend aperag unavailable, local fallback DISABLED -> no injection this turn")
             return [], "aperag", meta
+        # 回落本地索引时 meta 也要带上去。改造前这里 `return ..., "local", None`
+        # 把 meta 丢了,于是"ApeRAG 挂了但本地兜底顶上"这件事在观测上与"本来就
+        # 配的是 local"**完全无法区分**——而前者是需要去修依赖的故障。
         logger.warning("kb backend aperag unavailable, fallback to local index")
+        meta["fell_back_to_local"] = True
+        return _local_rows(query), "local", meta
     return _local_rows(query), "local", None
 
 

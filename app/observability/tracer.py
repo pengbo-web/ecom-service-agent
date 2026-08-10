@@ -223,8 +223,15 @@ class Tracer:
                 span_id=self._id(), trace_id=trace.trace_id,
                 name=f"recall:{event.get('source')}", kind="recall",
                 started_at=now, ended_at=now, latency_ms=0.0,
+                # `degraded` / `outcome` / `backend` 必须落进 meta,否则"知识库连不上"
+                # 这件事在 trace 里查不到 —— 而它的症状恰恰是**买家侧毫无异样**
+                # (客服照常回答,只是答案里没有政策依据)。实测 ApeRAG 停了 24 分钟
+                # 无人发现,就是因为这三个字段当时都没落库。
                 meta={"query": event.get("query"), "hits": event.get("hits", []),
-                      "skipped": event.get("skipped"), "reason": event.get("reason")},
+                      "skipped": event.get("skipped"), "reason": event.get("reason"),
+                      "degraded": event.get("degraded"),
+                      "outcome": event.get("outcome"),
+                      "backend": event.get("backend")},
                 parent_span_id=self._parent(trace),
             ))
         elif etype == "reply_delta" and event.get("first"):
