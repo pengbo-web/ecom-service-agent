@@ -70,14 +70,27 @@ def test_contact_solicitation_split_across_chunks_never_leaks():
 
 def test_clean_long_text_is_committed_up_to_holdback_boundary():
     """干净文本(没有任何护栏会命中的内容)理应能持续、逐步提交——不是
-    "有变换类护栏存在就整体不发",只扣住尾部 holdback 个字符不发。"""
+    "有变换类护栏存在就整体不发"。
+
+    这条原来断言的是 `len(combined) == len(text) - holdback`(死扣最宽模式的
+    114 个字符)。**改断言是刻意的语义变更,不是让测试迁就实现**:那个口径下
+    长度不足 114 字的回复一条 delta 都发不出去(实测 75 字回复的流式条数为
+    0,买家干等到最后一次性看到全文),流式在体验上等于没做。
+
+    现在按每条模式各自的"屏障字符"算已解决边界(见 streaming_redactor 模块
+    注释):中文标点/空格不可能出现在邮箱那条正则的匹配里,所以不必为它等
+    114 个字。这段纯中文文本的实际扣留量降到只由含 `.` 的那条模式决定。
+    """
     redactor, holdback = _make_redactor()
     text = "您的订单已经发货了，预计三到五天送达，感谢您的耐心等待与信任。" * 6
     assert len(text) > holdback   # 前提:测试文本必须明显长过 holdback,否则永远提交不了
     combined = "".join(_feed_all(redactor, list(text)))
     assert combined   # 确实提交了内容,不是从头按到尾一个字都不发
     assert text.startswith(combined)          # 提交的都是原文的一个前缀,顺序不乱
-    assert len(combined) == len(text) - holdback   # 精确扣住 holdback 个字符不发
+    held = len(text) - len(combined)
+    assert held < holdback, "屏障字符没起作用:还在按最宽模式死扣"
+    # 上界仍然存在(不是"全提交了"),否则就说明边界算错、把没定的也发了出去
+    assert held > 0
 
 
 def test_zero_holdback_emits_immediately_when_no_patterns():

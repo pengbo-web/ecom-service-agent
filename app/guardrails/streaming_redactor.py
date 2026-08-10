@@ -26,6 +26,29 @@
   从这里开始"这件事也已经解决（``finditer`` 在完整缓冲区上找不到，就是找
   不到）。
 
+屏障字符(barrier)——为什么固定扣 ``holdback`` 个字符太保守:
+  上面那套论证给出的是**与文本内容无关**的上界。代价实测出来是致命的:本仓库
+  最宽的模式是邮箱(W=114)，于是**长度不足 114 字的回复一条 delta 都发不出
+  去**(实测 75 字的回复流式条数为 0，买家干等到最后一次性看到全文)，流式在
+  体验上等于没做。
+
+  但内容是能用的信息:邮箱那条正则只吃 ``[\\w.+-]`` 和 ``@``，空格、``*``、
+  ``：``、``，`` 这些字符**不可能出现在它的任何一次匹配里**(见
+  ``pattern_width.pattern_alphabet``)——而中文客服回复里这类字符每几个字就有
+  一个。既然匹配跨不过屏障字符，那么"起点在最后一个屏障之前的匹配"必然在那个
+  屏障之前就结束了，其全部字符都已在缓冲区里 ⇒ 已完全确定，不必再等。
+
+  于是每条模式 p 各有自己的已解决边界(取两者较宽的那个)::
+
+      resolved_p = max(最后一个屏障字符的下标 + 1, len(buffer) - W_p)
+
+  全局边界取各模式的**最小值**(任一条模式还没定，就不能提交)。字母表算不出来
+  的模式(含 ``.``、``[^...]`` 等)退回 ``len - W_p``，与改造前逐字节一致。
+
+  这是**收窄等待，不是放松检测**:正则一个字没改，判定结果不变，只是不再为
+  逻辑上不可能存在的匹配白等。屏障只影响"何时敢提交"，"提交的内容里有没有
+  匹配"这个结论仍由 ``finditer`` 在完整缓冲区上给出。
+
 尾部零宽断言(如 ``(?!\\d)``)在缓冲区末尾提前判定为"未来不会有数字"的唯一
 风险方向是**多脱敏**（把后来证明并不敏感的内容也顺手脱了）——安全侧的
 误报，不是漏报，不违反"不泄漏"这条硬约束，因此不需要额外加宽 holdback。
@@ -39,6 +62,10 @@ delta）——本模块只负责"提前吐一部分安全的字给买家看"这�
 
 from typing import Optional
 
+from app.guardrails.pattern_width import (
+    UnboundedPatternError, pattern_alphabet, pattern_max_width,
+)
+
 
 class IncrementalRedactor:
     """单个"这一轮"专用，不可跨轮复用——`app/api/streaming.py` 每轮新建一个。"""
@@ -49,13 +76,56 @@ class IncrementalRedactor:
         self._sanitize_fn = sanitize_fn   # (原始片段文本) -> 脱敏后的片段文本
         self._buffer = ""       # 本轮至今收到的全部原始文本(从未截断)
         self._committed = 0     # 已经吐给买家的原始字符数(游标)
+        # 每条模式的 (最长宽度, 字母表谓词或 None, 字母表判定缓存, 最后屏障下标)。
+        # 宽度算不出来的模式(直接构造 IncrementalRedactor 的测试可能塞任意正则)
+        # 退回构造参数里那个全局 holdback，保守但安全。
+        self._pstate: list = []
+        for p in self._patterns:
+            try:
+                width = pattern_max_width(p)
+            except UnboundedPatternError:
+                width = self._holdback
+            self._pstate.append({
+                "width": max(int(width), 0),
+                "alpha": pattern_alphabet(p),
+                "cache": {},
+                "barrier": -1,   # 已扫描范围内最后一个屏障字符的下标
+                "scanned": 0,    # 屏障扫描进度(缓冲区只增长，扫过的不必重扫)
+            })
+
+    def _resolved_boundary(self) -> int:
+        """各模式已解决边界的最小值——起点小于它的匹配全都不会再变。"""
+        n = len(self._buffer)
+        if not self._pstate:
+            return n            # 没有模式要防:全部可提交
+        best = n
+        for st in self._pstate:
+            alpha = st["alpha"]
+            if alpha is not None:
+                # 只扫新到达的那一段:屏障下标随缓冲区增长单调不减
+                cache = st["cache"]
+                for i in range(st["scanned"], n):
+                    ch = self._buffer[i]
+                    ok = cache.get(ch)
+                    if ok is None:
+                        ok = alpha(ch)
+                        cache[ch] = ok
+                    if not ok:
+                        st["barrier"] = i
+                st["scanned"] = n
+                resolved_p = max(st["barrier"] + 1, n - st["width"])
+            else:
+                resolved_p = n - st["width"]
+            if resolved_p < best:
+                best = resolved_p
+        return max(0, best)
 
     def feed(self, content: str) -> Optional[str]:
         """喂入新到达的一小段原始文本。返回这一步"确认安全、可以吐给买家"
         的脱敏后文本;返回 ``None`` 表示这次没有新增的可提交内容(还在
         holdback 区间内,继续攒缓冲区，不发任何东西)。"""
         self._buffer += content or ""
-        resolved = max(0, len(self._buffer) - self._holdback)
+        resolved = self._resolved_boundary()
         boundary = resolved
         for pat in self._patterns:
             for m in pat.finditer(self._buffer):

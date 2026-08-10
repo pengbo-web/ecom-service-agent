@@ -81,3 +81,106 @@ def max_pattern_width(patterns: Iterable["re.Pattern"]) -> int:
     """一组正则里最长的那个的最长可能匹配宽度；空列表返回 0。"""
     widths = [pattern_max_width(p) for p in patterns]
     return max(widths, default=0)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# 匹配字母表(match alphabet):哪些字符**根本不可能出现在这个模式的匹配里**
+#
+# 为什么要这个:光有"最长匹配宽度 W"，增量脱敏就只能死扣尾部 W 个字符。而本仓
+# 库最宽的那条是邮箱 `([\w.+-]{1,3})[\w.+-]{0,29}@([\w-]{1,40}\.[\w.-]{1,40})`，
+# W = 114 —— 于是**长度不足 114 字的回复一个字都流不出去**(实测:75 字的回复
+# 流式 delta 条数为 0，买家干等到最后一次性看到全文)。流式在体验上等于没做。
+#
+# 但邮箱这条正则只吃 `[\w.+-]` 和 `@`：空格、`*`、`：`、`，`、`（` 这些字符
+# **不可能出现在它的任何一次匹配里**。中文客服回复里这类字符每几个字就有一
+# 个。既然匹配跨不过屏障字符，那么"起点在屏障之前的匹配"必然在屏障之前就结
+# 束了 —— 已经完全确定，不需要为它继续等。真正还没定的只有最后一个屏障字符
+# 之后那一小段。
+#
+# 这是**收窄等待，不是放松检测**:模式一个字都没改，判定结果逐字节不变，只是
+# 不再为"逻辑上不可能的匹配"白等。
+#
+# 与宽度推导同一条纪律:算不出来就显式返回 None(退回死扣 W)，绝不猜。
+# ────────────────────────────────────────────────────────────────────────────
+
+# `\w`/`\d`/`\s` 这类类别用 stdlib 自己的单字符正则来判定，不手写等价物——
+# 手写的"等价"在 Unicode 下几乎一定会和 re 不一致(比如 \w 匹配中日韩汉字)。
+_CATEGORY_TESTS = {
+    _re_parser.CATEGORY_DIGIT: re.compile(r"\d").match,
+    _re_parser.CATEGORY_WORD: re.compile(r"\w").match,
+    _re_parser.CATEGORY_SPACE: re.compile(r"\s").match,
+}
+
+
+class _Universal(Exception):
+    """这个模式的匹配可能包含任意字符——字母表无意义，调用方退回死扣 W。"""
+
+
+def _collect_alphabet(seq, out: list) -> None:
+    for op, av in seq:
+        _collect_node(op, av, out)
+
+
+def _collect_node(op, av, out: list) -> None:
+    if op == _re_parser.LITERAL:
+        out.append(lambda c, ch=chr(av): c == ch)
+        return
+    if op == _re_parser.CATEGORY:
+        test = _CATEGORY_TESTS.get(av)
+        if test is None:
+            raise _Universal   # 取反类别(\W/\D/\S)等:能匹配的字符太杂，不划屏障
+        out.append(lambda c, t=test: bool(t(c)))
+        return
+    if op == _re_parser.IN:
+        items = list(av)
+        if items and items[0][0] == _re_parser.NEGATE:
+            raise _Universal   # [^...] 几乎什么都能吃，划不出屏障
+        for sub_op, sub_av in items:
+            if sub_op == _re_parser.RANGE:
+                lo, hi = sub_av
+                out.append(lambda c, lo=lo, hi=hi: lo <= ord(c) <= hi)
+            else:
+                _collect_node(sub_op, sub_av, out)
+        return
+    if op in (_re_parser.ANY, _re_parser.NOT_LITERAL):
+        raise _Universal       # `.` 和 [^x]:任意字符都可能落在匹配里
+    if op == _re_parser.AT:
+        return                 # 零宽锚点不消耗字符，不贡献字母表
+    if op in (_re_parser.ASSERT, _re_parser.ASSERT_NOT):
+        # 环视不消耗字符 —— 断言内部匹配到的字符**不属于**本次匹配的跨度，
+        # 所以不该并进字母表。跳过它是收紧而非放松:字母表更小 ⇒ 屏障更多
+        # ⇒ 只会更早提交，而"提交的内容里没有匹配"这个结论仍由 finditer 在
+        # 完整缓冲区上给出，不依赖字母表。
+        return
+    if op == _re_parser.SUBPATTERN:
+        _collect_alphabet(av[3], out)
+        return
+    if op in (_re_parser.MAX_REPEAT, _re_parser.MIN_REPEAT):
+        _collect_alphabet(av[2], out)
+        return
+    if op == _re_parser.BRANCH:
+        for branch in av[1]:
+            _collect_alphabet(branch, out)
+        return
+    raise _Universal           # 未识别算子:不划屏障，退回死扣 W
+
+
+def pattern_alphabet(pattern: "re.Pattern"):
+    """返回判定「这个字符**可能**出现在 pattern 的某次匹配里」的谓词；
+    模式可能吃任意字符(含 `.`、`[^...]`、`\\W` 等)时返回 None —— 调用方据此
+    退回"死扣最长宽度"的老行为。
+
+    谓词只允许在"可能"这一侧出错(把不可能的字符判成可能)：那只会让屏障变少、
+    多等几个字符，不会漏脱敏。反过来把可能的字符判成不可能才是危险的，所以每
+    个识别不了的算子都直接 `_Universal`。
+    """
+    try:
+        tests: list = []
+        _collect_alphabet(_re_parser.parse(pattern.pattern, flags=pattern.flags), tests)
+    except _Universal:
+        return None
+    if not tests:
+        return None
+    def _in_alphabet(c: str) -> bool:
+        return any(t(c) for t in tests)
+    return _in_alphabet
