@@ -73,12 +73,67 @@ describe("CartView", () => {
   it("移除后该商品从列表消失", async () => {
     stubCart([{ id: 1, user_id: "u1", sku: "P001", quantity: 2, added_at: "t", status: "active" }]);
     render(<CartView onShop={() => {}} />);
-    expect(await screen.findByText("P001")).toBeInTheDocument();
+    // 查不到商品信息时退回「商品 <sku>」,而不是把一个原始 id 当商品名摆着
+    expect(await screen.findByText("商品 P001")).toBeInTheDocument();
 
     fireEvent.click(await screen.findByRole("button", { name: /移除/ }));
 
-    await waitFor(() => expect(screen.queryByText("P001")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText("商品 P001")).not.toBeInTheDocument());
     expect(await screen.findByText("购物车空空如也，去商城逛逛吧～")).toBeInTheDocument();
+  });
+
+  // 改造前购物车里一件商品只显示一个原始 sku(如「1」),没有名字、没有价格、
+  // 没有小计。最严重的是那个「去下单」按钮:它会在买家**从未看到价格**的情况下
+  // 提交订单,下完单才用弹窗告诉他付了多少——那是让人闭着眼睛付钱。
+  const PRICED: CartItem = {
+    id: 1, user_id: "u1", sku: "1", quantity: 2, added_at: "t", status: "active",
+    title: "Nike Air Max 270 运动鞋", price: 899, image: "", stock: 153,
+    subtotal: 1798, product_missing: false,
+  };
+
+  it("显示商品名、单价、小计,而不是一个原始 sku", async () => {
+    stubCart([PRICED]);
+    render(<CartView onShop={() => {}} />);
+    expect(await screen.findByText("Nike Air Max 270 运动鞋")).toBeInTheDocument();
+    expect(screen.getByText("单价 ¥899")).toBeInTheDocument();
+    expect(screen.getByText("¥1798")).toBeInTheDocument();
+  });
+
+  it("金额写在下单按钮上,点之前就能看到", async () => {
+    stubCart([PRICED]);
+    render(<CartView onShop={() => {}} />);
+    expect(await screen.findByRole("button", { name: /去下单 ¥1798/ })).toBeInTheDocument();
+  });
+
+  it("顶部给出合计", async () => {
+    stubCart([PRICED]);
+    render(<CartView onShop={() => {}} />);
+    const total = await screen.findByTestId("cart-total");
+    expect(total.textContent).toContain("¥1798.00");
+  });
+
+  it("商品查不到时明说,且不把它当 ¥0 混进合计", async () => {
+    // price=null 渲染成「¥0」会让买家以为免费;把它当 0 计入合计则给出一个
+    // 偏低且看不出来的总额。两者都比"说清楚查不到"更糟。
+    stubCart([
+      PRICED,
+      { id: 2, user_id: "u1", sku: "GONE", quantity: 1, added_at: "t", status: "active",
+        title: null, price: null, image: null, stock: null,
+        subtotal: null, product_missing: true },
+    ]);
+    render(<CartView onShop={() => {}} />);
+    expect(await screen.findByText(/商品信息暂时查不到/)).toBeInTheDocument();
+    const total = await screen.findByTestId("cart-total");
+    expect(total.textContent).toContain("¥1798.00");        // 只算得出的那件
+    expect(total.textContent).toContain("不含 1 件");
+    expect(screen.queryByText("¥0")).toBeNull();
+  });
+
+  it("老后端不带商品字段时不崩,退回可用状态", async () => {
+    stubCart([{ id: 1, user_id: "u1", sku: "P001", quantity: 1, added_at: "t", status: "active" }]);
+    render(<CartView onShop={() => {}} />);
+    expect(await screen.findByText("商品 P001")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /去下单/ })).toBeInTheDocument();
   });
 });
 

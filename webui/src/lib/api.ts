@@ -43,12 +43,26 @@ export async function me(): Promise<{ user_id: string; name: string } | null> {
 
 // 商城:hmdp 商品列表(供商品卡渲染 + "咨询"带 item 进聊天)
 export type Product = { id: string; title: string; price: number; stock: number; image: string; description: string };
-export async function getProducts(keyword = ""): Promise<Product[]> {
+// 空列表有两种完全不同的含义:这家店真的没有商品(degraded=false),或者商品
+// 服务连不上(degraded=true)。改造前两者都返回 [],页面一律显示"暂无商品",
+// 于是一次内网故障在买家眼里就是"这家店是空的"。后端现在把 degraded/reason
+// 一并下发,这里如实透出——**不要在前端把它折回成一个数组**。
+export type ProductList = { products: Product[]; degraded: boolean; reason?: string };
+
+export async function getProducts(keyword = ""): Promise<ProductList> {
   try {
     const r = await fetch(`/api/products?keyword=${encodeURIComponent(keyword)}`);
-    return r.ok ? (await r.json()).products as Product[] : [];
-  } catch {
-    return [];
+    if (!r.ok) return { products: [], degraded: true, reason: `商品接口 ${r.status}` };
+    const d = await r.json();
+    return {
+      products: (d.products || []) as Product[],
+      // 老服务端没有这个字段。此时不能默认 true(会把正常的空店铺报成故障),
+      // 也不能因为缺字段就丢掉商品——按"未降级"处理,退回改造前的语义。
+      degraded: !!d.degraded,
+      reason: d.reason,
+    };
+  } catch (e) {
+    return { products: [], degraded: true, reason: `商品接口请求失败(${String(e)})` };
   }
 }
 export async function getProduct(itemId: string): Promise<Product | null> {
@@ -94,8 +108,14 @@ export async function payOrder(orderId: string): Promise<{ success: boolean; sta
 }
 
 // ---- 购物车(N5:只收集意向,不做结算——下单仍走既有自助下单路径)----
+// 商品信息由**后端**补齐,不在前端拉商品列表自己 join——购物车里的价格必须
+// 与商城页、与最终下单金额同源,各查各的迟早对不上。
+// price/subtotal 为 null 表示该商品查不到(下架或商品服务抖动),此时
+// product_missing=true:**绝不能把 null 渲染成 ¥0**,那会让买家以为免费。
 export type CartItem = {
   id: number; user_id: string; sku: string; quantity: number; added_at: string; status: string;
+  title?: string | null; price?: number | null; image?: string | null;
+  stock?: number | null; subtotal?: number | null; product_missing?: boolean;
 };
 
 export async function getCart(): Promise<CartItem[]> {
@@ -213,7 +233,12 @@ export async function getJSON<T>(url: string): Promise<T> {
 }
 
 export type LtmFact = { content: string; category: string; created_at: string };
-export type ConsolidateResult = { enabled: boolean; curation?: boolean; count: number; facts: LtmFact[] };
+// busy=true:会话正在处理上一条消息,本次没有巩固(不是"没有可记的事实")。
+// 两者都是 count=0,但含义完全相反——一个是"再聊几句",一个是"稍后重试"。
+export type ConsolidateResult = {
+  enabled: boolean; curation?: boolean; count: number; facts: LtmFact[];
+  busy?: boolean; reason?: string;
+};
 
 export async function consolidateMemory(sessionId: string, userId: string): Promise<ConsolidateResult> {
   const r = await adminFetch(`/api/session/${sessionId}/consolidate?user_id=${encodeURIComponent(userId)}`, { method: "POST" });
@@ -262,6 +287,19 @@ export async function adminReply(sessionId: string, text: string): Promise<WbTur
   if (!r.ok) throw new Error("HTTP " + r.status);
   return (await r.json()).turns as WbTurn[];
 }
+// 坐席侧读某个客户的订单。买家开口第一句几乎总是关于某一笔订单,坐席看不到
+// 订单就只能反问"您的订单号是多少"——把 AI 已经知道的事情重新问一遍人。
+// 与买家自己的 /api/orders 共用同一条读取路径:两边看到的必须是同一份事实。
+export type CustomerOrders = {
+  success: boolean; user_id: string; orders: MyOrder[]; degraded: string;
+};
+
+export async function adminCustomerOrders(userId: string): Promise<CustomerOrders> {
+  const r = await adminFetch(`/api/admin/customer/${encodeURIComponent(userId)}/orders`);
+  if (!r.ok) throw new Error(`加载客户订单失败 (${r.status})`);
+  return r.json();
+}
+
 export async function adminTakeover(sessionId: string): Promise<{ mode: string }> {
   const r = await adminFetch(`/api/session/${sessionId}/takeover`, { method: "POST" });
   return r.json();
@@ -316,6 +354,13 @@ export type SkillDistillResult = {
   risk: string | null; policy: string | null; errors: string[];
   // 资料超过 MAX_DOC_CHARS(12000)时为 true:尾部没有真正参与蒸馏,前端须提示操作者
   truncated: boolean;
+  // 失败要**可行动**。改造前只回一句三选一的「frontmatter 不全 / 工具名不实 /
+  // 名字非法」,店主既不知道是哪一种也不知道该改什么;实测真因往往只是资料里写了
+  // 一个本店没有的工具名(SOP 里的『走人工工单』被模型写成 escalate_to_human)。
+  unknown_tools?: string[];
+  available_tools?: string[];
+  // 2 = 已自动带着精确原因重试过一次仍未通过(只重试一次,不做无限循环烧钱)
+  attempts?: number;
 };
 
 /** 上传客服 SOP/产品资料,让后端 LLM 提炼成候选技能(会花钱,调用方需先确认)。 */
@@ -459,6 +504,249 @@ export type OutreachStats = {
 export async function getOutreachStats(windowDays = 30): Promise<OutreachStats> {
   const r = await adminFetch(`/api/admin/growth/outreach-stats?window_days=${windowDays}`);
   if (!r.ok) throw new Error(`加载触达效果失败 (${r.status})`);
+  return r.json();
+}
+
+// ---- 协作健康:失败事件 + worker 心跳 ----
+// 系统刻意不自动重试失败事件(坏事件会无限循环),所以这两样必须**看得见**,
+// 否则"留在表里供人工决定"就等于留给没人。stale_seconds/healthy 由后端算好
+// 下发,前端不拿本地时钟去减——两边时钟不一致会算出负数或夸张数值,而这个
+// 数字正是运维判断"要不要去看一眼"的唯一依据。
+export type CollabFailedEvent = {
+  id: number; event_type: string; source_agent: string; target_agent: string;
+  correlation_id: string; created_at: string; consumed_at: string | null;
+};
+export type CollabHealth = {
+  success: boolean;
+  failed_count: number;
+  failed: CollabFailedEvent[];
+  worker: {
+    name: string; last_success_at: string | null; last_error_at: string | null;
+    last_error: string | null; stale_seconds: number | null;
+    threshold_seconds: number; healthy: boolean;
+  };
+  // 预算是**本 API 进程**的计数器,恒为 0——真正花钱的是 worker 进程。
+  // scope/note 由后端下发,前端必须原样显示:只摆一个 spent=0 会让人得出
+  // "worker 没花过钱"的错误结论。可选字段(老服务端没有这个键时走空态)。
+  budget?: { limit: number; spent: number; enabled: boolean; scope: string; note: string };
+  // 降级统计。参谋归因的 LLM 调用失败时降级为纯统计,而事件正常走完 → done。
+  // 实测一轮 20 条全部降级,worker 报告的却是 done:20 / failed:0,链上一片绿色。
+  // 没有这个字段,**一次完全无效的运行和一次健康的运行在界面上长得一模一样**。
+  degraded?: {
+    window: number; diagnoses: number; degraded: number; rate: number;
+    all_degraded: boolean; note: string;
+  };
+};
+
+export async function getCollabHealth(): Promise<CollabHealth> {
+  const r = await adminFetch("/api/admin/collab/health");
+  if (!r.ok) throw new Error(`加载协作健康失败 (${r.status})`);
+  return r.json();
+}
+
+export async function retryFailedEvent(eventId: number): Promise<{ success: boolean; changed: boolean; message: string }> {
+  const r = await adminFetch(`/api/admin/collab/failed/${eventId}/retry`, { method: "POST" });
+  if (!r.ok) throw new Error(`重试失败 (${r.status})`);
+  return r.json();
+}
+
+// ---- Skill 转正 / 驳回 / 回滚(自进化闭环的最后一环)----
+// 改造前候选**只进不出**:能从界面产生,却只能登进服务器敲
+// `python -m app.scripts.promote_skill` 才上得线。7 步闭环因此断在最后一环。
+//
+// 门禁是**显式选项**:gate_candidate 会真跑两轮评测(候选 vs 现行,各自真调 LLM),
+// 一两分钟且花钱,不能挂在按钮上默认同步等。不跑门禁时后端 fail-closed 拒绝,
+// 于是这个按钮**不会静默绕过门禁**——要放行必须显式 force。
+export type SkillPromoteResult = {
+  success: boolean; promoted: boolean; reason?: string;
+  backup?: string | null; risk?: string | null; policy?: string | null;
+  gate_note?: string;
+};
+
+export async function promoteSkill(
+  name: string, opts: { force?: boolean; runGate?: boolean } = {}
+): Promise<SkillPromoteResult> {
+  const q = new URLSearchParams();
+  if (opts.force) q.set("force", "true");
+  if (opts.runGate) q.set("run_gate", "true");
+  const r = await adminFetch(
+    `/api/admin/skills/${encodeURIComponent(name)}/promote?${q}`, { method: "POST" });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch { /* 忽略非 JSON 响应体 */ }
+    throw new Error(detail || `转正失败 (${r.status})`);
+  }
+  return r.json();
+}
+
+export async function rejectSkill(name: string): Promise<{ success: boolean; archived_to: string }> {
+  const r = await adminFetch(
+    `/api/admin/skills/${encodeURIComponent(name)}/reject`, { method: "POST" });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch { /* 忽略非 JSON 响应体 */ }
+    throw new Error(detail || `驳回失败 (${r.status})`);
+  }
+  return r.json();
+}
+
+export async function rollbackSkill(name: string): Promise<{ success: boolean; restored?: string }> {
+  const r = await adminFetch(
+    `/api/admin/skills/${encodeURIComponent(name)}/rollback`, { method: "POST" });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch { /* 忽略非 JSON 响应体 */ }
+    throw new Error(detail || `回滚失败 (${r.status})`);
+  }
+  return r.json();
+}
+
+// ---- 知识库文档管理(代替去 ApeRAG 自己的页面上传)----
+// 检索侧不变,仍走 aperag_search 读同一个 collection;这里只把"写"搬进本管理端。
+// 已在真服务上验证:API 写入的文档与 ApeRAG UI 上传的文档落在同一 collection、
+// 走同一条索引流水线、被同一次检索并排召回。
+//
+// 索引状态用**上游原值**:PENDING / CREATING / ACTIVE / DELETING / FAILED。
+// 终态是 ACTIVE 而不是 COMPLETE——项目里此前两处写成 COMPLETE,导致轮询永远
+// 等不到终态。不在前端翻译成自己一套词,免得又多一处会漂移的口径。
+export type KbDocument = {
+  id: string; name: string; size?: number | null;
+  status?: string | null;
+  vector_index_status?: string | null;
+  fulltext_index_status?: string | null;
+  created?: string | null;
+};
+export type KbDocumentList = {
+  success: boolean; collection_id: string; base_url: string; documents: KbDocument[];
+};
+
+export async function getKbDocuments(): Promise<KbDocumentList> {
+  const r = await adminFetch("/api/admin/kb/documents");
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch { /* 忽略非 JSON 响应体 */ }
+    throw new Error(detail || `加载知识库失败 (${r.status})`);
+  }
+  return r.json();
+}
+
+export type KbUploadResult = {
+  success: boolean; document_id?: string; name?: string;
+  note?: string; reason?: string;
+};
+
+/** 上传一份文档。后端**上传即确认**,返回后索引仍在异步建(约 15 秒)。 */
+export async function uploadKbDocument(file: File): Promise<KbUploadResult> {
+  const form = new FormData();
+  form.append("file", file);
+  // 不要手动设 Content-Type,交给浏览器带上 multipart 边界
+  const r = await adminFetch("/api/admin/kb/documents/upload", { method: "POST", body: form });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch { /* 忽略非 JSON 响应体 */ }
+    throw new Error(detail || `上传失败 (${r.status})`);
+  }
+  return r.json();
+}
+
+export async function deleteKbDocument(docId: string): Promise<{ success: boolean }> {
+  const r = await adminFetch(`/api/admin/kb/documents/${encodeURIComponent(docId)}`,
+                             { method: "DELETE" });
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch { /* 忽略非 JSON 响应体 */ }
+    throw new Error(detail || `删除失败 (${r.status})`);
+  }
+  return r.json();
+}
+
+// ---- 协作链:清单 → 时间线 ----
+// 后端事件表的 correlation_id 串起一整条"谁因为什么唤醒了谁"。清单端点是
+// 时间线的**唯一入口**——时间线要求先知道 correlation_id,而在清单之前,一条
+// 协作链除非恰好失败(才会出现在 failed 列表里)否则无处可寻。
+export type CollabChain = {
+  correlation_id: string; events: number;
+  started_at: string; last_at: string;
+  failed: number; pending: number; skipped: number;
+  // 注意这里**没有** degraded:降级诊断不产生任何总线事件(路由算不出目标时
+  // publish 不插行),按链统计必然恒为 0。降级走 CollabHealth.degraded。
+  agents: string[];
+};
+
+export async function getCollabChains(limit = 30): Promise<{ chains: CollabChain[] }> {
+  const r = await adminFetch(`/api/admin/collab/chains?limit=${limit}`);
+  if (!r.ok) throw new Error(`加载协作链失败 (${r.status})`);
+  return r.json();
+}
+
+// 事件的四态:pending(待认领)/ done(已处理)/ failed(处理失败,不自动重试)/
+// skipped(消费闸拦下,是**正常**结果不是错误——营销静默期就走这条)。
+// skipped 必须与 failed 分开渲染:把"刻意没做"显示成"出错了"会让运营去修一个
+// 根本不存在的故障。
+export type CollabEvent = {
+  id: number; event_type: string; source_agent: string; target_agent: string;
+  correlation_id: string; status: string; priority: number;
+  created_at: string; consumed_at: string | null;
+  payload: Record<string, unknown>;
+};
+
+export type CollabSharedRow = {
+  key: string; value: unknown; source_agent: string;
+  correlation_id: string; updated_at: string; expires_at: string | null;
+};
+
+export type CollabTimeline = {
+  success: boolean; events: CollabEvent[]; shared: CollabSharedRow[];
+};
+
+export async function getCollabTimeline(correlationId: string, limit = 100): Promise<CollabTimeline> {
+  const r = await adminFetch(
+    `/api/admin/collab/timeline?correlation_id=${encodeURIComponent(correlationId)}&limit=${limit}`);
+  if (!r.ok) throw new Error(`加载时间线失败 (${r.status})`);
+  return r.json();
+}
+
+// ---- 人工闸待办 ----
+// 路由表把 drafts_ready / outreach_converted / outreach_no_change 都投给 human,
+// 但 worker 只消费 analyst 与 growth——human 的事件没有消费方。在这个入口之前
+// 也没有任何界面列出它们(实测积压 325 条,永远 pending)。
+// 与失败事件曾经的处境完全一样:"留给人工"事实上是"留给没人"。
+export type CollabInbox = {
+  success: boolean; pending: number; events: CollabEvent[];
+};
+
+export async function getCollabInbox(limit = 50): Promise<CollabInbox> {
+  const r = await adminFetch(`/api/admin/collab/inbox?limit=${limit}`);
+  if (!r.ok) throw new Error(`加载人工待办失败 (${r.status})`);
+  return r.json();
+}
+
+export async function ackCollabEvent(eventId: number): Promise<{ success: boolean; changed: boolean; message: string }> {
+  const r = await adminFetch(`/api/admin/collab/inbox/${eventId}/ack`, { method: "POST" });
+  if (!r.ok) throw new Error(`确认失败 (${r.status})`);
+  return r.json();
+}
+
+// ---- 路由订阅表(隐式编排的权威声明)----
+// 三个 Expert 之间没有任何一方在指挥另一方,它们只是各自订阅了关心的事件。
+// 这份表是那句话唯一的证据,唯一口径在 app/multi_agent/routing.py。
+// 中文标签(priority_label / agents[].label)也由后端给,前端不另抄一份映射。
+export type RoutingSubscription = {
+  event_type: string; target: string; conditional: boolean; reason: string;
+  priority: number | null; priority_dynamic: boolean; priority_label: string;
+};
+export type RoutingGate = { target: string; name: string; reason: string };
+export type RoutingAgent = { key: string; label: string; side: string; desc: string };
+export type CollabRouting = {
+  success: boolean;
+  subscriptions: RoutingSubscription[];
+  gates: RoutingGate[];
+  agents: RoutingAgent[];
+};
+
+export async function getCollabRouting(): Promise<CollabRouting> {
+  const r = await adminFetch("/api/admin/collab/routing");
+  if (!r.ok) throw new Error(`加载路由表失败 (${r.status})`);
   return r.json();
 }
 

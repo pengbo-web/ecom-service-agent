@@ -3,6 +3,7 @@ import { addToCartApi, getProducts, type Product } from "@/lib/api";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { ProductThumb } from "@/components/ProductThumb";
 
 export function ShopView({ onConsult, onBuy, showCart = false, onCartChanged }: {
   onConsult: (itemId: string) => void;
@@ -13,13 +14,22 @@ export function ShopView({ onConsult, onBuy, showCart = false, onCartChanged }: 
   onCartChanged?: () => void;
 }) {
   const [items, setItems] = useState<Product[] | null>(null);
+  // 商品服务连不上 ≠ 这家店没有商品。两者都是空列表,但一个要显示"故障 + 怎么修",
+  // 另一个才是"暂无商品"。把它们合成一句会让一次内网故障在买家眼里变成空店铺。
+  const [degraded, setDegraded] = useState<string>("");
   const [q, setQ] = useState("");
   // 每张商品卡各自持有加购的忙态/错误(与 SkillsView 各卡片自管状态同一惯例):
   // 一件商品加购失败不该让别的商品卡也显示"加购中"或残留错误提示。
   const [cartBusy, setCartBusy] = useState<Record<string, boolean>>({});
   const [cartErr, setCartErr] = useState<Record<string, string>>({});
 
-  useEffect(() => { getProducts().then(setItems); }, []);
+  async function load() {
+    setItems(null);
+    const r = await getProducts();
+    setItems(r.products);
+    setDegraded(r.degraded ? (r.reason || "商品服务不可用") : "");
+  }
+  useEffect(() => { load(); }, []);
 
   async function onAddToCart(id: string) {
     setCartBusy((prev) => ({ ...prev, [id]: true }));
@@ -43,23 +53,34 @@ export function ShopView({ onConsult, onBuy, showCart = false, onCartChanged }: 
         <span className="text-sm font-semibold">商城</span>
         <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索商品"
           className="h-7 w-48 rounded-md border bg-background px-2.5 text-xs outline-none" />
-        <span className="ml-auto text-xs text-muted-foreground">{shown.length} 件商品</span>
+        {/* 加载中不报"0 件商品":那是一个还不知道的事实,写出来就是错的
+            (改造前头部与主体会同时显示「0 件商品」和「加载中…」)。 */}
+        <span className="ml-auto text-xs text-muted-foreground">
+          {items === null ? "加载中…" : `${shown.length} 件商品`}
+        </span>
       </div>
+      {degraded && (
+        <div role="alert" data-testid="shop-degraded"
+             className="flex flex-wrap items-center gap-2 border-b border-destructive/40
+                        bg-destructive/10 px-6 py-2 text-xs text-destructive">
+          <span>⚠️ 商品服务暂时不可用：{degraded}。下面显示的<b>不是</b>真实的在售商品清单。</span>
+          <button className="underline underline-offset-2" onClick={load}>重试</button>
+        </div>
+      )}
       <ScrollArea className="min-h-0 flex-1">
         {items === null ? (
           <div className="p-10 text-center text-sm text-muted-foreground">加载中…</div>
         ) : shown.length === 0 ? (
-          <div className="p-10 text-center text-sm text-muted-foreground">暂无商品(确认 hmdp 后端在跑)</div>
+          <div className="p-10 text-center text-sm text-muted-foreground">
+            {degraded
+              ? "商品服务连不上，无法展示商品。排查：hmdp 是否在跑、hmdp_base_url 是否正确、进程是否被 HTTP_PROXY 劫持。"
+              : q.trim() ? `没有匹配「${q.trim()}」的商品` : "本店暂无在售商品"}
+          </div>
         ) : (
           <div className="grid grid-cols-2 gap-4 p-5 md:grid-cols-3 lg:grid-cols-4">
             {shown.map((p) => (
               <Card key={p.id} className="flex flex-col overflow-hidden">
-                <div className="flex aspect-square items-center justify-center bg-secondary/40 text-3xl">
-                  {p.image
-                    ? <img src={p.image} alt={p.title} className="h-full w-full object-cover"
-                        onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
-                    : "🛍️"}
-                </div>
+                <ProductThumb id={p.id} src={p.image} title={p.title} className="aspect-square" />
                 <div className="flex flex-1 flex-col gap-1 p-3">
                   <div className="line-clamp-2 text-sm font-medium" title={p.title}>{p.title}</div>
                   <div className="flex items-baseline gap-2">

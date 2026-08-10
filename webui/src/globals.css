@@ -2,6 +2,10 @@
 @tailwind components;
 @tailwind utilities;
 
+/* 主题变量。深色不是"把浅色反过来"——控制台里的状态色(成功/告警/危险)必须
+   在两套主题下都保持同样的**语义强度**:告警在深色下若只是把浅色调暗,会退到
+   和普通文字一样的视觉重量,而这个面板上的红色是运营判断"要不要去看一眼"的
+   唯一信号。所以两套各自调,不共用一组 HSL 只改亮度。 */
 :root {
   --background: 220 20% 97%;
   --foreground: 222 20% 18%;
@@ -21,8 +25,54 @@
   --input: 220 13% 85%;
   --ring: 226 100% 65%;
   --radius: 0.75rem;
+
+  /* 侧栏是常驻的重色块,单独一组变量:让它在浅色主题下也能压深,
+     与内容区拉开层级——这是企业控制台和"一排顶部 tab"最直观的区别。 */
+  --sidebar: 224 30% 14%;
+  --sidebar-foreground: 220 14% 82%;
+  --sidebar-muted: 220 10% 55%;
+  --sidebar-active: 226 100% 65%;
+}
+
+.dark {
+  --background: 224 24% 9%;
+  --foreground: 220 15% 92%;
+  --card: 224 22% 13%;
+  --card-foreground: 220 15% 92%;
+  --primary: 226 96% 68%;
+  --primary-foreground: 224 30% 10%;
+  --secondary: 223 18% 20%;
+  --secondary-foreground: 220 15% 88%;
+  --muted: 223 18% 20%;
+  --muted-foreground: 220 10% 62%;
+  --accent: 28 92% 60%;
+  --accent-foreground: 224 30% 10%;
+  --destructive: 0 78% 62%;
+  --destructive-foreground: 0 0% 100%;
+  --border: 223 16% 24%;
+  --input: 223 16% 28%;
+  --ring: 226 96% 68%;
+
+  --sidebar: 224 28% 11%;
+  --sidebar-foreground: 220 14% 84%;
+  --sidebar-muted: 220 10% 52%;
+  --sidebar-active: 226 96% 68%;
 }
 
 * { border-color: hsl(var(--border)); }
 html, body, #root { height: 100%; }
-body { margin: 0; background: hsl(var(--background)); color: hsl(var(--foreground)); font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+body {
+  margin: 0;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* 控制台里全是数字与状态,等宽数字避免刷新时列宽跳动 */
+  font-variant-numeric: tabular-nums;
+}
+
+/* 滚动条:默认的宽滚动条在密集列表里很吵。只在支持的浏览器上收窄,
+   不做 JS 自定义滚动条(那会连带毁掉键盘与触控板的滚动手感)。 */
+* { scrollbar-width: thin; scrollbar-color: hsl(var(--border)) transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: hsl(var(--border)); border-radius: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }

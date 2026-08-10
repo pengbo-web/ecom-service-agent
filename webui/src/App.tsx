@@ -10,6 +10,8 @@ import { EvalView } from "@/components/EvalView";
 import { MemoryView } from "@/components/MemoryView";
 import { SkillsView } from "@/components/SkillsView";
 import { OperationsView } from "@/components/OperationsView";
+import { CollabView } from "@/components/CollabView";
+import { KnowledgeView } from "@/components/KnowledgeView";
 import { LoginCard } from "@/components/LoginCard";
 import { adminFetch, openConversation, getUserId, setUserId, me, clearToken,
   getConfig, getToken, setToken, createUser, login, createOrder, getCart } from "@/lib/api";
@@ -134,6 +136,8 @@ export default function App() {
       {view === "mem" && <MemoryView sessionId={sessionId} userId={userId} />}
       {view === "skills" && <SkillsView />}
       {view === "ops" && <OperationsView />}
+      {view === "collab" && <CollabView />}
+      {view === "kb" && <KnowledgeView />}
     </AppShell>
   );
 }

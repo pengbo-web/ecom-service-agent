@@ -300,7 +300,13 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
             <span className="font-semibold">长期记忆（策展{mem.curation ? "已开启" : "未开启"}）· {mem.count} 条</span>
             <button className="ml-auto text-muted-foreground hover:text-foreground" onClick={() => setMem(null)}>收起</button>
           </div>
-          {mem.count === 0
+          {/* busy 与"没有可记的事实"都是 count=0,但含义完全相反:一个要"再聊
+              几句",一个要"稍后重试"。共用一句文案会把后者引到完全错误的方向。 */}
+          {mem.busy
+            ? <div className="text-xs text-amber-700 dark:text-amber-400">
+                ⏳ {mem.reason || "该会话正在处理上一条消息，请稍后再巩固"}
+              </div>
+            : mem.count === 0
             ? <div className="text-xs text-muted-foreground">暂无可长期记忆的事实（多聊几句偏好/身份再试）。</div>
             : <ul className="flex flex-col gap-1">
                 {mem.facts.map((f, i) => (

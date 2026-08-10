@@ -3,6 +3,7 @@ import { createOrder, getCart, removeFromCartApi, setCartQuantity, type CartItem
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ShoppingCart, Minus, Plus, Trash2 } from "lucide-react";
+import { ProductThumb } from "@/components/ProductThumb";
 
 // 购物车:只收集意向,**不做结算**——「去下单」走既有自助下单路径
 // (POST /api/order),下单成功后后端会把该 sku 的购物车行标记为 converted,
@@ -88,12 +89,25 @@ export function CartView({ onShop, onCartChanged }: { onShop: () => void; onCart
   }
 
   const totalQty = (items || []).reduce((s, it) => s + it.quantity, 0);
+  // 合计只累加**算得出**的行。有商品查不到时不把它当 0 混进总额——那会给出
+  // 一个偏低且看不出来的数字;改为把合计标成"不含 N 件"。
+  const priced = (items || []).filter((it) => it.subtotal != null);
+  const totalAmount = priced.reduce((s, it) => s + (it.subtotal || 0), 0);
+  const unpricedCount = (items || []).length - priced.length;
 
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b bg-card/50 px-6 py-2">
         <span className="text-sm font-semibold">购物车</span>
         <span className="text-xs text-muted-foreground">共 {totalQty} 件</span>
+        {items && items.length > 0 && (
+          <span className="ml-auto text-xs text-muted-foreground" data-testid="cart-total">
+            合计 <b className="text-base text-red-500">¥{totalAmount.toFixed(2)}</b>
+            {unpricedCount > 0 && (
+              <span className="ml-1 text-destructive">（不含 {unpricedCount} 件无法定价的商品）</span>
+            )}
+          </span>
+        )}
       </div>
       <ScrollArea className="min-h-0 flex-1">
         {listErr && (
@@ -114,14 +128,38 @@ export function CartView({ onShop, onCartChanged }: { onShop: () => void; onCart
               const err = rowErr[it.sku];
               return (
                 <div key={it.sku} className="rounded-xl border bg-card p-4 shadow-sm">
-                  <div className="flex items-center justify-between">
-                    <span className="font-mono text-xs text-muted-foreground">{it.sku}</span>
+                  <div className="flex items-start gap-3">
+                    <ProductThumb id={it.sku} src={it.image || undefined}
+                                  title={it.title || undefined}
+                                  className="h-14 w-14 shrink-0 rounded-lg" />
+                    <div className="min-w-0 flex-1">
+                      {/* 商品名查不到时退回 sku,但**明说**是查不到,而不是把一个
+                          原始 id 当商品名摆着让买家猜。 */}
+                      <div className="truncate text-sm font-medium" title={it.title || it.sku}>
+                        {it.title || `商品 ${it.sku}`}
+                      </div>
+                      {it.product_missing ? (
+                        <div className="mt-0.5 text-xs text-destructive">
+                          商品信息暂时查不到（可能已下架），下单前请先确认
+                        </div>
+                      ) : (
+                        <div className="mt-0.5 flex items-baseline gap-2 text-xs">
+                          <span className="text-red-500">单价 ¥{it.price}</span>
+                          <span className="text-muted-foreground">
+                            小计 <b className="text-foreground">¥{it.subtotal}</b>
+                          </span>
+                          {typeof it.stock === "number" && (
+                            <span className="text-muted-foreground">库存 {it.stock}</span>
+                          )}
+                        </div>
+                      )}
+                    </div>
                     <Button variant="ghost" size="sm" disabled={busy}
                       onClick={() => removeItem(it)}>
                       <Trash2 className="h-3.5 w-3.5" /> 移除
                     </Button>
                   </div>
-                  <div className="mt-2 flex items-center justify-between">
+                  <div className="mt-3 flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <Button variant="outline" size="sm" className="h-7 w-7 p-0" disabled={busy}
                         aria-label="减少数量" onClick={() => changeQuantity(it, -1)}>
@@ -133,8 +171,12 @@ export function CartView({ onShop, onCartChanged }: { onShop: () => void; onCart
                         <Plus className="h-3.5 w-3.5" />
                       </Button>
                     </div>
+                    {/* 金额写在按钮上,让买家在**点下去之前**就知道要付多少。
+                        改造前按钮只写「去下单」,金额是下完单才弹窗告知的——
+                        那是让人闭着眼睛付钱。 */}
                     <Button size="sm" disabled={busy} onClick={() => placeOrder(it)}>
-                      {busy ? "处理中…" : "去下单"}
+                      {busy ? "处理中…"
+                            : it.subtotal != null ? `去下单 ¥${it.subtotal}` : "去下单"}
                     </Button>
                   </div>
                   {err && <div role="alert" className="mt-2 text-xs text-destructive">⚠️ {err}</div>}

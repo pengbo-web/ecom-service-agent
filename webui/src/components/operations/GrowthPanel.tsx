@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { getGrowthDrafts, approveDraft, rejectDraft, getOpportunities, getOpportunityKinds,
   getOutreachStats, getFollowups, type OpportunityKind, type OutreachDraft, type OutreachStats,
-  type OutreachFollowup } from "@/lib/api";
+  type OutreachFollowup, type GrowthOpportunity,
+  getCollabHealth, retryFailedEvent, type CollabHealth } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RotateCcw } from "lucide-react";
@@ -49,6 +50,10 @@ export function GrowthPanel() {
   const [oppKinds, setOppKinds] = useState<OpportunityKind[] | null>(null);
   const [oppCounts, setOppCounts] = useState<Record<string, number | undefined> | null>(null);
   const [oppErr, setOppErr] = useState("");
+  // 跨类型合并后按 priority_score 取前几条:光有"每类几个"的计数,店主还是不知道
+  // 该先跟谁。排序与理由都由后端算好(确定性打分,见 app/agent/tools/priority.py),
+  // 前端只负责展示——不在这里复算分数,否则又是一份会漂移的副本。
+  const [oppTop, setOppTop] = useState<GrowthOpportunity[] | null>(null);
 
   // 「触达效果」卡:发送时记基线、到期按订单状态推进判定的转化率(N3)。
   // 同样独立成自己的 busy/error,拉取失败不该连累草稿列表或商机概览。
@@ -61,6 +66,13 @@ export function GrowthPanel() {
   const [followups, setFollowups] = useState<OutreachFollowup[] | null>(null);
   const [followupsErr, setFollowupsErr] = useState("");
   const [followupsBusy, setFollowupsBusy] = useState(false);
+
+  // 「协作健康」卡:失败事件 + worker 心跳。这张卡的存在本身就是要点——系统
+  // 刻意不自动重试失败事件,那它就必须在界面上有一个位置,否则"留给人工决定"
+  // 等于留给没人。同样独立 busy/error,不连累其它卡片。
+  const [health, setHealth] = useState<CollabHealth | null>(null);
+  const [healthErr, setHealthErr] = useState("");
+  const [healthBusy, setHealthBusy] = useState(false);
 
   async function load() {
     setBusy(true);
@@ -81,8 +93,16 @@ export function GrowthPanel() {
       const results = await Promise.all(kinds.map((k) => getOpportunities(k.kind)));
       const counts: Record<string, number | undefined> = {};
       results.forEach((r, i) => { counts[kinds[i].kind] = r.count; });
+      // 每一类内部后端已按优先级排好;跨类型比较要重新排一次(分数口径统一,
+      // 都是同一个打分函数算的,可直接比)。没有 priority_score 的行(打分被
+      // 关掉或降级)按 0 处理排在最后,不会因此消失。
+      const merged = results
+        .flatMap((r) => r.opportunities || [])
+        .sort((a, b) => Number(b.priority_score ?? 0) - Number(a.priority_score ?? 0))
+        .slice(0, 5);
       setOppKinds(kinds);
       setOppCounts(counts);
+      setOppTop(merged);
       setOppErr("");
     } catch (e) {
       setOppErr(String(e));
@@ -111,11 +131,45 @@ export function GrowthPanel() {
     }
   }
 
+  async function loadHealth() {
+    setHealthBusy(true);
+    try {
+      const h = await getCollabHealth();
+      // 形状校验不是洁癖:这张卡片渲染时会读 h.worker.* 与 h.failed.map,
+      // 任何缺字段的响应(旧版服务端、代理返回的 200 错误页、灰度期新旧端点
+      // 并存)都会在渲染期抛 TypeError,**把整个增长面板带崩**——而那个面板
+      // 上就是人工审批闸。一个健康卡片绝不该有能力搞垮它所监控的页面。
+      // 校验不过就当读取失败处理:少一张卡,而不是少一整页。
+      if (!h || typeof h !== "object" || !h.worker || !Array.isArray(h.failed)) {
+        setHealth(null);
+        setHealthErr("响应格式不正确(服务端版本可能不匹配)");
+        return;
+      }
+      setHealth(h);
+      setHealthErr("");
+    } catch (e) {
+      setHealth(null);
+      setHealthErr(String(e));
+    } finally {
+      setHealthBusy(false);
+    }
+  }
+
+  async function onRetry(eventId: number) {
+    try {
+      await retryFailedEvent(eventId);
+      await loadHealth();          // 重试后立刻刷新,让计数当场变化
+    } catch (e) {
+      setHealthErr(String(e));
+    }
+  }
+
   useEffect(() => {
     load();
     loadOpportunities();
     loadOutreachStats();
     loadFollowups();
+    loadHealth();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -198,6 +252,72 @@ export function GrowthPanel() {
 
   return (
     <div className="flex flex-col gap-6">
+      {/* 协作健康:放在最前面是刻意的——失败事件与 worker 停摆都是"系统在悄悄
+          少干活"的信号,埋在页面底部等于没有。健康时只占一行浅色提示,不抢
+          注意力;异常时才变红并展开列表。 */}
+      <section data-testid="collab-health">
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-sm font-semibold">协作健康</h3>
+          <Button variant="ghost" size="sm" onClick={loadHealth} disabled={healthBusy}>
+            <RotateCcw className="h-3.5 w-3.5" /> 刷新
+          </Button>
+        </div>
+        {healthErr && <div className="mb-2 text-sm text-destructive">读取失败：{healthErr}</div>}
+        {health && (
+          <div className="flex flex-col gap-2">
+            <Card className={`p-3 text-sm ${health.worker.healthy ? "" : "border-destructive"}`}>
+              {health.worker.healthy ? (
+                <span className="text-muted-foreground">
+                  协作 worker 正常，{health.worker.stale_seconds ?? 0} 秒前跑完一轮
+                </span>
+              ) : health.worker.last_success_at ? (
+                // 跑过但停了:部署了 worker 但它挂了/卡住了
+                <span className="text-destructive">
+                  协作 worker 已停摆：上次跑完是 {health.worker.last_success_at}
+                  （超过 {health.worker.threshold_seconds} 秒判为异常）。
+                  期间买家链路不受影响，但异常扫描、归因、起草、跟进都不会发生。
+                </span>
+              ) : (
+                // 从未跑过:多半是压根没起 worker,与"挂了"是两回事,提示要分开
+                <span className="text-destructive">
+                  协作 worker 从未运行过。请启动：python -m app.scripts.agent_collab --loop
+                </span>
+              )}
+              {health.worker.last_error && (
+                <div className="mt-1 text-xs text-muted-foreground">
+                  最近一次报错（{health.worker.last_error_at}）：{health.worker.last_error}
+                </div>
+              )}
+            </Card>
+
+            {health.failed_count > 0 && (
+              <Card className="border-destructive p-3">
+                <div className="mb-2 text-sm text-destructive">
+                  {health.failed_count} 条协作事件处理失败，已停在队列里等人决定
+                  （系统不会自动重试，避免坏事件无限循环）
+                </div>
+                <div className="flex flex-col gap-1">
+                  {health.failed.map((e) => (
+                    <div key={e.id}
+                         className="flex flex-wrap items-center gap-2 text-xs"
+                         data-testid={`failed-event-${e.id}`}>
+                      <span className="rounded bg-muted px-1.5 py-0.5">{e.event_type}</span>
+                      <span className="text-muted-foreground">→ {e.target_agent}</span>
+                      <span className="text-muted-foreground">链 {e.correlation_id}</span>
+                      <span className="text-muted-foreground">{e.created_at}</span>
+                      <Button variant="ghost" size="sm" className="ml-auto"
+                              onClick={() => onRetry(e.id)}>
+                        放回队列重试
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
+          </div>
+        )}
+      </section>
+
       {/* 触达效果:发出去的消息到底有没有让买家往前走(N3)。转化率没有测量
           窗口和"转化"定义就是一句空话——这两条口径必须钉在界面上,不能只靠
           店主自己脑补,否则这张卡片比不展示更容易误导人。 */}
@@ -245,6 +365,34 @@ export function GrowthPanel() {
             </Card>
           ))}
         </div>
+
+        {/* 「先跟谁」:计数回答不了这个问题,排序才能。分数与理由都来自后端的
+            确定性打分(滞留时长/订单金额/该类历史转化率),所以这里把 reason
+            原样显示出来——店主质疑排序时能当场对着三项事实核对,而不是只看到
+            一个无从追问的数字。 */}
+        {oppTop && oppTop.length > 0 && (
+          <div className="mt-3" data-testid="opp-top">
+            <div className="mb-1 text-xs text-muted-foreground">最该先跟的（按优先级）</div>
+            <div className="flex flex-col gap-1">
+              {oppTop.map((o, i) => (
+                <Card key={`${o.kind}-${o.user_id}-${o.order_id ?? i}`}
+                      className="flex flex-wrap items-center gap-2 p-2 text-xs">
+                  <span className="text-muted-foreground">{i + 1}.</span>
+                  <span className="font-medium">买家 {String(o.user_id ?? "—")}</span>
+                  <span className="rounded bg-muted px-1.5 py-0.5">
+                    {String(o.situation_label ?? o.kind ?? "")}
+                  </span>
+                  {o.order_id ? (
+                    <span className="text-muted-foreground">{String(o.order_id)}</span>
+                  ) : null}
+                  <span className="ml-auto text-muted-foreground">
+                    {String(o.priority_reason ?? "")}
+                  </span>
+                </Card>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
 
       {/* 跟进链(N7):"持续沟通"指序列到期自动推进,不是自动发送——每一步

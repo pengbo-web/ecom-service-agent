@@ -1,4 +1,5 @@
 import { type Product } from "@/lib/api";
+import { ProductThumb } from "@/components/ProductThumb";
 
 // 会话内商品卡片(对齐千牛/闲鱼:顾客带商品进客服时,对话顶部展示当前咨询商品)。
 // onAsk 把快捷问句作为一条用户消息发出去(AI 已绑定当前商品,会接地回答)。
@@ -13,12 +14,8 @@ export function ProductCard({ product, onAsk, onBuy }: {
   return (
     <div className="mx-auto w-full max-w-md overflow-hidden rounded-xl border bg-card shadow-sm">
       <div className="flex gap-3 p-3">
-        <div className="flex h-20 w-20 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-secondary/40 text-2xl">
-          {product.image
-            ? <img src={product.image} alt={product.title} className="h-full w-full object-cover"
-                onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
-            : "🛍️"}
-        </div>
+        <ProductThumb id={product.id} src={product.image} title={product.title}
+                      className="h-20 w-20 shrink-0 rounded-lg" />
         <div className="min-w-0 flex-1">
           <div className="line-clamp-2 text-sm font-medium leading-snug" title={product.title}>{product.title}</div>
           <div className="mt-1 flex items-baseline gap-2">
