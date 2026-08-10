@@ -1,6 +1,6 @@
 # Ecom-Service-Agent：真实可上线的企业级电商客服 Agent 系统
 
-> 一个电商客服 Agent 系统:**真实 SQLite 业务数据层 + FastAPI 流式服务 + 安全护栏 + 全链路可观测性 + 人机协作转人工 + 生产加固(限流/成本/鉴权) + 评估回归门禁 + 容器化部署**。核心 Agent 采用 ReAct + Function Calling + RAG + Memory + Skill;全部生产能力以"不动核心、服务层加法"的方式叠加,可开关、可回滚,120+ 单元测试保障。
+> 一个电商客服 Agent 系统:**真实 SQLite 业务数据层 + FastAPI 流式服务 + 安全护栏 + 全链路可观测性 + 人机协作转人工 + 生产加固(限流/成本/鉴权) + 评估回归门禁 + 容器化部署**。核心 Agent 采用 ReAct + Function Calling + RAG + Memory + Skill;全部生产能力以"不动核心、服务层加法"的方式叠加,可开关、可回滚,**1600+ 自动化测试**保障(后端 202 个文件 1616 通过 + 前端 24 个文件 114 通过,默认全部离线可跑、不需要 API Key)。
 >
 > 完整设计与讲解见 [面试逐字稿](docs/面试逐字稿.md) 与 [二次开发设计文档](docs/二次开发规划-生产化改造设计.md)。
 
@@ -135,15 +135,33 @@ python -m app.scripts.reflow_traces               # 线上问题 Trace 回流成
 
 **开启进阶能力**（可选，改 `.env` 后重启即可）：
 
-- `MULTI_AGENT_ENABLED=true` —— 多 Agent 协作（售前/售后/投诉分流）
 - `MCP_ENABLED=true` —— 通过 MCP 协议调用工具（需另起 `python mcp_server/server.py`）
 - `RAG_BACKEND=chroma` —— 换用 Chroma 向量数据库（需 `pip install chromadb`）
+- `COLLAB_ENABLED=false` / `SELLER_CONSOLE_ENABLED=false` —— 关掉多 Agent 协作与 B 端经营控制台，买家链路回到纯客服形态
+
+> `MULTI_AGENT_ENABLED` 已废弃：总控 Agent（`MultiAgentOrchestrator`）现在是唯一入口，
+> 多 Agent 路由恒常开。字段仅为兼容既有 `.env` 保留，改它不再影响运行时行为。
 
 **跑评估 & 测试**：
 
 ```bash
-python -m app.scripts.run_eval        # 离线评估（沙箱重跑黄金测试集 + LLM judge）
-pytest                                # 运行全部单元测试
+pytest
+```
+
+默认这一条就是全套离线测试，**不需要 API Key、不产生任何模型调用**。
+
+`tests/` 下另有两类需要外部依赖的用例，默认自动跳过，需显式 opt-in（各自跳过原因
+会在 `pytest -v` 里写明，不会静默不跑）：
+
+```bash
+RUN_LIVE_LLM=1 pytest             # 第 1~8 期遗留的端到端用例：真调模型，会花钱、慢
+RUN_MCP_INTEGRATION=1 pytest      # MCP 真 server 集成，需先起 mcp_server/server.py
+```
+
+离线评估（沙箱重跑黄金测试集 + LLM judge，会调模型）：
+
+```bash
+python -m app.scripts.run_eval
 ```
 
 ---
