@@ -179,8 +179,11 @@ def scan_and_publish(window_days: int = 7) -> dict:
     corr = bus.new_correlation_id("SCAN")
     published = 0
     for a in anomalies:
+        # 不指定收件人:扫描器只宣布"发现了一条异常",谁该处理由总线路由表决定
+        # (app/multi_agent/routing.py)。想让新 Agent 也订阅异常信号时,这里
+        # 一行都不用改——而这里本就与那个新 Agent 毫无关系。
         if bus.publish(bus.EV_SIGNAL_ANOMALY, a, bus.AGENT_SERVICE,
-                       bus.AGENT_ANALYST, correlation_id=corr):
+                       correlation_id=corr):
             published += 1
     # corr 在循环之前就已经生成,不依赖任何一次 publish 是否成功。若总线整体
     # 故障(bus.publish 内部 fail-soft,吞异常后逐条返回 None),这里仍会拿到

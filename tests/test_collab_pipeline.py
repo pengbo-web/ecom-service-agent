@@ -11,23 +11,31 @@ from app.multi_agent import bus, collab, shared_context as sc
 
 @pytest.fixture()
 def db(tmp_path, monkeypatch):
+    """隔离数据库。
+
+    用 `set_db()` 换全局单例,而不是逐个模块 monkeypatch `get_db`:各模块都是
+    在调用时才 `get_db()`(读 app.db._DB 这个全局),换单例一处就全覆盖。逐个
+    patch 的写法还有个隐患——总线改走 EventBus 载体之后 `bus` 模块不再 import
+    `get_db`,那种 fixture 会直接 AttributeError,而它跟被测行为毫无关系。
+    """
+    from app.db import set_db
     d = Database(db_path=str(tmp_path / "t.db"))
     d.init_schema()
-    for mod in (bus, sc):
-        monkeypatch.setattr(mod, "get_db", lambda: d)
-    monkeypatch.setattr(collab, "get_db", lambda: d)
-    from app.agent.tools import growth, shop_analytics
-    monkeypatch.setattr(growth, "get_db", lambda: d)
-    monkeypatch.setattr(shop_analytics, "get_db", lambda: d)
-    return d
+    set_db(d)
+    yield d
+    set_db(None)
 
 
 def _unpaid(d, oid, user, sku="P001"):
-    """造一条"下单后久拖不发"的订单,供 growth.find_opportunities(kind="stale_pending_order") 命中。
+    """造一条"已付款但久拖不发"的订单,供 find_opportunities("stale_pending_order") 命中。
 
-    口径对齐 app/agent/tools/growth.py:该项目订单表没有"未付款"状态,
-    状态恒为 pending;判定"久拖不发"靠 created_at 早于 48 小时前。
-    这里下单时间设成 3 天前,落在窗口(14 天)内、又晚于 48 小时阈值。
+    命名沿用历史(改名会牵动本文件十几处调用),但含义要说准:status='pending'
+    在本项目里是**已付款待发货**。真正的"未支付"是 N5 之后新增的
+    status='unpaid',见下面的 `_really_unpaid`——这个函数名与语义的错位,正是
+    当年那句"该项目订单表没有未付款状态"的注释留下的痕迹,那句话现在已经不成立。
+
+    判定"久拖不发"靠 created_at 早于 48 小时前;这里设成 3 天前,落在窗口
+    (14 天)内、又晚于 48 小时阈值。
     """
     conn = d.connect()
     try:
@@ -35,6 +43,33 @@ def _unpaid(d, oid, user, sku="P001"):
                      "VALUES (?,?,'pending',199,datetime('now','-3 days'))", (oid, user))
         conn.execute("INSERT INTO order_items (order_id,name,sku,quantity,price) "
                      "VALUES (?, '跑鞋',?,1,199)", (oid, sku))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _really_unpaid(d, oid, user, sku="P001"):
+    """造一条**真·未支付**订单(status='unpaid',N5 起的真实状态),
+    供 find_opportunities("unpaid_order") 命中。下单时间设 3 天前,
+    远超 settings.unpaid_stale_hours(默认 24h)。"""
+    conn = d.connect()
+    try:
+        conn.execute("INSERT INTO orders (order_id,user,status,total,created_at) "
+                     "VALUES (?,?,'unpaid',199,datetime('now','-3 days'))", (oid, user))
+        conn.execute("INSERT INTO order_items (order_id,name,sku,quantity,price) "
+                     "VALUES (?, '跑鞋',?,1,199)", (oid, sku))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _stale_cart(d, user, sku="P001"):
+    """造一条久未转化的购物车行,供 find_opportunities("abandoned_cart") 命中
+    (默认 cart_stale_hours=48,这里放 3 天前)。"""
+    conn = d.connect()
+    try:
+        conn.execute("INSERT INTO carts (user_id,sku,quantity,status,added_at) "
+                     "VALUES (?,?,1,'active',datetime('now','-3 days'))", (user, sku))
         conn.commit()
     finally:
         conn.close()
@@ -461,3 +496,51 @@ def test_attach_correlation_does_not_rewrite_reviewed_draft(db):
     reviewed = db.get_outreach_draft(draft["id"])
     assert reviewed["status"] == "approved"
     assert reviewed["correlation_id"] != "SHOULD-NOT-APPLY"
+
+
+# ---------- 自主链的商机覆盖面(修 3 回归) ----------
+
+def test_autonomous_drafting_covers_unpaid_and_abandoned_cart(db):
+    """自主协作链必须能对**催付款/弃单挽回**起草,不只是"已付款久拖"。
+
+    这里曾经是硬编码 kind="stale_pending_order":全自动那条链只可能产出一种
+    草稿,而"加购未付款、大量未支付订单"——交付文案的头号场景——自主链路
+    一辈子碰不到,只能靠店主在对话里手动点名。N5 早就给了它们真实数据
+    (orders.status='unpaid'、carts 表),缺的只是这里放行。
+    """
+    _really_unpaid(db, "O-UNPAID", "u_unpaid")
+    _stale_cart(db, "u_cart")
+    _unpaid(db, "O-STALE", "u_stale")          # 已付款久拖(旧口径)
+    _signal(db, corr="CK")
+
+    with patch.object(collab, "_llm_explain", return_value="尺码问题"), \
+         patch.object(collab, "_llm_draft", return_value="给您留意了一下这笔单"):
+        collab.run_once()
+
+    drafts = db.list_outreach_drafts(status="draft", limit=50)
+    kinds = {d["opportunity_type"] for d in drafts}
+    assert "unpaid_order" in kinds, "自主链没有为未支付订单起草(kind 又被写死了?)"
+    assert "abandoned_cart" in kinds, "自主链没有为弃单起草"
+    assert "stale_pending_order" in kinds, "原有的久拖商机不能因为扩面而丢掉"
+
+
+def test_autonomous_draft_records_each_opportunity_own_kind(db):
+    """每条草稿的 opportunity_type 必须是**这条商机自己的** kind。
+
+    写错的代价是实打实的:跟进链按 opportunity_type 判"商机还开着没"
+    (followup._opportunity_still_open)。把一条未支付商机记成
+    stale_pending_order,买家付了款(unpaid→pending)链也停不下来,
+    会继续给一个已经付过钱的人发催付款提醒。
+    """
+    _really_unpaid(db, "O-UNPAID", "u_unpaid")
+    _signal(db, corr="CK2")
+
+    with patch.object(collab, "_llm_explain", return_value="尺码问题"), \
+         patch.object(collab, "_llm_draft", return_value="您这单还差一步付款"):
+        collab.run_once()
+
+    rows = [d for d in db.list_outreach_drafts(status="draft", limit=50)
+            if d["user_id"] == "u_unpaid"]
+    assert rows, "未支付买家没有拿到草稿"
+    assert all(r["opportunity_type"] == "unpaid_order" for r in rows), \
+        f"kind 记错了: {[r['opportunity_type'] for r in rows]}"

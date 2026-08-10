@@ -29,14 +29,17 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from app.config.settings import settings
 from app.db import get_db
 from app.multi_agent import bus
 from app.multi_agent.arbitration import check_outreach_allowed
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS = 3
-STEP_INTERVAL_HOURS = 48
+# 节奏配置已挪进 settings(followup_max_steps / followup_interval_hours)。
+# 这里原本是 MAX_STEPS=3 / STEP_INTERVAL_HOURS=48 两个模块常量,但**没有任何
+# 代码引用过它们**——真正生效的是 Database.advance_followup 的默认参数与建链
+# 时传入的 max_steps。两个看起来像开关、实际改了不生效的常量比没有更糟,故删除。
 
 # 终止原因 → 中文,店主要能看懂"为什么不再跟了"(约束:链停下时必须可见原因)。
 STOP_REASON_LABELS = {
@@ -178,18 +181,29 @@ def run_due(limit: int = 20, hitl=None, db=None) -> dict:
         clean, review_reason = _trim_and_classify(text)
         if clean:
             corr = row.get("correlation_id") or bus.new_correlation_id("FOLLOWUP")
-            d.create_outreach_draft(
+            fid = d.create_outreach_draft(
                 opportunity_type=row.get("kind"), user_id=row.get("user_id") or "",
                 order_id="", content=clean, offer={},
                 reason=f"跟进序列第 {row.get('step')} 步自动推进",
                 correlation_id=corr, created_by=bus.AGENT_GROWTH,
                 needs_review_reason=review_reason)
-            stats["drafted"] += 1
+            if fid is None:
+                # P2 去重命中:该买家这类商机已经有一条待审草稿(可能是营销侧
+                # 刚排的,也可能是上一步跟进排的还没人审)。这一步**照常推进**
+                # ——链的节奏不该因为"这一轮没排上"就停住或原地打转,否则下一轮
+                # 又会撞同一条,链永远走不完。
+                logger.info("跟进链 %s 第 %s 步已有待审草稿,跳过起草仅推进步数",
+                            row.get("id"), row.get("step"))
+            else:
+                stats["drafted"] += 1
         else:
             logger.warning("跟进链 %s 本轮拼出的话术为空,跳过起草仅推进步数",
                            row.get("id"))
 
-        d.advance_followup(row["id"])
+        # 显式传节奏,不吃 advance_followup 的默认参数——否则 settings 里那个
+        # followup_interval_hours 又会变成"看着像配置、改了不生效"的第二个常量。
+        d.advance_followup(row["id"],
+                           interval_hours=settings.followup_interval_hours)
         updated = d.get_followup(row["id"])
         if updated and updated.get("status") == "done":
             stats["done"] += 1

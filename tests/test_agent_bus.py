@@ -2,6 +2,8 @@
 
 import pytest
 
+from app.db import set_db
+
 from app.multi_agent import bus
 from app.db.database import Database
 
@@ -10,7 +12,7 @@ from app.db.database import Database
 def wired(tmp_path, monkeypatch):
     d = Database(db_path=str(tmp_path / "t.db"))
     d.init_schema()
-    monkeypatch.setattr(bus, "get_db", lambda: d)
+    set_db(d)   # 换全局单例:总线载体在调用时才 get_db(),一处即全覆盖
     return d
 
 
@@ -31,7 +33,9 @@ def test_publish_is_fail_soft(monkeypatch):
     """总线挂了绝不能让买家那一轮失败——发布异常必须被吞掉。"""
     def boom():
         raise RuntimeError("db down")
-    monkeypatch.setattr(bus, "get_db", boom)
+    # 打在 **bus 自己的命名空间**上:bus 是 `from ... import get_event_bus`,
+    # 名字已经绑进本模块,patch 源模块不生效。
+    monkeypatch.setattr(bus, "get_event_bus", boom)
     assert bus.publish(bus.EV_SIGNAL_ANOMALY, {}, "service", "analyst") is None
 
 

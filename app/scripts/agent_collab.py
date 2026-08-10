@@ -16,6 +16,10 @@ import argparse
 import sys
 import time
 
+#: 心跳记录名。看板据此判"协作 worker 还活着吗、停摆多久了"
+#: (见 Database.record_worker_heartbeat 与 /api/admin/collab/health)。
+WORKER_NAME = "collab"
+
 
 def _build_worker_hitl():
     """worker 进程自己的 HITL 视图,供跟进序列复用仲裁(`check_outreach_allowed`)。
@@ -79,15 +83,35 @@ def main(argv=None) -> int:
             print(f"[followup] checked={f['checked']} drafted={f['drafted']} "
                   f"stopped={f['stopped']} done={f['done']}", flush=True)
 
+    def cycle_with_heartbeat() -> None:
+        """跑一轮并打心跳。
+
+        心跳是"worker 进程整个死了"这件事**唯一**的可观测信号:
+        `reclaim_stale_events` 能救"认领后崩在半路"的单条事件,但救不了进程本身
+        没了——那种情况下没有任何人去调 reclaim,协作静默停摆,而买家链路一切
+        正常、不会有任何症状暴露出来。看板据此判"协作已停摆多久"。
+
+        成功与失败都记:只记成功的话,一个每轮都抛异常的 worker 与一个已经死掉
+        的 worker 在看板上长得一模一样(都是 last_success_at 停在过去),而这两
+        种故障的处理方式完全不同。
+        """
+        from app.db import get_db
+        try:
+            cycle()
+        except Exception as exc:  # noqa: BLE001 常驻循环不能被单次异常打断
+            print(f"[error] {exc}", flush=True)
+            get_db().record_worker_heartbeat(WORKER_NAME, ok=False, error=str(exc))
+            return
+        get_db().record_worker_heartbeat(WORKER_NAME, ok=True)
+
     if args.loop:
         while True:
-            try:
-                cycle()
-            except Exception as exc:  # noqa: BLE001 常驻循环不能被单次异常打断
-                print(f"[error] {exc}", flush=True)
+            cycle_with_heartbeat()
             time.sleep(max(5, args.interval))
     else:
-        cycle()
+        # 单次模式同样打心跳:运维用 cron 每分钟调一次 `--once` 也是常见部署方式,
+        # 那种形态下心跳同样是"这个 worker 还活着吗"的唯一依据。
+        cycle_with_heartbeat()
     return 0
 
 

@@ -94,6 +94,13 @@ class MultiAgentOrchestrator:
         # 一把、显式注入给 engine(见 EcomAgent.set_turn_progress_gate),不会
         # 有跨轮残留,与 kb_prefetch 同样"每轮显式覆盖"的姿态。
         from app.agent.progress import ProgressStageGate
+        from app.agent.runtime_context import ACTOR_BUYER, set_current_actor
+
+        # 本轮服务的是买家:决定这一轮能看见/加载哪些 skill(见 SkillManager.
+        # _visible_skills)。必须在 engine.chat() 之前设,因为技能目录是在
+        # _build_messages 里拼进 system prompt 的。每轮显式设置、不依赖上一轮
+        # 残留——与 set_turn_kb_prefetch_future/clear 同姿态。
+        set_current_actor(ACTOR_BUYER)
         self._turn_progress_gate = ProgressStageGate()
         self.engine.set_turn_progress_gate(self._turn_progress_gate)
         # 统一查询理解(默认):一次调用出 domain/intent/need_kb/kb_query,
@@ -270,11 +277,44 @@ class MultiAgentOrchestrator:
             from app.config.shop_profile import load_profile, render_style_block
             from app.prompts.agents import build_profile_prompt
             style_block = render_style_block(load_profile())
-            return build_profile_prompt(profile["base_prompt"], style_block)
+            return (build_profile_prompt(profile["base_prompt"], style_block)
+                    + self._buyer_hints_block())
         except Exception:  # noqa: BLE001 配置读取/拼接失败不能让买家会话失败
             logging.getLogger(__name__).warning(
                 "店铺语气组装失败,回落默认语气 prompt", exc_info=True)
             return profile["prompt"]
+
+    def _buyer_hints_block(self) -> str:
+        """参谋诊断 → 买家侧应答提示(跨 Agent 经验共享的最后一跳)。
+
+        在此之前 `shared_context` 只有卖家侧一个读取方向,参谋的洞察永远传不到
+        对客那一端——"参谋发现这个商品退货多,客服下次遇到时更谨慎"这件事在
+        代码里是断的。
+
+        **注入的是确定性文案表,不是诊断原文**(见 app/multi_agent/buyer_hints.py
+        顶部的完整理由):诊断里的 conclusion 是写给店主的经营判断,含具体指标,
+        直接进买家上下文就可能被客服说出口。
+
+        fail-soft:读库/渲染任何一步出错都返回空串,这一轮按无提示回答——
+        这是买家会话的热路径,一条提示绝不能成为它的新失败点。
+        """
+        from app.multi_agent import shared_context as sc
+        from app.multi_agent.buyer_hints import render_buyer_hints
+
+        try:
+            from app.agent.runtime_context import get_current_item
+
+            entries = sc.recent_entries(sc.KEY_DIAGNOSIS, limit=self.HINTS_LIMIT)
+            return render_buyer_hints(entries, get_current_item())
+        except Exception:  # noqa: BLE001 提示注入失败不该让买家会话失败
+            logging.getLogger(__name__).warning("买家侧应答提示注入失败(本轮跳过)",
+                                                exc_info=True)
+            return ""
+
+    #: 每轮最多看多少条最近诊断。取小值:`shared_context` 是按 subject 覆盖的
+    #: (key 为 `diagnosis:<subject>` 且是主键),行数上界就是商品数,而真正
+    #: 可能与当前这轮相关的只有"当前商品 + 店铺级"两类,取 10 条足够覆盖。
+    HINTS_LIMIT = 10
 
     # ---- 委托给引擎(对外接口与 EcomAgent 一致)----
     @property
@@ -415,6 +455,12 @@ class SellerOrchestrator:
         self.client = self.engine.client
 
     def chat(self, user_input: str):
+        from app.agent.runtime_context import ACTOR_SELLER, set_current_actor
+
+        # 本轮服务的是店主:卖家侧 skill(营销/经营)只在这个 actor 下可见可加载。
+        # actor 由**端点**决定(买家 /api/chat、店主 /api/seller/chat),与域路由
+        # 一样是确定性的,不让 LLM 猜——这是买卖隔离的第一条口径。
+        set_current_actor(ACTOR_SELLER)
         # SellerRouter.route() 的返回值域是 SELLER_AGENTS ∪ {SELLER_DEFAULT},
         # 永远是真值,不会是 None/""——不像买家侧 QU 那样可能判不出 domain,
         # 因此这里不需要(也不该有)"粘性路由回退上一轮"的 or 链。

@@ -2,6 +2,8 @@
 
 import pytest
 
+from app.db import set_db
+
 from app.agent.tools import anomaly
 from app.agent.tools import shop_analytics as sa
 from app.db.database import Database
@@ -13,7 +15,7 @@ def db(tmp_path, monkeypatch):
     d.init_schema()
     monkeypatch.setattr(sa, "get_db", lambda: d)
     from app.multi_agent import bus
-    monkeypatch.setattr(bus, "get_db", lambda: d)
+    set_db(d)
     return d
 
 

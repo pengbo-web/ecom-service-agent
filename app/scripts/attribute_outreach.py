@@ -108,7 +108,7 @@ def attribute_once(window_hours: Optional[int] = None, db: Optional[Database] = 
             {"draft_id": draft["id"], "user_id": draft.get("user_id"),
              "order_id": draft.get("order_id"), "outcome": outcome,
              "status_at_send": draft.get("status_at_send")},
-            bus.AGENT_ANALYST, bus.AGENT_HUMAN,
+            bus.AGENT_ANALYST,
             correlation_id=draft.get("correlation_id") or None,
         )
     return stats

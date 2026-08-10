@@ -18,6 +18,8 @@ from unittest.mock import patch
 
 import pytest
 
+from app.db import set_db
+
 from app.api.streaming import run_agent_streaming
 from app.db.database import Database
 from app.hitl.manager import HitlManager
@@ -140,7 +142,7 @@ def wired_db(tmp_path, monkeypatch):
     """真实 Database + 真实 bus.publish(不 mock),用于端到端验证开关生效。"""
     d = Database(db_path=str(tmp_path / "bus.db"))
     d.init_schema()
-    monkeypatch.setattr(bus, "get_db", lambda: d)
+    set_db(d)
     return d
 
 

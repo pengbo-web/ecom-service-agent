@@ -46,3 +46,32 @@ def set_current_item(item_id: Optional[str]) -> None:
 
 def get_current_item() -> Optional[str]:
     return _current_item.get()
+
+
+# 当前这一轮服务的是谁:买家("buyer")还是店主("seller")。
+#
+# 为什么需要它:买卖两侧的**工具**早就隔离了(各画像独立 ToolManager,有测试从
+# 注册表派生校验),但 **skill 没有**——`SkillManager` 是同一个引擎实例上的同一
+# 个对象,买家画像和卖家画像共用,`build_catalog_prompt()` 无条件列出全部 skill,
+# 而两侧画像的工具集里都有 `load_skill`。也就是说在加 actor 归属之前,一份写给
+# 店主的营销 skill 会出现在买家会话的技能目录里、能被买家侧加载出来——工具确实
+# 调不动(买家 ToolManager 里没有 find_opportunities),但**运营指令文本会原样进
+# 买家上下文**,商机口径、催付款话术、优惠策略全都在里面。
+#
+# 与 current_user/current_item 同模式:contextvar、每轮由编排器刷新、取不到时
+# 按最保守的一侧处理(见 skills/loader.py 的 `_visible_skills`:未知 actor 只看
+# 得到买家 skill,而不是看得到全部)。
+ACTOR_BUYER = "buyer"
+ACTOR_SELLER = "seller"
+
+_current_actor: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "current_actor", default=None)
+
+
+def set_current_actor(actor: Optional[str]) -> None:
+    _current_actor.set(actor)
+
+
+def get_current_actor() -> str:
+    """当前 actor;未设置时按 buyer 处理(保守默认:少看见,不多看见)。"""
+    return _current_actor.get() or ACTOR_BUYER

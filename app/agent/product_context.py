@@ -32,8 +32,11 @@ def fetch_product_context(item_id: str, client=None) -> Optional[str]:
         if client is not None:
             data = _get_product(client, url)          # 注入的 client 由调用方负责生命周期
         else:
-            import httpx
-            with httpx.Client(timeout=3.0) as c:      # 内建 client 用 with 确保关闭,防连接泄漏
+            from app.net.internal_http import internal_client
+            # 内网地址绕过系统代理:hmdp 与本服务同机/同内网,把这个请求塞进
+            # HTTP_PROXY 只会超时,而超时在这里的表现是"商品上下文没注入"——
+            # Agent 会在完全不知道顾客在看哪件商品的情况下继续作答。
+            with internal_client(url, timeout=3.0) as c:   # with 确保关闭,防连接泄漏
                 data = _get_product(c, url)
         p = data.get("data") if data.get("success") else None
         if not p:
