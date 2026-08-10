@@ -53,7 +53,10 @@ def _publish_escalation_signal(session_id: str, agent, intent_out: str,
             "user_id": getattr(agent, "user_id", "") or "",
             "intent": intent_out,
             "reasons": list(reasons or []),
-        }, bus.AGENT_SERVICE, bus.AGENT_ANALYST)
+            # 收件人由总线路由表决定,客服侧只宣布"发生了什么"(见
+            # app/multi_agent/routing.py)。这一段跑在买家会话的热路径上,
+            # 它不该、也不需要知道下游有哪些 Agent。
+        }, bus.AGENT_SERVICE)
     except Exception:  # noqa: BLE001 旁路埋点,绝不影响买家这一轮回复
         pass
 

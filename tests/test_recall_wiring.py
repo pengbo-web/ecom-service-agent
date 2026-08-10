@@ -187,5 +187,7 @@ def test_tracer_records_recall_span(tmp_path):
     recall_spans = [s for s in saved["spans"] if s["kind"] == "recall"]
     assert len(recall_spans) == 1
     assert recall_spans[0]["name"] == "recall:kb"
-    meta = json.loads(recall_spans[0]["meta"])
+    # 同 test_kb_latency_event:`get_trace()` 已解析 meta,`all_spans()` 才是字符串。
+    raw = recall_spans[0]["meta"]
+    meta = json.loads(raw) if isinstance(raw, str) else raw
     assert meta["query"] == "退货运费谁承担"          # 检索查询要能在 tracer 里看到

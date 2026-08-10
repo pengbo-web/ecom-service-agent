@@ -51,11 +51,25 @@ def test_chat_streams_events():
     assert events[2]["content"] == "收到：查一下订单"
 
 
-def test_reset_endpoint():
+def test_reset_endpoint(tmp_path, monkeypatch):
+    """reset 作用在**本人的真实会话**上。
+
+    `49536af`(单一连续会话)起,端点先做归属校验:`get_conversation(session_id)`
+    查不到、或不属于该用户,就回落 `open_or_reuse` 去清那条规范会话——所以
+    随手编一个 "s1" 传进来,被清的不会是 "s1"。这里按 tests/test_fast_path_history.py
+    的同一手法先建一条真实 open 会话,测的才是 reset 本身而不是回落。
+    """
+    from app.db import Database, get_db
+    temp_db = Database(str(tmp_path / "t.db"))
+    temp_db.init_schema()
+    monkeypatch.setattr("app.db._DB", temp_db)
+
     client, mgr = _client()
-    agent = mgr.get_or_create("s1")
-    resp = client.post("/api/session/reset", json={"session_id": "s1"})
+    cid = get_db().create_conversation("default")["conversation_id"]
+    agent = mgr.get_or_create(cid)
+    resp = client.post("/api/session/reset", json={"session_id": cid})
     assert resp.status_code == 200
+    assert resp.json()["conversation_id"] == cid
     assert agent.reset_called is True
 
 
@@ -101,22 +115,42 @@ def test_chat_emits_conversation_event_and_rotates_closed(tmp_path, monkeypatch)
     events = _parse_sse(r.text)
     conv = next(e for e in events if e["type"] == "conversation")
     assert conv["conversation_id"] == cid and conv["status"] == "active"
-    # 关闭后再发:换发新 ID,status=rotated
+    # 本人已关的会话:**重开续用同一条**,不换发。
+    # 这里曾断言 rotated——那是 `b95a880`(会话=服务单,关了就翻篇)的语义,
+    # 已被 `49536af`「单一连续会话:一个用户永久复用同一条会话」取代(动机是
+    # 登录必须看到全部历史,翻篇会把历史打成碎片)。权威断言见
+    # tests/test_conversations.py::test_ensure_active_reopens_own_closed。
     from app.db import get_db
     get_db().close_conversation(cid, "manual")
     r2 = client.post("/api/chat", json={"session_id": cid, "message": "在吗", "user_id": "u9"})
     conv2 = next(e for e in _parse_sse(r2.text) if e["type"] == "conversation")
-    assert conv2["status"] == "rotated" and conv2["conversation_id"] != cid
+    assert conv2["status"] == "active" and conv2["conversation_id"] == cid
+    assert get_db().get_conversation(cid)["status"] == "open"    # 已被重开
+    # rotated 这条路仍在,只是触发条件变成"客户端自造/别人的 ID"(安全铁律):
+    r3 = client.post("/api/chat", json={"session_id": "default--forged",
+                                        "message": "在吗", "user_id": "u9"})
+    conv3 = next(e for e in _parse_sse(r3.text) if e["type"] == "conversation")
+    assert conv3["status"] == "rotated" and conv3["conversation_id"] == cid
 
 
-def test_reset_rotates_conversation():
+def test_reset_clears_conversation_in_place(tmp_path, monkeypatch):
+    """重置 = **就地清空同一条会话**,不关闭、不新建,继续用原 ID。
+
+    旧名 test_reset_rotates_conversation,断言的是 `b95a880` 的
+    "close(reset) + 开新 ID"。`49536af` 改成就地清空(单一连续会话,见
+    app/api/app.py 的 reset 端点注释),旧断言随之失效。
+    """
+    from app.db import Database, get_db
+    temp_db = Database(str(tmp_path / "t.db"))
+    temp_db.init_schema()
+    monkeypatch.setattr("app.db._DB", temp_db)
+
     client, _ = _client()
     cid = client.post("/api/conversation/open", json={"user_id": "u9"}).json()["conversation_id"]
-    r = client.post("/api/session/reset", json={"session_id": cid})
-    body = r.json()
-    assert body["conversation_id"] != cid
-    from app.db import get_db
-    assert get_db().get_conversation(cid)["close_reason"] == "reset"
+    r = client.post("/api/session/reset", json={"session_id": cid, "user_id": "u9"})
+    assert r.json()["conversation_id"] == cid          # 原 ID 继续用
+    conv = get_db().get_conversation(cid)
+    assert conv["status"] == "open" and conv["close_reason"] is None   # 没被关掉
 
 
 def test_history_falls_back_to_snapshot_when_hot_empty(tmp_path, monkeypatch):

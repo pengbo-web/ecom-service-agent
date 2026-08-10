@@ -84,6 +84,37 @@ def test_insights_surfaces_bad_terms_from_vocabulary(db):
     assert all(not any(ch.isdigit() for ch in t) for t in p["bad_terms"])
 
 
+def test_insights_excludes_products_without_bad_reviews(db):
+    """零差评的商品不进「差评 top 商品」。
+
+    实跑走查里,全店没有差评时经营控制台显示的是:
+    「差评 top 商品:验收跑鞋 · 均分 5.0 · 差评 0 条」——标题和内容自相矛盾。
+    更糟的是参谋读到这份数据会把一件毫无问题的商品当成"差评最多的商品"去归因,
+    再据此起草触达。宁可返回空列表(前端有空态)。
+    """
+    from app.agent.tools.reviews import review_insights
+
+    for i in range(3):                       # 全是好评
+        _order(db, f"G{i}", "u1", "delivered")
+        db.create_review(f"G{i}", "u1", "P001", 5, "很好")
+    out = review_insights(window_days=7)
+    assert out["total"] == 3                 # 评价统计照常
+    assert out["products"] == [], "没有差评就不该有『差评 top 商品』"
+
+
+def test_insights_keeps_only_products_with_bad_reviews(db):
+    """混合情况:只保留真有差评的那些,不因为要凑满 top_n 就把好评商品填进来。"""
+    from app.agent.tools.reviews import review_insights
+
+    _order(db, "B1", "u1", "delivered")
+    db.create_review("B1", "u1", "P001", 1, "很差")
+    _order(db, "G1", "u1", "delivered")
+    db.create_review("G1", "u1", "P002", 5, "很好")
+
+    out = review_insights(window_days=7, top_n=5)
+    assert [p["sku"] for p in out["products"]] == ["P001"]
+
+
 def test_insights_never_writes(db):
     from app.agent.tools.reviews import review_insights
     _order(db, "O1", "u1", "delivered")

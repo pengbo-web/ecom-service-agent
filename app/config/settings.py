@@ -85,6 +85,12 @@ class Settings(BaseSettings):
     skills_dir: str = "app/agent/skills/definitions"
     # H3 Skill 离线合成入口开关（默认关，仅离线手动跑；产出候选，人工审核后才移入 definitions/ 生效）
     skill_synth_enabled: bool = False
+    # 自进化闭环的会话聚类是否走**语义**(embedding)。关=回落原来的关键词粗聚类。
+    # 默认开:关键词那张表只有四个桶、先中先得,生产语料里大量对话根本落不进任何
+    # 桶或落错桶,而落桶结果直接决定合成出什么 skill(见 app/agent/skills/clustering.py)。
+    # 它会发 embedding 请求,所以测试里一律钉成 False(见 tests/conftest.py),
+    # 语义路径由专项测试打桩验证。
+    skill_semantic_clustering_enabled: bool = True
     skill_trace_enabled: bool = True   # G2:记录每轮 skill 执行轨迹(旁路埋点,异常不影响回复)
     skill_gate_tolerance: float = 0.05  # G4:候选灰度评测允许的最大掉点,超过即拒绝转正
     skill_canary_enabled: bool = True   # 灰度路由总开关(关=永远只加载正式版本)
@@ -99,6 +105,39 @@ class Settings(BaseSettings):
     # (归因失败会走纯统计降级路径,起草失败会跳过该商机)也不要无限期卡住。
     collab_llm_timeout_s: float = 30.0
     collab_llm_max_retries: int = 1
+    # 协作 worker 每日 LLM 调用预算(归因 + 起草两处)。**0 = 不限制。**
+    #
+    # 为什么独立于 `daily_request_budget` 而不是共用一个池子:那个挂在 HTTP
+    # 入口上,worker 是独立进程根本不经过它——此前 worker 侧**完全没有成本
+    # 兜底**,一个配错的 `--loop --interval 5` 会持续烧 token 而不被任何东西
+    # 拦下,预算面板上还显示岁月静好。
+    #
+    # 而合并成一个共享池子会更糟:两者是**不同的故障模式**(买家侧防刷量滥用,
+    # worker 侧防配置跑飞),共用之后一天正常的买家流量会静默掐掉协作,反过来
+    # 一个跑飞的 worker 会掐掉买家服务。分开各管各的,任一侧超支不牵连另一侧。
+    #
+    # 超支后的行为不是崩溃:归因走既有的"降级为纯统计"分支、起草走"跳过该
+    # 商机"分支——两条路本来就为 LLM 不可用写好了,预算耗尽复用同一条。
+    collab_daily_llm_budget: int = 200
+    # 起草并行(L2):一条诊断可能命中 N 个商机,逐个 _llm_draft 串行时最坏
+    # N × collab_llm_timeout_s(20 × 30s = 600s)。商机之间买家不同、无数据
+    # 依赖,天然可并行。关掉 = 逐字节回到串行 for 循环。
+    # 营销静默期(总线消费闸):未结人工工单数达到这个阈值时,拦截营销 Agent
+    # 的事件消费——服务侧正在救火时不该同时推销。**0(默认)= 关闭这条闸。**
+    # 判据用的是已有数据(HandoffQueue.count_pending),不新增采集。
+    # 它是**店铺级**规则,与 arbitration 的**买家级**仲裁互补而非重复:后者管
+    # "这个买家现在能不能被联系",前者管"店铺现在适不适合做营销"。
+    #
+    # 为什么默认关:阈值定在几条工单上是一个**业务政策**,不是技术默认值——
+    # 同样是 5 条未结工单,大店是常态、小店是事故。替店主拍这个数等于替他做了
+    # 一个他没同意过的经营决策。机制默认在、策略默认关,开与不开由部署方定。
+    # (这个默认值曾经是 5,后果是开发环境里积压的 36 条工单把全部协作测试
+    #  静默拦停——一个本该是"少做一点事"的优化变成了"什么都不做"。)
+    collab_marketing_pause_open_handoffs: int = 0
+    collab_parallel_enabled: bool = True
+    # 并发度上限。不宜大:每个线程都要写 SQLite,WAL 下写者仍串行排队,开到
+    # 16 只会让线程互相等锁,同时增大打模型端点限流的概率。4~8 是合理区间。
+    collab_max_parallel: int = 4
 
     # 异常扫描阈值(确定性判定,不经 LLM);min_samples 防"1 单退 1 单=100%"的假警报
     anomaly_refund_rate: float = 0.15        # 商品退款率告警线
@@ -125,6 +164,26 @@ class Settings(BaseSettings):
 
     # 真实数据层（W1.5）
     db_path: str = "app/sessions/ecom.db"
+    # SQLite 写锁等待上限(毫秒)。WAL 让写者排队而不是立刻失败,这个值决定
+    # "愿意排多久"。协作起草并行后同一时刻会有多个线程写库,短暂冲突应该
+    # 自己消化掉,而不是冒泡成一次业务失败。见 Database.connect。
+    db_busy_timeout_ms: int = 5000
+
+    # 协作队列载体(PG2)。默认 sqlite——**这不是保守,是因为只迁队列有代价**:
+    # 业务数据仍在 SQLite,开了 pg 之后 `publish` 与业务写就不在同一事务里了。
+    # 长期方向是 PG3 把业务库整体迁过来,那时 agent_events 只是其中一张表、
+    # 同事务自然回来(见 docs/superpowers/plans/2026-08-08-postgres-migration.md
+    # 第一节:只迁队列是本末倒置)。所以这个开关的用途是**验证 PG 路子与多实例
+    # 认领**,不是"今天就切过去"。
+    # 业务数据层后端(PG3)。默认 sqlite,行为与改造前逐字节相同。
+    # **配成 pg 却没给 dsn 时刻意抛而不降级**:数据层是业务主链路,静默回落 SQLite
+    # 会让两个实例各写各的库,那种数据分裂比启动失败难查得多(与队列载体的降级
+    # 取舍相反,因为队列在买家热路径上、丢一次投递远好过打死会话)。
+    db_backend: str = "sqlite"               # sqlite | pg
+    db_pg_dsn: str = ""                      # 例:postgresql://ecom:pw@127.0.0.1:5442/ecom
+
+    collab_bus_backend: str = "sqlite"        # sqlite | pg
+    collab_pg_dsn: str = ""                   # 例:postgresql://ecom:pw@127.0.0.1:5442/ecom
     hmdp_base_url: str = "http://127.0.0.1:8085"   # hmdp 后端(商品上下文按 id 取详情用)
 
     # 可观测性（W2）
@@ -275,6 +334,10 @@ class Settings(BaseSettings):
     # "该失败就快失败"仍然成立,只是失败线要划在真实分布之外而不是之内。
     # 后续按 kb_latency 观测事件里 outcome=timeout 的真实占比再调。
     aperag_timeout_s: float = 6.0
+    # ApeRAG **写入**超时。与检索超时分开:检索在买家热路径上、要求快速失败
+    # (6s 是按实测分布定的,见上);写入在离线 worker 里,一次文档上传 + 确认
+    # 本来就比一次向量检索重得多,拿 6s 去卡它只会让正常的写入被误杀。
+    aperag_write_timeout_s: float = 30.0
 
     # 统一查询理解节点(意图识别):一次 LLM 调用出 domain/intent/need_kb/kb_query,
     # 吃掉独立路由与改写调用;闲聊轮免检索。关=回退老 Router 路由+每轮必检索
@@ -346,6 +409,31 @@ class Settings(BaseSettings):
     # 触达转化归因(N3):发送后等多久才判定有没有效果——刚发出去就判定对买家
     # 不公平,要给反应时间;窗口内(sent_at 早于 -N 小时)才进入可判定队列。
     outreach_attribution_window_hours: int = 24
+
+    # 跟进序列(N7「持续沟通」)的节奏。这两个值以前是 app/multi_agent/followup.py
+    # 里的模块常量 MAX_STEPS/STEP_INTERVAL_HOURS,而且**没有任何代码引用它们**
+    # ——真正生效的是 Database.advance_followup 的默认参数 interval_hours=48 与
+    # 建链时传入的 max_steps。也就是说"跟进节奏"事实上写死在两处默认值里,改它
+    # 要改代码,而两个看起来像配置的常量在旁边误导读者。挪到这里成为唯一口径。
+    followup_max_steps: int = 3        # 一条链最多跟几次,到点收尾为 done
+    followup_interval_hours: int = 48  # 两次跟进间隔小时数(也是建链后首次到期的等待)
+
+    # 商机优先级排序(确定性打分,不经模型;见 app/agent/tools/priority.py)。
+    # 关掉 = find_opportunities 回到"按 created_at DESC 取前 N 条"的老行为。
+    opportunity_priority_enabled: bool = True
+    priority_weight_stale: float = 0.4        # 滞留时长权重
+    priority_weight_amount: float = 0.3       # 订单金额权重
+    priority_weight_conversion: float = 0.3   # 该类历史转化率权重(三项会归一化成和为1)
+    priority_stale_saturation_hours: float = 168.0  # 滞留满这么久即封顶(7 天),防僵尸单霸榜
+    priority_amount_cap: float = 500.0        # 金额满这么多即封顶
+    priority_unknown_amount: float = 0.5      # 无订单金额的商机(咨询未下单等)按中性值,不按 0
+    priority_conversion_prior: float = 0.5    # 历史样本不足时的转化率先验
+    priority_min_samples: int = 5             # 低于此样本量不采信历史转化率(同 anomaly_min_samples 纪律)
+    # 打分要在**候选池**里排,不能只排 LIMIT 之后剩下的那几条:SQL 按 created_at
+    # DESC 取,拿到的恰恰是滞留最短的一批,真正该先催的老单在 LIMIT 之外。所以
+    # 多取一些再排序截断。上限防"limit=100 × 系数"变成一次全表扫描。
+    priority_overfetch_factor: int = 5
+    priority_overfetch_max: int = 200
 
     @property
     def is_production(self) -> bool:

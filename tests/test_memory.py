@@ -13,12 +13,23 @@
 """
 
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# 默认不跑:七个用例都要真调 LLM 做事实抽取(花钱、慢)。记忆系统的**逻辑**
+# 已由 tests/test_memory_*.py 一族 hermetic 覆盖,本文件只补端到端。
+# 惯例同 tests/test_mcp.py —— 显式 env opt-in。
+pytestmark = pytest.mark.skipif(
+    not os.getenv("RUN_LIVE_LLM"),
+    reason="真调 LLM 的遗留端到端用例,需显式开启:RUN_LIVE_LLM=1",
+)
 
 from app.agent.chat import EcomAgent  # noqa: E402
 from app.agent.storage import load_session, save_session  # noqa: E402

@@ -25,7 +25,7 @@ from typing import Optional
 
 from app.agent.tools.user_orders import STATUS_LABELS
 from app.config.settings import settings
-from app.db import get_db
+from app.db import dialect, get_db
 
 # 支持的商机类型。未知 kind **拒绝**而不是猜一个,否则模型写错一个词就静默取错人群。
 OPPORTUNITY_KINDS = {
@@ -42,6 +42,47 @@ OPPORTUNITY_KINDS = {
 # 滞后阈值单独具名成模块常量,不当魔法数散落在 SQL 里。
 _STALE_PENDING_STATUS = "pending"
 _STALE_PENDING_HOURS = 48
+
+
+def _stale_hours(col: str) -> str:
+    """算"这条商机已经滞留了多少小时"的 SQL 片段。
+
+    **必须在 SQL 里算,不能在 Python 里算。** 本项目 `Database._now()` 写的是
+    本地时间,而下面每条 WHERE 用的是 SQLite 的 `datetime('now')`(UTC);在
+    Python 侧用 datetime.now() 再算一次时间差,会与"筛出这一行的那个条件"用
+    两个不同的时钟——一条刚好卡在阈值边缘的订单会出现"WHERE 认为已滞留 25h、
+    打分认为滞留 -7h"这种自相矛盾。用同一个 `now` 就没有这个缝。
+    """
+    return dialect.elapsed_hours(col)
+
+
+def _fetch_limit(lim: int) -> int:
+    """打分排序时的**候选池**大小。
+
+    不能只对 LIMIT 之后剩下的那几条排序:下面每条 SQL 都是 `ORDER BY <时间>
+    DESC`,取到的恰恰是**最新**的一批——而"最新"意味着滞留最短,正是最不该
+    优先催的那些。真正该排在最前面的老单本来就在 LIMIT 之外,再怎么排也排不
+    出来。所以先多取一些进池子,打完分再截断到调用方要的 limit。
+    """
+    if not settings.opportunity_priority_enabled:
+        return lim
+    return min(max(lim, lim * max(1, int(settings.priority_overfetch_factor))),
+               max(lim, int(settings.priority_overfetch_max)))
+
+
+def _rank(items: list[dict], lim: int) -> list[dict]:
+    """打分排序并截断到 lim。fail-soft:打分链路任何异常都退回原顺序原条数——
+    排序是锦上添花,绝不能让"找商机"这件事本身失败。"""
+    if not settings.opportunity_priority_enabled:
+        return items[:lim]
+    try:
+        from app.agent.tools.priority import conversion_rates, rank
+        return rank(items, conversion_rates(get_db()))[:lim]
+    except Exception:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).warning("商机优先级打分失败,退回时间倒序",
+                                            exc_info=True)
+        return items[:lim]
 
 
 def _validate_kind(kind: str) -> Optional[dict]:
@@ -87,18 +128,20 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
 
     days = max(1, int(window_days))
     lim = max(1, min(int(limit), 100))
+    pool = _fetch_limit(lim)   # 打分要在候选池里排,不是排 LIMIT 之后的残余(见 _fetch_limit)
     conn = get_db().connect()
     try:
         if kind == "stale_pending_order":
             rows = conn.execute(
                 f"SELECT o.order_id, o.user AS user_id, o.status, o.total, o.created_at, "
+                f"       {_stale_hours('o.created_at')} AS stale_hours, "
                 f"       GROUP_CONCAT(oi.name, '、') AS items "
                 f"FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.order_id "
                 f"WHERE o.status = ? "
-                f"  AND o.created_at <= datetime('now', '-{_STALE_PENDING_HOURS} hours') "
-                f"  AND o.created_at >= datetime('now', '-{days} days') "
+                f"  AND o.created_at <= {dialect.now_minus(_STALE_PENDING_HOURS, 'hours')} "
+                f"  AND o.created_at >= {dialect.now_minus(days, 'days')} "
                 f"GROUP BY o.order_id ORDER BY o.created_at DESC LIMIT ?",
-                (_STALE_PENDING_STATUS, lim)).fetchall()
+                (_STALE_PENDING_STATUS, pool)).fetchall()
             # situation_label/order_status(_label) 是把"这是什么商机、订单现在
             # 到底是什么状态"下沉到每一条 item 里,而不是只留在顶层 kind_label——
             # handle_insight 传给 _llm_draft 的只有单条 opportunity dict,顶层
@@ -120,15 +163,20 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
             # session_id 冒充 user_id 塞进草稿的收件地址,那样会寄给一个不存在的账号。
             rows = conn.execute(
                 f"SELECT b.session_id, b.product_id, b.rounds, b.last_offer, "
-                f"       b.updated_at, c.user_id AS buyer_id "
+                f"       b.updated_at, c.user_id AS buyer_id, "
+                f"       {_stale_hours('b.updated_at')} AS stale_hours "
                 f"FROM bargain_sessions b "
                 f"JOIN conversations c ON c.conversation_id = b.session_id "
-                f"WHERE b.updated_at >= datetime('now', '-{days} days') AND b.rounds > 0 "
-                f"ORDER BY b.updated_at DESC LIMIT ?", (lim,)).fetchall()
+                f"WHERE b.updated_at >= {dialect.now_minus(days, 'days')} AND b.rounds > 0 "
+                f"ORDER BY b.updated_at DESC LIMIT ?", (pool,)).fetchall()
+            # last_offer 是买家最后出的价:它就是这条商机的"金额",拿来打分比
+            # 按"金额未知"走中性值更准(议价谈崩的那单值多少钱,库里其实有)。
             items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
                       "order_id": "", "user_id": r["buyer_id"],
                       "session_id": r["session_id"], "product_id": r["product_id"],
                       "rounds": int(r["rounds"] or 0), "last_offer": r["last_offer"],
+                      "amount": float(r["last_offer"] or 0.0),
+                      "stale_hours": r["stale_hours"],
                       "created_at": r["updated_at"]} for r in rows]
 
         elif kind == "unpaid_order":
@@ -138,31 +186,45 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
             # 模型据此判断买家真实进度是"没付钱",不是"已付款等发货"。
             rows = conn.execute(
                 f"SELECT o.order_id, o.user AS user_id, o.status, o.total, o.created_at, "
+                f"       {_stale_hours('o.created_at')} AS stale_hours, "
                 f"       GROUP_CONCAT(oi.name, '、') AS items "
                 f"FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.order_id "
                 f"WHERE o.status = 'unpaid' "
-                f"  AND o.created_at <= datetime('now', '-{max(1, int(settings.unpaid_stale_hours))} hours') "
-                f"  AND o.created_at >= datetime('now', '-{days} days') "
-                f"GROUP BY o.order_id ORDER BY o.created_at DESC LIMIT ?", (lim,)).fetchall()
+                f"  AND o.created_at <= {dialect.now_minus(max(1, int(settings.unpaid_stale_hours)), 'hours')} "
+                f"  AND o.created_at >= {dialect.now_minus(days, 'days')} "
+                f"GROUP BY o.order_id ORDER BY o.created_at DESC LIMIT ?", (pool,)).fetchall()
             items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
                       "order_id": r["order_id"], "user_id": r["user_id"],
                       "order_status": r["status"],
                       "order_status_label": STATUS_LABELS.get(r["status"], r["status"]),
                       "amount": float(r["total"] or 0.0), "created_at": r["created_at"],
+                      "stale_hours": r["stale_hours"],
                       "items": r["items"] or ""} for r in rows]
 
         elif kind == "abandoned_cart":
             # 弃单挽回:carts.status='active' 且 added_at 超过 settings.cart_stale_hours。
             # 数据来自真实的 carts 表(N5 新增),不再是"永远查不到一行"的占位符。
             rows = conn.execute(
-                f"SELECT user_id, sku, quantity, added_at FROM carts "
-                f"WHERE status = 'active' "
-                f"  AND added_at <= datetime('now', '-{max(1, int(settings.cart_stale_hours))} hours') "
-                f"  AND added_at >= datetime('now', '-{days} days') "
-                f"ORDER BY added_at DESC LIMIT ?", (lim,)).fetchall()
+                # LEFT JOIN products 只为拿单价算这一车的金额:购物车金额库里
+                # 本来就有(carts.sku 就是 products.product_id,见 cart.add_to_cart),
+                # 之前没取,导致弃单商机在打分时一律按"金额未知"走中性值——同样
+                # 是加购,一车 2000 块和一车 29 块被排成一样,是白丢的信息。
+                # LEFT JOIN 而不是 JOIN:hmdp 等外部来源的 sku 在本地 products
+                # 里可能没有对应行,那种情况宁可金额为空(退回中性值),也不能
+                # 把这条弃单商机整条丢掉。
+                f"SELECT c.user_id, c.sku, c.quantity, c.added_at, "
+                f"       {_stale_hours('c.added_at')} AS stale_hours, "
+                f"       (p.price * c.quantity) AS cart_amount "
+                f"FROM carts c LEFT JOIN products p ON p.product_id = c.sku "
+                f"WHERE c.status = 'active' "
+                f"  AND c.added_at <= {dialect.now_minus(max(1, int(settings.cart_stale_hours)), 'hours')} "
+                f"  AND c.added_at >= {dialect.now_minus(days, 'days')} "
+                f"ORDER BY c.added_at DESC LIMIT ?", (pool,)).fetchall()
             items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
                       "order_id": "", "user_id": r["user_id"], "sku": r["sku"],
-                      "quantity": int(r["quantity"] or 0), "created_at": r["added_at"]}
+                      "quantity": int(r["quantity"] or 0), "created_at": r["added_at"],
+                      "amount": float(r["cart_amount"] or 0.0),
+                      "stale_hours": r["stale_hours"]}
                      for r in rows]
 
         elif kind == "shipped_no_care":
@@ -175,12 +237,13 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
             rows = conn.execute(
                 f"SELECT o.order_id, o.user AS user_id, o.status, o.total, o.shipped_at, "
                 f"       o.tracking_number, o.carrier, o.estimated_delivery, "
+                f"       {_stale_hours('o.shipped_at')} AS stale_hours, "
                 f"       GROUP_CONCAT(oi.name, '、') AS items "
                 f"FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.order_id "
                 f"WHERE o.status = 'shipped' "
-                f"  AND o.shipped_at <= datetime('now', '-{max(1, int(settings.shipped_care_hours))} hours') "
-                f"  AND o.shipped_at >= datetime('now', '-{days} days') "
-                f"GROUP BY o.order_id ORDER BY o.shipped_at DESC LIMIT ?", (lim,)).fetchall()
+                f"  AND o.shipped_at <= {dialect.now_minus(max(1, int(settings.shipped_care_hours)), 'hours')} "
+                f"  AND o.shipped_at >= {dialect.now_minus(days, 'days')} "
+                f"GROUP BY o.order_id ORDER BY o.shipped_at DESC LIMIT ?", (pool,)).fetchall()
             items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
                       "order_id": r["order_id"], "user_id": r["user_id"],
                       "order_status": r["status"],
@@ -189,6 +252,7 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
                       "carrier": r["carrier"] or "",
                       "estimated_delivery": r["estimated_delivery"] or "",
                       "amount": float(r["total"] or 0.0), "created_at": r["shipped_at"],
+                      "stale_hours": r["stale_hours"],
                       "items": r["items"] or ""} for r in rows]
 
         elif kind == "delivered_no_review":
@@ -201,19 +265,22 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
             # 逐行返回),因为这里要产出的是"要不要联系这个买家"的商机,单位
             # 是订单/买家,不是逐个 sku。
             rows = conn.execute(
-                f"SELECT o.order_id, o.user AS user_id, o.status, o.delivered_at, "
+                f"SELECT o.order_id, o.user AS user_id, o.status, o.delivered_at, o.total, "
+                f"       {_stale_hours('o.delivered_at')} AS stale_hours, "
                 f"       GROUP_CONCAT(oi.name, '、') AS items "
                 f"FROM orders o JOIN order_items oi ON oi.order_id = o.order_id "
                 f"WHERE o.status = 'delivered' "
                 f"  AND NOT EXISTS (SELECT 1 FROM reviews r "
                 f"                  WHERE r.order_id = o.order_id AND r.sku = oi.sku) "
-                f"  AND o.delivered_at <= datetime('now', '-{max(1, int(settings.review_request_hours))} hours') "
-                f"  AND o.delivered_at >= datetime('now', '-{days} days') "
-                f"GROUP BY o.order_id ORDER BY o.delivered_at DESC LIMIT ?", (lim,)).fetchall()
+                f"  AND o.delivered_at <= {dialect.now_minus(max(1, int(settings.review_request_hours)), 'hours')} "
+                f"  AND o.delivered_at >= {dialect.now_minus(days, 'days')} "
+                f"GROUP BY o.order_id ORDER BY o.delivered_at DESC LIMIT ?", (pool,)).fetchall()
             items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
                       "order_id": r["order_id"], "user_id": r["user_id"],
                       "order_status": r["status"],
                       "order_status_label": STATUS_LABELS.get(r["status"], r["status"]),
+                      "amount": float(r["total"] or 0.0),
+                      "stale_hours": r["stale_hours"],
                       "created_at": r["delivered_at"], "items": r["items"] or ""}
                      for r in rows]
 
@@ -222,20 +289,32 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
             # 咨询的人不该被判定成"咨询过没下单"——只要买家名下**任何时候**下过单,
             # 就不算这类商机,窗口只用来限定"咨询"本身的时间范围。
             rows = conn.execute(
-                f"SELECT c.user_id, MAX(c.created_at) AS last_at, COUNT(*) AS convs "
+                f"SELECT c.user_id, MAX(c.created_at) AS last_at, COUNT(*) AS convs, "
+                f"       {_stale_hours('MAX(c.created_at)')} AS stale_hours "
                 f"FROM conversations c "
-                f"WHERE c.created_at >= datetime('now', '-{days} days') "
+                f"WHERE c.created_at >= {dialect.now_minus(days, 'days')} "
                 f"  AND NOT EXISTS (SELECT 1 FROM orders o WHERE o.user = c.user_id) "
-                f"GROUP BY c.user_id ORDER BY convs DESC LIMIT ?", (lim,)).fetchall()
+                f"GROUP BY c.user_id ORDER BY convs DESC LIMIT ?", (pool,)).fetchall()
+            # 这一类**没有**订单金额可用(买家压根没下过单),打分时按
+            # priority_unknown_amount 走中性值——见 priority.score_opportunity
+            # 里那段"把缺失当成最差是排序里最常见的一类偏见"。
             items = [{"kind": kind, "situation_label": OPPORTUNITY_KINDS[kind],
                       "order_id": "", "user_id": r["user_id"],
-                      "conversations": int(r["convs"] or 0), "created_at": r["last_at"]}
+                      "conversations": int(r["convs"] or 0), "created_at": r["last_at"],
+                      "stale_hours": r["stale_hours"]}
                      for r in rows]
 
-        return {"success": True, "kind": kind, "kind_label": OPPORTUNITY_KINDS[kind],
-                "window_days": days, "count": len(items), "opportunities": items}
     finally:
         conn.close()
+
+    # 打分排序放在 conn 关闭之后:_rank 内部要另开连接读历史转化率
+    # (conversion_rates),嵌在这个 try 里会在同一个函数里持有两条连接。
+    ranked = _rank(items, lim)
+    return {"success": True, "kind": kind, "kind_label": OPPORTUNITY_KINDS[kind],
+            "window_days": days, "count": len(ranked),
+            "ranked_by": ("priority" if settings.opportunity_priority_enabled
+                          else "recency"),
+            "opportunities": ranked}
 
 
 def draft_outreach(user_id: str, content: str, kind: str = "stale_pending_order",
@@ -276,6 +355,15 @@ def draft_outreach(user_id: str, content: str, kind: str = "stale_pending_order"
         content=clean, offer=offer, reason=(reason or "").strip(),
         correlation_id=bus.new_correlation_id("DRAFT"), created_by=bus.AGENT_GROWTH,
         needs_review_reason=review_reason)
+
+    if draft_id is None:
+        # 数据层唯一约束拒绝:这个买家的这条商机已经躺着一条待审草稿。
+        # 给模型一句**能读懂、不会诱导它重试**的话——它看到 success=False 的
+        # 第一反应是换个措辞再调一次,所以这里必须明说"不用重试"。
+        return {"success": False,
+                "error": f"买家 {uid} 的「{OPPORTUNITY_KINDS[kind]}」已有一条待审草稿,"
+                         f"无需重复起草(重复排队只会稀释店主的审批注意力)。"
+                         f"换个措辞重试也会被同样拒绝——请改去处理别的商机。"}
 
     return {"success": True, "draft_id": draft_id, "status": "draft",
             "needs_review_reason": review_reason,

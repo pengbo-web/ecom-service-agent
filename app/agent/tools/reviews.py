@@ -120,10 +120,17 @@ def review_insights(window_days: int = 7, top_n: int = 5) -> dict:
 
     全只读:本函数不得出现任何 INSERT/UPDATE/DELETE。按差评数 DESC 排序——
     参谋要先看差评最集中的商品,不是评价数量最多的商品。
+
+    **零差评的商品不进这张表。** 改造前不过滤,于是全店没有差评时,面板上会出现
+    「差评 top 商品:验收跑鞋 · 均分 5.0 · 差评 0 条」——标题和内容自相矛盾。
+    更糟的是参谋读到这份数据时,会把一件毫无问题的商品当成"差评最多的商品"去
+    归因,再据此起草触达。宁可返回空列表(前端有空态),也不能返回一条名义上
+    符合排序、实质上不属于这个语义的记录。
     """
     db = get_db()
     stats = db.review_stats(window_days=window_days)
-    products = product_review_breakdown(db, window_days)
+    products = [p for p in product_review_breakdown(db, window_days)
+                if p["bad_count"] > 0]
     products.sort(key=lambda p: p["bad_count"], reverse=True)
     top = products[:max(1, int(top_n))]
 

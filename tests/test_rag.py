@@ -9,19 +9,35 @@
 
 前提：已配置 OPENAI_API_KEY；chroma 后端需要 `pip install chromadb`。
 
-用法：
-  python tests/test_rag.py                # 跑两套后端
+默认不跑——测试 2~5 会真的调 Embeddings/LLM 端点(花钱、慢)。跑法与
+tests/test_mcp.py 同一惯例(显式 env opt-in):
+
+  RUN_LIVE_LLM=1 pytest tests/test_rag.py -v      # 两套后端各跑一遍
+  python tests/test_rag.py                        # 独立脚本模式,跑两套后端
   python tests/test_rag.py --backend numpy
-  python tests/test_rag.py --backend chroma
 """
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+#: 只切分 Markdown 的 test_chunker 是纯逻辑、不打网络,不挂这个门;
+#: 其余四个都要真检索/真生成,逐个挂(见各自的 @_live)。
+_live = pytest.mark.skipif(
+    not os.getenv("RUN_LIVE_LLM"),
+    reason="真调 Embeddings/LLM 的端到端用例,需显式开启:RUN_LIVE_LLM=1",
+)
+
+#: 两套后端都跑。chroma 需要 `pip install chromadb`,没装就跳过该参数化分支
+#: (而不是整份文件失败)——见 _make_backend。
+_backends = pytest.mark.parametrize("backend_name", ["numpy", "chroma"])
 
 from app.agent.chat import EcomAgent  # noqa: E402
 from app.config.settings import settings  # noqa: E402
@@ -61,6 +77,9 @@ def _make_backend(backend_name: str):
     if backend_name == "numpy":
         return create_backend("numpy", index_path=ROOT / settings.kb_index_path)
     if backend_name == "chroma":
+        # chromadb 是可选依赖(settings.rag_backend 默认 numpy)。没装时跳过这个
+        # 参数化分支,而不是让整份文件红——"没装可选依赖"不是回归。
+        pytest.importorskip("chromadb", reason="chroma 后端需要 pip install chromadb")
         return create_backend(
             "chroma",
             persist_dir=ROOT / settings.chroma_persist_dir,
@@ -86,6 +105,8 @@ def test_chunker():
 
 
 # ---------- 测试 2：构建/复用索引 ----------
+@_live
+@_backends
 def test_build_index(backend_name: str):
     print(f"\n  [2/5] 构建/加载向量索引（backend={backend_name}）")
     embedder = _make_embedder()
@@ -110,6 +131,8 @@ def test_build_index(backend_name: str):
 
 
 # ---------- 测试 3：Top-K 召回 ----------
+@_live
+@_backends
 def test_retriever_top_k(backend_name: str):
     print(f"\n  [3/5] KnowledgeRetriever Top-K 召回（backend={backend_name}）")
     embedder = _make_embedder()
@@ -140,6 +163,8 @@ def test_retriever_top_k(backend_name: str):
 
 
 # ---------- 测试 4：search_knowledge 工具结构 ----------
+@_live
+@_backends
 def test_tool_shape(backend_name: str):
     print(f"\n  [4/5] search_knowledge 工具返回结构（backend={backend_name}）")
     settings.rag_backend = backend_name
@@ -164,6 +189,8 @@ def test_tool_shape(backend_name: str):
 
 
 # ---------- 测试 5：Agent 端到端 ----------
+@_live
+@_backends
 def test_agent_end_to_end(backend_name: str):
     print(f"\n  [5/5] Agent 端到端：政策类问题触发 RAG（backend={backend_name}）")
     settings.rag_backend = backend_name

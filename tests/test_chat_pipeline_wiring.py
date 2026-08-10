@@ -71,6 +71,7 @@ def make_agent(script, tm=None, max_steps=3):
     a.tool_manager = tm or FakeToolManager()
     a.raw_messages = []
     a.session_id = None
+    a.user_id = "u-test"   # chat() 开头 set_current_user(self.user_id) 要读
     a.summary = None
     a.events = []
     a.event_sink = lambda ev: a.events.append(ev)
@@ -84,6 +85,14 @@ def make_agent(script, tm=None, max_steps=3):
     a.memory_manager = _t.SimpleNamespace(
         stm_to_dict=lambda: {}, update_short_term=lambda msgs, all_messages=None: None,
     )
+    # chat() 后来新增的每轮字段(裸 agent 不走 __init__,要显式给)。
+    # 都置成"未注入"的中性值,等价于引擎独立运行(无 orchestrator)时的老行为:
+    #   _turn_qu=None        → 跳过 FAQ 缓存直答与闲聊快路径两个前置短路
+    #   skill_manager=None   → _preload_skill 直接返回(它自己判了 None)
+    #   _turn_kb_prefetch=None → 无并发预取结果可复用
+    a._turn_qu = None
+    a.skill_manager = None
+    a._turn_kb_prefetch = None
     from app.agent.reply_pipeline import ReplyPipeline
     a._reply_pipeline = ReplyPipeline()
     return a

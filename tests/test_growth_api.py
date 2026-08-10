@@ -60,6 +60,58 @@ def test_approve_sends_once(client, draft, monkeypatch):
     assert sent == [draft]
 
 
+def test_approve_starts_followup_chain(client, draft, monkeypatch):
+    """N7 接线回归:投递成功后必须开一条跟进链——「持续沟通」的唯一起点。
+
+    这条曾经是断的:`start_followup` 全仓库只有测试在调,`app/` 里零调用点,
+    于是 outreach_followups 表在生产中恒空,整套跟进机制(终止条件/worker/
+    控制台面板/11 个测试)全部空转。没有任何测试发现,因为每一块单看都是对的,
+    断的是**它们之间那一根线**。
+    """
+    from app.db import get_db
+    monkeypatch.setattr(client.app.state, "deliver_outreach", lambda d: True)
+
+    assert get_db().due_followups(limit=10) == []          # 批准前:没有任何链
+    r = client.post(f"/api/admin/growth/drafts/{draft}/approve", headers=AUTH)
+    assert r.json()["sent"] is True
+
+    chain = get_db().active_followup("u1", "stale_pending_order")
+    assert chain is not None, "投递成功后没有开跟进链(N7 接线又断了)"
+    assert chain["status"] == "active" and chain["step"] == 1
+    # 链必须复用草稿的 correlation_id:followup._last_touch_converted 正是按它
+    # 去 outreach_drafts 里找"上一次触达判没判成 converted",对不上就永远判不出。
+    assert chain["correlation_id"] == "C1"
+
+
+def test_approve_does_not_start_second_chain_for_same_user_and_kind(client, monkeypatch):
+    """一人一类型只有一条链:同类型的第二条草稿被批准时不新建链,也不报错。"""
+    from app.db import get_db
+    monkeypatch.setattr(client.app.state, "deliver_outreach", lambda d: True)
+    db = get_db()
+    d1 = db.create_outreach_draft("unpaid_order", "u9", "O1", "催一下", {}, "", "CA", "growth")
+    d2 = db.create_outreach_draft("unpaid_order", "u9", "O2", "再催一下", {}, "", "CB", "growth")
+
+    assert client.post(f"/api/admin/growth/drafts/{d1}/approve", headers=AUTH).json()["sent"]
+    r2 = client.post(f"/api/admin/growth/drafts/{d2}/approve", headers=AUTH)
+    assert r2.json()["sent"] is True        # 第二条消息照发,起链失败不影响投递
+    chain = db.active_followup("u9", "unpaid_order")
+    assert chain["correlation_id"] == "CA"  # 仍是第一条链,没有被顶掉
+
+
+def test_followup_start_failure_never_blocks_delivery(client, draft, monkeypatch):
+    """起链失败不得推翻"消息已经真实投递"这个不可撤销的事实。"""
+    from app.db import get_db
+    monkeypatch.setattr(client.app.state, "deliver_outreach", lambda d: True)
+
+    def _boom(*a, **k):
+        raise RuntimeError("followup table unavailable")
+
+    monkeypatch.setattr(get_db(), "start_followup", _boom)
+    r = client.post(f"/api/admin/growth/drafts/{draft}/approve", headers=AUTH)
+    assert r.json()["sent"] is True and r.json()["success"] is True
+    assert get_db().get_outreach_draft(draft)["status"] == "sent"
+
+
 def test_second_approve_is_a_no_op(client, draft, monkeypatch):
     """连点两次批准不能给同一个买家发两遍。"""
     sent = []

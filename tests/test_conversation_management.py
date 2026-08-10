@@ -10,8 +10,19 @@
 """
 
 import json
+import os
 import sys
 from pathlib import Path
+
+import pytest
+
+#: 前三个用例要真调 LLM(压缩摘要 / 多轮上下文),挂这个门;
+#: test_corrupted_json 只构造 Agent 读一个坏 JSON 文件,不打网络,不挂。
+#: 惯例同 tests/test_mcp.py —— 显式 env opt-in:RUN_LIVE_LLM=1
+_live = pytest.mark.skipif(
+    not os.getenv("RUN_LIVE_LLM"),
+    reason="真调 LLM 的遗留端到端用例,需显式开启:RUN_LIVE_LLM=1",
+)
 
 # 把项目根加入 sys.path，允许从 tests/ 下直接运行
 ROOT = Path(__file__).resolve().parent.parent
@@ -46,6 +57,7 @@ def _fail(msg: str):
 
 
 # ---------- 测试 1：压缩触发 ----------
+@_live
 def test_summary_triggered():
     print("\n[1/4] 压缩触发测试（threshold=4, keep=2）")
     _clean()
@@ -78,6 +90,7 @@ def test_summary_triggered():
 
 
 # ---------- 测试 2：持久化 + 恢复 ----------
+@_live
 def test_persistence_and_recovery():
     print("\n[2/4] 持久化 + 恢复测试")
     _clean()
@@ -114,6 +127,7 @@ def test_persistence_and_recovery():
 
 
 # ---------- 测试 3：Reset ----------
+@_live
 def test_reset():
     print("\n[3/4] Reset 测试")
     _clean()

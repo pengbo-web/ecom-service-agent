@@ -14,11 +14,13 @@ from app.agent.skills.execution_trace import (
     OUTCOME_SUCCESS,
     OUTCOME_TOOL_ERROR,
 )
-from app.db import get_db
+from app.db import dialect, get_db
 
 
 def _window_clause(days: int) -> str:
-    return f"datetime('now', '-{max(1, int(days))} days')"
+    """窗口下界。此前这里自带一份与 database.py 一模一样的实现——
+    时钟表达式必须只有一处,否则换库时一定会漏掉某一份。"""
+    return dialect.now_minus(max(1, int(days)), "days")
 
 
 def _rate(part: int, whole: int) -> float:

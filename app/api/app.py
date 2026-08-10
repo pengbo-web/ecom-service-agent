@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -386,31 +387,55 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.get("/api/products")
     def products(keyword: str = ""):
-        """商城:代理 hmdp 商品列表(公开),供前端渲染商品卡。失败返回空列表(降级)。"""
+        """商城:代理 hmdp 商品列表(公开),供前端渲染商品卡。
+
+        **降级必须可区分**。改造前失败时 `return {"products": []}`,前端因此
+        无法分辨"这家店真的没有商品"和"商品服务连不上"——页面显示"0 件商品",
+        没有报错、没有日志。买家看到一个空店铺,运维看到一切正常。
+
+        现在把 `degraded` 一并下发:空列表 + degraded=true 是故障,空列表 +
+        degraded=false 才是真的没商品。这是同一个响应体里两件完全不同的事,
+        不能共用一种表示。
+        """
+        from app.net.internal_http import internal_client, warn_if_proxy_would_break
+
+        base = settings.hmdp_base_url.rstrip("/")
+        url = f"{base}/product/list"
         try:
-            import httpx
-            base = settings.hmdp_base_url.rstrip("/")
-            with httpx.Client(timeout=3.0) as c:
-                r = c.get(f"{base}/product/list", params={"keyword": keyword}, timeout=3.0)
+            with internal_client(url, timeout=3.0) as c:
+                r = c.get(url, params={"keyword": keyword})
                 data = r.json() if r.status_code == 200 else {}
+            if r.status_code != 200:
+                logger.warning("hmdp 商品列表 http %s: %s", r.status_code, r.text[:200])
+                return {"products": [], "degraded": True,
+                        "reason": f"商品服务返回 {r.status_code}"}
             items = (data.get("data") or []) if data.get("success") else []
-            return {"products": [_map_hmdp_product(p) for p in items]}
-        except Exception:  # noqa: BLE001
-            return {"products": []}
+            return {"products": [_map_hmdp_product(p) for p in items], "degraded": False}
+        except Exception as exc:  # noqa: BLE001 商城页降级不该 500
+            logger.warning("hmdp 商品列表读取失败 url=%s: %s", url, exc)
+            warn_if_proxy_would_break(url)
+            return {"products": [], "degraded": True,
+                    "reason": f"商品服务连不上({type(exc).__name__})"}
 
     def _fetch_hmdp_product(item_id: str) -> Optional[dict]:
         """按 id 从 hmdp 取单个商品并映射为前端结构;失败/无则 None。"""
         if not item_id.isdigit():
             return None
+        from app.net.internal_http import internal_client, warn_if_proxy_would_break
+
+        base = settings.hmdp_base_url.rstrip("/")
+        url = f"{base}/product/{item_id}"
         try:
-            import httpx
-            base = settings.hmdp_base_url.rstrip("/")
-            with httpx.Client(timeout=3.0) as c:
-                r = c.get(f"{base}/product/{item_id}", timeout=3.0)
+            with internal_client(url, timeout=3.0) as c:
+                r = c.get(url)
                 data = r.json() if r.status_code == 200 else {}
             p = data.get("data") if data.get("success") else None
             return _map_hmdp_product(p) if p else None
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # 返回 None 与"商品不存在"同形,调用方分不出来——所以失败必须留日志,
+            # 否则一次代理/网络故障会在界面上呈现为"这个商品下架了"。
+            logger.warning("hmdp 商品详情读取失败 item=%s: %s", item_id, exc)
+            warn_if_proxy_would_break(url)
             return None
 
     @app.get("/api/product/{item_id}")
@@ -424,6 +449,26 @@ def create_app(session_manager: Optional[SessionManager] = None,
         demo_tokens = {str(settings.demo_hmdp_user_id): settings.demo_hmdp_token,
                        "1011": "demo-hmdp-token-1011"}
         return demo_tokens.get(str(user), "") if settings.demo_mode else ""
+
+    def _fetch_hmdp_order(order_id: str, token: str) -> Optional[dict]:
+        """按单号从 hmdp 取一笔订单(已映射)。失败/无返回 None。
+
+        支付成功后用它回读真实状态,而不是在前端硬编码「付完就是待发货」——
+        状态归属上游,前端猜出来的那个值迟早和真相分叉。
+        """
+        from mcp_server.hmdp_mapping import map_order
+        from app.net.internal_http import internal_client
+
+        base = settings.hmdp_base_url.rstrip("/")
+        url = f"{base}/order/{order_id}"
+        try:
+            with internal_client(url, timeout=4.0) as c:
+                r = c.get(url, headers={"authorization": token})
+                d = r.json() if r.status_code == 200 else {}
+        except Exception as exc:  # noqa: BLE001 回读失败不该把一次成功的支付变成报错
+            logger.warning("hmdp 回读订单失败 order=%s: %s", order_id, exc)
+            return None
+        return map_order(d["data"]) if d.get("success") and d.get("data") else None
 
     def _fmt_order(o: dict) -> dict:
         """统一成"我的订单"页需要的结构(order_id/status/status_label/items/total/…)。"""
@@ -440,10 +485,12 @@ def create_app(session_manager: Optional[SessionManager] = None,
     def _hmdp_my_orders(token: str) -> list[dict]:
         """读 hmdp /order/of/me(与 AI 的 list_user_orders 同源)→ 页面结构。新→旧。"""
         from mcp_server.hmdp_mapping import map_order
-        import httpx
+        from app.net.internal_http import internal_client
+
         base = settings.hmdp_base_url.rstrip("/")
-        with httpx.Client(timeout=4.0) as c:
-            r = c.get(f"{base}/order/of/me", headers={"authorization": token}, timeout=4.0)
+        url = f"{base}/order/of/me"
+        with internal_client(url, timeout=4.0) as c:
+            r = c.get(url, headers={"authorization": token})
             d = r.json() if r.status_code == 200 else {}
         raw = (d.get("data") or []) if d.get("success", False) else []
         orders = [_fmt_order(map_order(o)) for o in raw]
@@ -467,14 +514,16 @@ def create_app(session_manager: Optional[SessionManager] = None,
         total = round((p.get("price") or 0) * qty, 2)
         token = _hmdp_token_for_user(user)
         if token:
-            import httpx
+            from app.net.internal_http import internal_client
+
             base = settings.hmdp_base_url.rstrip("/")
             pid = int(req.item_id) if req.item_id.isdigit() else req.item_id
-            with httpx.Client(timeout=4.0) as c:
-                r = c.post(f"{base}/order",
+            url = f"{base}/order"
+            with internal_client(url, timeout=4.0) as c:
+                r = c.post(url,
                            json={"productId": pid, "quantity": qty,
                                  "address": req.shipping_address or "上海市浦东新区示例路 1 号"},
-                           headers={"authorization": token}, timeout=4.0)
+                           headers={"authorization": token})
                 d = r.json() if r.status_code == 200 else {}
             if not d.get("success"):
                 raise HTTPException(502, d.get("errorMsg") or "下单失败,请稍后再试")
@@ -501,8 +550,38 @@ def create_app(session_manager: Optional[SessionManager] = None,
         """买家为自己的未支付订单完成支付(unpaid → pending)。这是**买家自己**
         的动作,不是 Agent 工具——与"不代客下单"同一条底线,故只做端点。归属
         与幂等都下沉到 Database.pay_order 的条件更新里:付别人的单、或对已经
-        支付过的订单重复调用,都返回 False,不改变订单状态。"""
+        支付过的订单重复调用,都返回 False,不改变订单状态。
+
+        **必须与下单/列表走同一条路由规则。** 改造前这里只改本地库,而
+        `POST /api/order` 对 demo 用户是把订单建到 hmdp 的、`GET /api/orders`
+        也是从 hmdp 读的——于是买家看到自己刚下的单、点「去支付」,拿到的却是
+        「订单不存在、不属于当前用户,或已完成支付」:订单在 hmdp 里,本地库
+        根本没有这一行。写入走一条路径、状态变更走另一条,是与 MCP 那条
+        (AI 读本地库、页面读 hmdp)完全相同的形态。
+        """
         user = _resolve_user(request, None)
+        token = _hmdp_token_for_user(user)
+        if token:
+            from app.net.internal_http import internal_client
+
+            base = settings.hmdp_base_url.rstrip("/")
+            url = f"{base}/order/{order_id}/pay"
+            try:
+                with internal_client(url, timeout=4.0) as c:
+                    r = c.post(url, headers={"authorization": token})
+                    d = r.json() if r.status_code == 200 else {}
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("hmdp 支付失败 order=%s: %s", order_id, exc)
+                raise HTTPException(502, "支付服务暂时不可用，请稍后再试") from exc
+            if not d.get("success"):
+                # 上游的拒绝原因(已支付/不属于你/不存在)原样透出,不改写成一句
+                # 含糊的兜底——买家需要知道到底是哪一种。
+                raise HTTPException(400, d.get("errorMsg") or "支付失败，请稍后再试")
+            fresh = _fetch_hmdp_order(order_id, token)
+            status = (fresh or {}).get("status") or "pending"
+            return {"success": True, "order_id": order_id, "status": status,
+                    "status_label": STATUS_LABELS.get(status, status)}
+
         ok = get_db().pay_order(order_id, user)
         if not ok:
             raise HTTPException(400, "支付失败:订单不存在、不属于当前用户,或已完成支付")
@@ -523,9 +602,39 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.get("/api/cart")
     def get_cart_endpoint(request: Request):
-        """当前用户的购物车(供「购物车」页)。"""
+        """当前用户的购物车(供「购物车」页),**带商品信息**。
+
+        改造前只返回购物车行本身(sku/quantity/status),不带商品名与价格,
+        于是购物车页面上一件商品只显示一个原始 sku(如「1」)。后果不只是难看:
+        页面上那个「去下单」按钮会**在买家从未看到价格的情况下提交订单**,
+        下完单才用弹窗告诉他付了多少——这是让人闭着眼睛付钱。
+
+        商品信息在**后端**补,不让前端去拉商品列表自己 join:购物车里的价格
+        必须与商城页、与最终下单金额同源,前端各自查一次迟早对不上。
+
+        单个商品查不到时保留该行并标 `product_missing`(而不是丢掉或填 0):
+        商品下架、商品服务抖动都可能查不到,而买家的购物车行是他自己加的,
+        不该因为一次查询失败就从界面上消失。
+        """
         user = _resolve_user(request, None)
-        return {"success": True, "items": get_db().list_cart(user)}
+        rows = get_db().list_cart(user)
+        out = []
+        for row in rows:
+            item = dict(row)
+            p = _fetch_hmdp_product(str(item.get("sku") or ""))
+            if p:
+                item.update({
+                    "title": p.get("title"), "price": p.get("price"),
+                    "image": p.get("image"), "stock": p.get("stock"),
+                    "subtotal": round((p.get("price") or 0) * (item.get("quantity") or 0), 2),
+                    "product_missing": False,
+                })
+            else:
+                # 价格给 None 而不是 0:0 会被前端渲染成「¥0」,让买家以为免费。
+                item.update({"title": None, "price": None, "image": None,
+                             "stock": None, "subtotal": None, "product_missing": True})
+            out.append(item)
+        return {"success": True, "items": out}
 
     @app.put("/api/cart/{sku}")
     def set_cart_quantity_endpoint(sku: str, req: CartQuantityRequest, request: Request):
@@ -568,9 +677,39 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.get("/api/reviewable")
     def reviewable(request: Request):
-        """当前买家可评价的已签收订单项。"""
+        """当前买家可评价的已签收订单项。
+
+        **必须与订单列表同源。** 改造前只查本地订单表,而 demo 用户的订单全在
+        hmdp——于是 `reviewable_items` 永远返回空,**整个评价功能对默认模式的
+        买家不可达**(而 hmdp 的状态机 unpaid→pending→shipped→delivered 明明
+        能走到已签收)。这是与"支付只改本地库"完全相同的形态:同一份业务对象,
+        读一条路径、判定另一条路径。
+
+        评价本身仍留在 agent 侧,这是刻意的:hmdp 没有评价这个概念(只有 blog
+        评论)。所以正确的组合是"订单从买家实际看到的那份取,已评记录从本地取"。
+        """
         uid = _resolve_user(request, None)
-        return {"success": True, "items": get_db().reviewable_items(uid)}
+        token = _hmdp_token_for_user(uid)
+        if not token:
+            return {"success": True, "items": get_db().reviewable_items(uid)}
+
+        try:
+            orders = _hmdp_my_orders(token)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读 hmdp 订单以判可评价失败 user=%s: %s", uid, exc)
+            # 读不到就回落本地(可能为空),而不是 500——评价入口消失比整页报错轻。
+            return {"success": True, "items": get_db().reviewable_items(uid),
+                    "degraded": "订单服务不可用，可评价列表可能不完整"}
+
+        reviewed = get_db().reviewed_pairs(uid)
+        items = [
+            {"order_id": o["order_id"], "sku": it.get("sku"),
+             "name": it.get("name"), "delivered_at": o.get("created_at")}
+            for o in orders if o.get("status") == "delivered"
+            for it in (o.get("items") or [])
+            if (o["order_id"], it.get("sku")) not in reviewed
+        ]
+        return {"success": True, "items": items}
 
     @app.post("/api/review")
     def submit_review(req: ReviewRequest, request: Request):
@@ -810,7 +949,18 @@ def create_app(session_manager: Optional[SessionManager] = None,
         from app.observability.langfuse_bridge import background_trace
         # 与在途 /api/chat 用同一把会话锁互斥:先在锁内快照 raw_messages(防边写边读),
         # 再在锁外对不可变快照做慢巩固——不长期持锁阻塞用户(同 reaper 的"慢操作不持会话锁")。
-        with session_lock.guard(session_id):
+        with session_lock.guard(session_id) as got:
+            if not got:
+                # 抢不到锁 = 有一轮 /api/chat 正在改 raw_messages。此时照样快照,
+                # 拿到的是**撕裂的对话**(例如只有用户那句、没有对应的助手回复,
+                # 或工具序列写了一半),而这份快照会直接被蒸馏成长期记忆事实——
+                # 一条错的长期记忆会跨会话反复影响后续回答,比这次巩固失败糟得多。
+                #
+                # 与 /api/chat 的处理方式不同是刻意的:那边面对的是等着回复的买家,
+                # 必须给一句话;巩固是可重试的显式动作,如实说"忙,稍后再试"即可。
+                # 全项目 5 处 guard 里,此前只有这一处没检查 got。
+                return {"enabled": True, "busy": True, "count": 0, "facts": [],
+                        "reason": "该会话正在处理上一条消息，请稍后再巩固"}
             msgs = list(getattr(agent, "raw_messages", []))
             summ = getattr(agent, "summary", None)
         # 手动巩固的 LLM 调用也归到命名 trace 下(与 reaper 自动巩固同名)
@@ -869,8 +1019,14 @@ def create_app(session_manager: Optional[SessionManager] = None,
         }
 
     @app.get("/api/metrics", dependencies=[Depends(admin_auth)])
-    def metrics():
-        return compute_metrics(store)
+    def metrics(window_hours: float = 0):
+        """看板指标。`window_hours=0`(默认)= 全部历史,与改造前一致。
+
+        加窗口是因为"全部历史"这一种口径会让**已经修好的问题永远显示为红色**:
+        修完之后新调用全成功,而累计值被几百条旧失败压着,红色要好几周才褪。
+        运维看到的是"改了没用",实际是"口径不对"。
+        """
+        return compute_metrics(store, window_hours=window_hours or None)
 
     @app.get("/api/traces", dependencies=[Depends(admin_auth)])
     def traces(limit: int = 20, session_id: Optional[str] = None):
@@ -993,7 +1149,10 @@ def create_app(session_manager: Optional[SessionManager] = None,
         from app.agent.skills.tree_text import classify_tree_risk, read_skill_tree
         from app.scripts.promote_skill import CANDIDATES_DIR, DEFINITIONS_DIR, list_candidates
 
-        live = SkillManager(skills_dir=settings.skills_dir, enabled=True).get_catalog()
+        # get_catalog_all:管理页要列出仓库里**真实存在的每一份** skill 并显示归属。
+        # 这里没有 actor 上下文(HTTP 请求,不是买家/店主的某一轮对话),走
+        # get_catalog() 会退化成"只看买家",卖家侧 skill 在页面上凭空消失。
+        live = SkillManager(skills_dir=settings.skills_dir, enabled=True).get_catalog_all()
 
         try:
             candidates = list_candidates(CANDIDATES_DIR, DEFINITIONS_DIR)
@@ -1131,9 +1290,27 @@ def create_app(session_manager: Optional[SessionManager] = None,
                         "truncated": truncated}
 
             if out is None:
+                # 只有"资料是空的"会走到这里(那种情况不调 LLM、不花钱)
                 return {"created": False, "name": None, "risk": None, "policy": None,
-                        "errors": ["LLM 产物未通过校验(frontmatter 不全 / 工具名不实 / 名字非法)"],
-                        "truncated": truncated}
+                        "errors": ["资料内容为空,未生成任何候选"], "truncated": truncated}
+
+            if not out.get("ok"):
+                # **把精确原因交给操作者。** 改造前这里只回一句三选一的
+                # 「frontmatter 不全 / 工具名不实 / 名字非法」——店主既不知道是哪一种,
+                # 也不知道该改什么。实测真因往往只是资料里写了一个本店没有的工具名
+                # (如 SOP 里的"走人工工单"被写成 `escalate_to_human`),而产物其余
+                # 部分完全正确。
+                unknown = list(out.get("unknown_tools") or [])
+                errors = list(out.get("errors") or []) or ["LLM 产物未通过校验"]
+                if unknown:
+                    errors.append(
+                        f"资料里提到的「{'、'.join(unknown)}」不是本店可用工具。"
+                        "请把资料中对应的步骤改成用下方可用工具表述,或改写成不依赖"
+                        "工具的话术指引(例如『告知买家将由人工跟进』)。")
+                return {"created": False, "name": None, "risk": None, "policy": None,
+                        "errors": errors, "unknown_tools": unknown,
+                        "available_tools": list(out.get("available_tools") or []),
+                        "attempts": out.get("attempts"), "truncated": truncated}
 
             name = out["name"]
             blocked = _skill_canary_block(name)
@@ -1156,8 +1333,11 @@ def create_app(session_manager: Optional[SessionManager] = None,
                                       tree=tree_report["tree"])
 
             ps._replace_tree(staging / name, Path(ps.CANDIDATES_DIR) / name)
+            # attempts==2 表示"第一次产物有问题、已自动带原因重试并修好了"。
+            # 值得告诉操作者:他的资料里有个词和本店工具集对不上,下次写 SOP 可以避开。
             return {"created": True, "name": name, "risk": risk,
-                    "policy": promotion_policy(risk), "errors": [], "truncated": truncated}
+                    "policy": promotion_policy(risk), "errors": [],
+                    "attempts": out.get("attempts"), "truncated": truncated}
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
@@ -1579,9 +1759,46 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 logger.exception("触达基线记录失败(不影响已投递的消息) draft_id=%s",
                                  draft_id)
 
+        # N7 接线:触达真的发生了 → 开一条跟进链(「持续沟通」的唯一起点)。
+        #
+        # 这一步之前是缺的,后果是整套跟进机制在生产里从不运行:`start_followup`
+        # 全仓库只有测试在调,`outreach_followups` 表恒空 → `due_followups()`
+        # 恒返回 [] → `run_due()` 恒返回全 0 → worker 的 `--followup` 是空转 →
+        # 控制台「跟进」永远是空列表。代码、终止条件、端点、11 个测试全都在,
+        # 只差一个启动点。
+        #
+        # 为什么接在这里而不是起草时:链的语义是"已经跟买家说过一次,过 N 小时
+        # 没反应再提一次"。草稿可能被驳回、可能永远没人审——那种情况下买家根本
+        # 没收到任何消息,"再提一次"无从谈起。只有投递成功(上面 `delivered`
+        # 为真、消息不可撤销地送到了买家面前)才是这条链真正的第 0 步。
+        #
+        # 复用草稿自己的 correlation_id:`followup._last_touch_converted` 正是
+        # 按 correlation_id 去 outreach_drafts 里找"这条链上一次触达判没判成
+        # converted",两边必须是同一个 id 才对得上。
+        #
+        # fail-soft:起链失败绝不推翻"消息已经真实投递"这个不可撤销的事实——
+        # 与上面写归因基线同一姿态,只记日志。返回 None 有两种情况,都不是错误:
+        # 该买家该 kind 已有一条 active 链(唯一索引兜底,一人一类型一条链),
+        # 或并发下被另一次审批抢先建了。
+        try:
+            _fu_kind = (draft.get("opportunity_type") or "").strip()
+            _fu_user = (draft.get("user_id") or "").strip()
+            if marked and _fu_kind and _fu_user:
+                _fid = db.start_followup(
+                    _fu_user, _fu_kind,
+                    draft.get("correlation_id") or bus.new_correlation_id("FOLLOWUP"),
+                    max_steps=settings.followup_max_steps,
+                    interval_hours=settings.followup_interval_hours)
+                if _fid is None:
+                    logger.info("跟进链未新建(该买家该类型已有进行中的链) "
+                                "draft_id=%s user=%s kind=%s",
+                                draft_id, _fu_user, _fu_kind)
+        except Exception:  # noqa: BLE001 起链失败不得推翻已发生的投递
+            logger.exception("开启跟进链失败(不影响已投递的消息) draft_id=%s", draft_id)
+
         bus.publish(bus.EV_OUTREACH_SENT,
                     {"draft_id": draft_id, "user_id": draft.get("user_id")},
-                    bus.AGENT_HUMAN, bus.AGENT_ANALYST,
+                    bus.AGENT_HUMAN,
                     correlation_id=draft.get("correlation_id") or None)
         if not marked:
             # 已发送不代表账本也一致:mark_outreach_sent 只对 approved 生效,
@@ -1624,14 +1841,518 @@ def create_app(session_manager: Optional[SessionManager] = None,
         开关判定,不再为这一个端点单开一份等价逻辑。
         """
         _require_seller_console()
+        from app.multi_agent import bus
+
         db = get_db()
-        events = db.list_events(correlation_id=correlation_id or None, limit=limit)
+        events = bus.timeline(correlation_id=correlation_id or None, limit=limit)
         # 按链过滤必须发生在 SQL 里(而不是取回最近 limit 行再在 Python 里筛):
         # shared_context 的行数随会话/异常商品增长,先 LIMIT 后过滤会让稍旧的
         # 协作链读出空的 shared 列表,而那些行明明还在库里。见 list_shared_context。
         shared = db.list_shared_context(limit=limit,
                                         correlation_id=correlation_id or None)
         return {"success": True, "events": events, "shared": shared}
+
+    @app.get("/api/admin/collab/health", dependencies=[Depends(admin_auth)])
+    def collab_health(limit: int = 20):
+        """协作链的健康出口:失败事件 + worker 心跳。
+
+        补的是一个真实的可见性缺口。`bus.consume()` **刻意不自动重试** failed
+        事件(避免一条坏事件无限循环),注释写的是"留在表里供人工在时间线上看到
+        并决定"——但时间线端点必须先知道 correlation_id 才查得到。也就是说在这
+        个端点之前,一条失败的协作链没有任何人会发现:没有告警、没有面板、没有
+        列出入口。"留给人工决定"事实上是"留给没人"。
+
+        心跳补的是另一半:`reclaim_stale_events` 能救"worker 认领后崩在半路"的
+        单条事件,救不了"worker 进程整个死了"——那时协作静默停摆,而买家链路
+        一切正常,不会有任何症状暴露出来。
+
+        `stale_seconds` 由服务端算好下发,不让前端自己拿本地时钟去减:两边时钟
+        不一致时前端会算出负数或夸张的数值,而这个数字是运维判断"要不要去看一眼"
+        的唯一依据。`healthy` 同理——阈值口径必须只有一处。
+        """
+        _require_seller_console()
+        from app.multi_agent import bus, collab
+        from app.scripts.agent_collab import WORKER_NAME
+
+        db = get_db()
+        hb = db.get_worker_heartbeat(WORKER_NAME)
+        stale = None
+        last_ok = (hb or {}).get("last_success_at")
+        if last_ok:
+            try:
+                stale = max(0, int((datetime.now() - datetime.strptime(
+                    last_ok, "%Y-%m-%d %H:%M:%S")).total_seconds()))
+            except (ValueError, TypeError):
+                stale = None      # 时间戳格式异常不该让整个健康接口 500
+        # 判活阈值取 worker 轮询间隔的若干倍:一轮没跑完就报警会天天误报。
+        threshold = max(120, settings.reaper_interval * 3)
+        return {
+            "success": True,
+            "failed_count": bus.failed_count(),
+            "failed": bus.failed(limit=limit),
+            "worker": {
+                "name": WORKER_NAME,
+                "last_success_at": last_ok,
+                "last_error_at": (hb or {}).get("last_error_at"),
+                "last_error": (hb or {}).get("last_error"),
+                "stale_seconds": stale,
+                "threshold_seconds": threshold,
+                # never_ran(从未跑过)与 stale(跑过但停了)是两种不同的状况:
+                # 前者多半是"还没部署 worker",后者是"部署了但挂了"。都判不健康,
+                # 但前端要能分开提示,所以下发的是 last_success_at 而不只是布尔。
+                "healthy": bool(last_ok) and stale is not None and stale <= threshold,
+            },
+            # 预算是**本进程**的计数器。API 进程查这个端点看到的恒为 0——真正花
+            # 钱的是 worker 进程。不下发就等于这道闸在界面上不存在(运维不知道
+            # 有上限、更不知道今天是不是已经被熔断了);下发但不说明进程边界,
+            # 运维会看着 spent=0 得出"worker 没花过钱"的错误结论。所以 scope 是
+            # 响应的一部分,不是注释。
+            "budget": {**collab.budget_status(), "scope": "本 API 进程计数",
+                       "note": "实际消耗发生在协作 worker 进程,此处恒为 0"},
+            # 降级统计:参谋归因的 LLM 调用失败时会降级为纯统计,而事件本身正常
+            # 走完 → 状态是 done。实测一轮 20 条全部降级,worker 报告的却是
+            # `{claimed:20, done:20, failed:0}`,链上一片绿色。**一次完全无效的
+            # 运行和一次健康的运行在界面上长得一模一样**,而降级的诊断按路由规则
+            # 不会唤醒营销——整条链就这么静默停住,没有任何地方说得出为什么。
+            "degraded": _collab_degraded_stats(),
+        }
+
+    @app.get("/api/admin/collab/inbox", dependencies=[Depends(admin_auth)])
+    def collab_inbox(limit: int = 50):
+        """人工闸待办:投给 `human` 但还没人处理的事件。
+
+        补的是与 failed 事件同构、但更隐蔽的一个缺口。路由表把
+        `action.drafts_ready` / `result.outreach_converted` / `result.outreach_no_change`
+        都投给 `human`,理由写得清清楚楚("草稿必须经人工审批才会发出"、
+        "转化结果供人工在工作台查看")——但 **worker 只消费 analyst 与 growth**,
+        human 的事件没有任何消费方;而在这个端点之前,也**没有任何界面列出它们**。
+
+        实测积压 325 条,状态永远是 pending。路由表上那句"投给人工"于是变成了
+        一句没有落点的声明:事件写进去,再没有出口。
+        """
+        _require_seller_console()
+        from app.multi_agent import bus
+
+        db = get_db()
+        return {"success": True,
+                "pending": db.count_pending_for_target(bus.AGENT_HUMAN),
+                "events": db.list_pending_for_target(bus.AGENT_HUMAN, limit=limit)}
+
+    @app.post("/api/admin/collab/inbox/{event_id}/ack", dependencies=[Depends(admin_auth)])
+    def collab_inbox_ack(event_id: int):
+        """人工确认一条待办(pending → done)。
+
+        光"看得见"不够——运营看到一条待办之后在此之前**做不了任何事**,
+        它会永远停在列表里,新的待办被埋在下面。与失败事件必须有"放回队列"
+        这个扳机是同一个道理。
+
+        幂等靠条件更新:连点两次、两个人同时点,只有第一次真的改到状态。
+        """
+        _require_seller_console()
+        changed = get_db().acknowledge_event(event_id)
+        return {"success": True, "changed": changed,
+                "message": "已确认" if changed else "该事件已不在待办状态(可能已被他人确认)"}
+
+    def _collab_degraded_stats(limit: int = 50) -> dict:
+        """最近若干条诊断里有多少是降级的。
+
+        **必须从 `shared_context` 数,不能从 `insight.diagnosis` 事件数。**
+
+        降级的诊断按路由规则不唤醒营销(`routing._marketing_worthy` 判 degraded
+        直接返回 False),而 `resolve()` 返回空目标时 `publish()` **压根不会插入
+        任何事件行**——于是降级诊断在事件总线上不留一丝痕迹。实测库里
+        `insight.diagnosis` 事件只有 2 条,而 `shared_context` 里有 6 条诊断、
+        其中 3 条是降级的。按事件数统计会得出"降级 0 条"这个恰好相反的结论。
+
+        这也顺带说明了为什么这个出口是必要的:协作链上只看得到
+        `signal.anomaly` 变成 done,然后什么都没有——链就这么断了,而界面上
+        没有任何东西说得出为什么。
+        """
+        rows = get_db().list_shared_context(prefix="diagnosis:", limit=limit)
+        total = len(rows)
+        bad = 0
+        for r in rows:
+            v = r.get("value")
+            if isinstance(v, str):
+                try:
+                    v = json.loads(v)
+                except (json.JSONDecodeError, TypeError):
+                    v = {}
+            if isinstance(v, dict) and v.get("degraded"):
+                bad += 1
+        return {
+            "window": limit, "diagnoses": total, "degraded": bad,
+            "rate": round(bad / total, 3) if total else 0.0,
+            # 全降级是一个**明确的故障态**,不该靠人去比较两个数字才发现
+            "all_degraded": bool(total and bad == total),
+            "note": ("参谋归因的 LLM 调用失败时会降级为纯统计,事件仍算处理成功;"
+                     "降级的诊断不会唤醒营销,且不会产生任何总线事件,"
+                     "协作链会在此静默断掉"),
+        }
+
+    # ---------- Skill 转正 / 驳回 / 回滚(打通自进化闭环的最后一环) ----------
+    #
+    # **补的是"候选只进不出"这个缺口。** 改造前 skills 只有三个端点(列表/上传/
+    # 蒸馏):候选能从界面产生,却**只能登进服务器敲 `python -m
+    # app.scripts.promote_skill` 才上得线**。实测界面上躺着 7 个候选(5 个校验
+    # 通过),产品内没有任何办法处理它们——7 步自进化闭环因此断在最后一环。
+    #
+    # 三个端点都**复用 `promote_skill` 的既有函数**,不在这里重写简化版:
+    # `promote()` 已经处理过 TOCTOU(先把候选整树快照,校验/判档/装机只认那一份
+    # 字节),而"网页能并发替换候选目录"恰恰是这个端点会引入的并发源。
+
+    # 处理完的候选一律**归档不删**(转正 → `_promoted/`,驳回 → `_rejected/`):
+    # 被驳回的是下一轮改进的输入,已转正的是"线上这份正文当时长什么样"的证据。
+    # 归档目录常量由 `promote_skill` 统一持有(`ps.PROMOTED_DIR`/`ps.REJECTED_DIR`),
+    # 这里不另存一份——两处各写一个路径迟早分叉。
+
+    @app.post("/api/admin/skills/{skill_name}/promote",
+              dependencies=[Depends(admin_auth)])
+    async def admin_promote_skill(skill_name: str, force: bool = False,
+                                  run_gate: bool = False):
+        """把候选转正上线。保留全部既有关卡,只是把扳机搬到界面上。
+
+        **门禁是显式选项,不是默认动作。** `gate_candidate()` 会真跑两轮评测
+        (候选 vs 现行,各自真调 LLM),一次一两分钟且花钱——挂在一个网页按钮上
+        同步等,既不合适也容易被代理/网关掐断。所以:
+
+        - `run_gate=false`(默认):**不跑门禁**,传 `gate_result=None` 给
+          `promote()`。它的既有行为是 fail-closed 拒绝("缺少门禁结果,拒绝转正")
+          ——于是这个按钮**不会静默绕过门禁**,而是明确告诉操作者门禁没跑过。
+        - `run_gate=true`:真跑门禁再按结果决定。慢、花钱,但语义与 CLI 完全一致。
+        - `force=true`:只放行**评测门禁**,不放行校验(与 CLI `--force` 同义)。
+          操作者据此在"我知道没跑门禁"的前提下放行。
+
+        实测 7 个候选里有 5 个**根本没有门禁用例**(`gate_case_ids` 返回空),
+        那种情况下门禁本身就会 fail-closed 拒绝。把这件事说清比让按钮看起来
+        "有时能用有时不能"重要。
+
+        高危档(`risk=high`)在这里**不拦**:它的含义是"必须由人来放行",而人在
+        界面上点这个按钮正是那个放行动作(与 CLI 人工路径一致,见 `promote()` 的
+        `block_on_high` 注释)。前端负责二次确认并显示风险来源。
+        """
+        from app.agent.skills.risk import promotion_policy
+        from app.scripts import promote_skill as ps
+
+        def _do() -> dict:
+            gate = None
+            gate_note = "未跑评测门禁(run_gate=false)"
+            if run_gate:
+                try:
+                    from app.agent.skills.gate import (default_eval_fn, gate_candidate,
+                                                       gate_case_ids)
+
+                    case_ids = gate_case_ids(skill_name, settings.eval_dataset_path)
+                    if not case_ids:
+                        gate_note = "该技能没有门禁用例,门禁无法评估"
+                    else:
+                        gate = gate_candidate(
+                            skill_name=skill_name,
+                            candidate_path=str(Path(ps.CANDIDATES_DIR) / skill_name / "SKILL.md"),
+                            definitions_dir=ps.DEFINITIONS_DIR,
+                            dest_root=ps.DEFINITIONS_DIR,
+                            eval_fn=default_eval_fn, case_ids=case_ids)
+                        gate_note = f"门禁: {gate.get('reason', '')}"
+                except Exception as exc:  # noqa: BLE001 门禁自身出错按未通过处理
+                    logger.warning("转正门禁执行失败 skill=%s: %s", skill_name, exc)
+                    gate_note = f"门禁执行失败: {exc}"
+            r = ps.promote(skill_name, ps.DEFINITIONS_DIR, ps.CANDIDATES_DIR,
+                           ps.ARCHIVE_DIR, gate, bool(force), ps._now_stamp())
+            r["policy"] = promotion_policy(r.get("risk")) if r.get("risk") else None
+            r["gate_note"] = gate_note
+            if r.get("promoted"):
+                # 清待审队列。候选目录同时是界面上的"待审队列",已转正的候选留在
+                # 里面会让运营分不清哪些还要处理,重复点一次只会把版本号又推一格。
+                # 归档失败**不改变"已转正"这个结论**——技能已经装上线了,只如实
+                # 报出来让人手动收拾,不能把一次成功的转正回报成失败。
+                r["archive"] = ps.archive_candidate(
+                    skill_name, ps.CANDIDATES_DIR, ps.PROMOTED_DIR, ps._now_stamp())
+            return r
+
+        r = await run_in_threadpool(_do)
+        if not r.get("promoted"):
+            # 400 而不是 500:关卡拦下不是服务器故障。原因原样带出去,并附上门禁
+            # 说明——否则操作者只看到"缺少门禁结果"不知道下一步该干什么。
+            raise HTTPException(400, f"{r.get('reason') or '转正失败'}（{r.get('gate_note')}）")
+        return {"success": True, **r}
+
+    @app.post("/api/admin/skills/{skill_name}/reject",
+              dependencies=[Depends(admin_auth)])
+    async def admin_reject_skill(skill_name: str):
+        """驳回候选:整目录移进 `_rejected/<name>-<时间戳>/`。
+
+        **不删除**。被驳回的候选是下一轮改进的输入(自进化会重新读失败轨迹再合成),
+        也是"为什么当时没上"的唯一记录。带时间戳是因为同一个 skill 可能被驳回多次。
+
+        正在灰度的候选不能驳回:灰度期候选正文正在为一部分真实会话服务,把目录移走
+        会让那些会话当场读不到文件(与 `_skill_canary_block` 同一条理由)。
+        """
+        from app.agent.skills.validator import is_safe_skill_name
+        from app.scripts import promote_skill as ps
+
+        if not is_safe_skill_name(skill_name):
+            raise HTTPException(400, f"非法 skill 名,拒绝操作: {skill_name!r}")
+        blocked = _skill_canary_block(skill_name)
+        if blocked:
+            raise HTTPException(409, blocked)
+
+        # 与转正共用 `archive_candidate`,只是归档到 _rejected 而不是 _promoted:
+        # 两条路径都是"这个候选处理完了,从待审队列摘掉",没有理由各写一份移动逻辑。
+        r = await run_in_threadpool(
+            ps.archive_candidate, skill_name, ps.CANDIDATES_DIR,
+            ps.REJECTED_DIR, ps._now_stamp())
+        if not r.get("archived"):
+            raise HTTPException(400, r.get("reason") or "驳回失败")
+        return {"success": True, "rejected": True, **r}
+
+    @app.post("/api/admin/skills/{skill_name}/rollback",
+              dependencies=[Depends(admin_auth)])
+    async def admin_rollback_skill(skill_name: str):
+        """把线上技能回滚到最近一次备份(转正前自动留的那份)。
+
+        这是转正的对偶动作:没有它,"一键转正"就是一个**没有退路**的按钮——
+        而技能正文直接决定客服说什么,上线后发现不对必须能立刻退回去,
+        不该要求运营去登服务器。
+        """
+        from app.scripts import promote_skill as ps
+
+        r = await run_in_threadpool(
+            ps.rollback, skill_name, ps.DEFINITIONS_DIR, ps.ARCHIVE_DIR)
+        if not r.get("rolled_back"):
+            raise HTTPException(400, r.get("reason") or "回滚失败")
+        return {"success": True, **r}
+
+    # ---------- 知识库文档管理(代替去 ApeRAG 自己的页面上传) ----------
+    #
+    # 检索侧不变,仍是 `aperag_search` 读同一个 collection。这里只是把"写"这一半
+    # 搬进本项目的管理端,免得店主为了改一份政策文档去开另一个系统。
+    #
+    # 实测确认过(scripts/aperag_write_smoke.py,真服务):API 写入的文档与 ApeRAG
+    # UI 上传的文档落在同一个 collection、走同一条索引流水线、被同一次检索并排
+    # 召回——不存在"两套东西"。
+
+    #: 允许的文档扩展名。**在后端卡,不能只靠前端**。这个页面能改客服的政策依据,
+    #: 传错一份文档,全店客服的回答口径当场就变了。
+    _KB_ALLOWED_EXT = frozenset({".md", ".markdown", ".txt", ".pdf", ".docx"})
+    #: 知识库文档的体积上限,独立于技能包上限(政策文档通常远小于技能压缩包)。
+    _KB_MAX_BYTES = 10_000_000
+
+    def _kb_collection() -> str:
+        """知识库 collection id。**这里用的就是政策库那一个**(与检索侧同源)。
+
+        与 `aperag_writer` 的"绝不回落 settings.aperag_collection_id"不冲突:
+        那条约束针对的是**经验/教训/洞察**这类新内容——它们必须落在别的
+        collection,因为 ApeRAG 的检索请求没有元数据过滤,混进政策库会让买家问
+        退货政策时召回一段"历史话术"。而本端点管理的就是政策库本身,所以显式
+        取这个 id 是对的。
+        """
+        cid = (settings.aperag_collection_id or "").strip()
+        if not cid:
+            raise HTTPException(503, "未配置 APERAG_COLLECTION_ID,知识库管理不可用")
+        if not settings.aperag_api_key:
+            raise HTTPException(503, "未配置 APERAG_API_KEY,知识库管理不可用")
+        return cid
+
+    @app.get("/api/admin/kb/documents", dependencies=[Depends(admin_auth)])
+    async def kb_list_documents():
+        """列出知识库文档及其索引状态。
+
+        索引状态直接下发 ApeRAG 的原值,不在这里翻译成自己的一套词:
+        `PENDING / CREATING / ACTIVE / DELETING / FAILED`。**终态是 ACTIVE 而不是
+        COMPLETE**——本项目此前在两处把它写成了 COMPLETE,导致轮询永远等不到终态
+        (见 aperag_writer 模块注释)。多翻译一层就多一处会和上游枚举漂移的地方。
+        """
+        from app.knowledge import aperag_writer as w
+
+        cid = _kb_collection()
+        docs = await run_in_threadpool(w.list_documents, cid)
+        if docs is None:
+            # 读不到与"知识库是空的"是两件事,不能都返回空列表(全项目同一条口径)
+            raise HTTPException(502, "知识库服务连不上，请确认 ApeRAG 已启动")
+        return {"success": True, "collection_id": cid,
+                "base_url": settings.aperag_base_url,
+                "documents": [{
+                    "id": d.get("id") or d.get("document_id"),
+                    "name": d.get("name") or d.get("filename"),
+                    "size": d.get("size"),
+                    "status": d.get("status"),
+                    "vector_index_status": d.get("vector_index_status"),
+                    "fulltext_index_status": d.get("fulltext_index_status"),
+                    "created": d.get("created") or d.get("created_at"),
+                } for d in docs]}
+
+    @app.post("/api/admin/kb/documents/upload", dependencies=[Depends(admin_auth)])
+    async def kb_upload_document(file: UploadFile = File(...)):
+        """上传一份文档进知识库,**上传即确认**(一次调用走完 upload + confirm)。
+
+        为什么不把 upload 与 confirm 拆成两个端点交给前端串:实测未 confirm 的
+        文档**不出现在 `list_documents` 里**。也就是说 upload 成功、confirm 失败
+        (或前端中途关页面)会留下一份**查不到、也没法在界面上删掉的孤儿**,
+        还占着临时区。ApeRAG 拆两步是为了"先批量传、人工确认后入库"这种场景,
+        而这个页面是一次一份、传了就是要用,没有中间态可言。
+
+        返回后**索引仍在异步建**(实测 PENDING → CREATING → ACTIVE 约 15 秒),
+        所以这里不等它完成:等着就把一次上传变成 15 秒的同步阻塞。前端按
+        `vector_index_status` 轮询即可。
+        """
+        name = (file.filename or "").strip()
+        ext = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
+        if ext not in _KB_ALLOWED_EXT:
+            raise HTTPException(
+                415, f"不支持的文件类型 {ext or '(无扩展名)'}；"
+                     f"允许:{'、'.join(sorted(_KB_ALLOWED_EXT))}")
+
+        # 分块读并随读随判:一次性 read() 会先把整个请求体读进内存,那样体积上限
+        # 约束不到内存占用(与技能包上传同一手法)。
+        buf = bytearray()
+        while True:
+            chunk = await file.read(_UPLOAD_CHUNK_BYTES)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if len(buf) > _KB_MAX_BYTES:
+                raise HTTPException(413, f"文件过大(上限 {_KB_MAX_BYTES // 1_000_000} MB)")
+        if not buf:
+            raise HTTPException(422, "文件是空的")
+
+        cid = _kb_collection()
+
+        def _do() -> dict:
+            from app.knowledge import aperag_writer as w
+
+            doc_id = w.upload_document_bytes(cid, name, bytes(buf))
+            if not doc_id:
+                return {"success": False, "reason": "上传失败，请查看服务端日志"}
+            n = w.confirm_documents(cid, [doc_id])
+            if n < 1:
+                # 上传成功但确认失败:文档停在 UPLOADED,**永远不会被检索到**,
+                # 而且不出现在列表里(实测)。如实报错并把 id 带出去,让人还能
+                # 手动处理,而不是留一个查不到的孤儿。
+                return {"success": False, "document_id": doc_id,
+                        "reason": "已上传但确认入库失败，该文档不会被检索到"}
+            return {"success": True, "document_id": doc_id, "name": name,
+                    "note": "索引正在异步创建（约 15 秒），状态变为 ACTIVE 后才会被召回"}
+
+        return await run_in_threadpool(_do)
+
+    @app.delete("/api/admin/kb/documents/{doc_id}", dependencies=[Depends(admin_auth)])
+    async def kb_delete_document(doc_id: str):
+        """删除一份知识库文档。
+
+        这是**不可逆**动作,而且影响面比它看起来大:删掉一份政策文档之后,客服
+        对该类问题的回答就失去了依据(退化成模型常识)。二次确认放在前端,
+        这里只保证如实报告成败。
+        """
+        from app.knowledge import aperag_writer as w
+
+        cid = _kb_collection()
+        ok = await run_in_threadpool(w.delete_document, cid, doc_id)
+        if not ok:
+            raise HTTPException(502, "删除失败（文档可能已不存在，或知识库服务异常）")
+        return {"success": True, "document_id": doc_id}
+
+    @app.get("/api/admin/collab/chains", dependencies=[Depends(admin_auth)])
+    def collab_chains(limit: int = 30):
+        """最近的协作链清单(时间线的入口)。
+
+        补的是和 `collab_health` 同构的一个缺陷:`collab_timeline` 要求调用方
+        先知道 correlation_id,但在此之前没有任何地方列出过它。一条协作链除非
+        恰好失败(才会出现在 failed 列表里),否则没有任何入口能找到它——
+        "多 Agent 到底协作了什么"的唯一出口,实际上只对失败的链开放。
+        """
+        _require_seller_console()
+        return {"success": True, "chains": get_db().list_event_chains(limit=limit)}
+
+    @app.get("/api/admin/collab/routing", dependencies=[Depends(admin_auth)])
+    def collab_routing():
+        """路由订阅表 + 消费闸 + Agent 名册。
+
+        `routing.describe()` 的注释写着"供文档/管理端展示",但在此之前没有任何
+        调用方——这份表是"多 Agent 到底怎么协作"的权威声明,却只有翻代码才读得到。
+
+        一并下发 Agent 名册:订阅表里出现的是 `analyst`/`growth` 这类内部标识,
+        管理端要渲染中文就得有一份映射,而那份映射**不能由前端另抄**——多一份
+        副本就多一处会漂移的口径(与 OPPORTUNITY_KINDS 同理)。
+        """
+        _require_seller_console()
+        from app.multi_agent import bus, routing
+
+        return {
+            "success": True,
+            "subscriptions": routing.describe(),
+            "gates": routing.describe_gates(),
+            "agents": [
+                {"key": bus.AGENT_SERVICE, "label": "客服 Agent",
+                 "side": "buyer", "desc": "买家会话侧,唯一直接对买家说话的角色"},
+                {"key": bus.AGENT_ANALYST, "label": "参谋 Agent",
+                 "side": "seller", "desc": "只读经营归因,不落任何写操作"},
+                {"key": bus.AGENT_GROWTH, "label": "营销 Agent",
+                 "side": "seller", "desc": "只产草稿,发送权不在它手上"},
+                {"key": bus.AGENT_HUMAN, "label": "人工闸",
+                 "side": "human", "desc": "不可逆动作的唯一出口"},
+            ],
+        }
+
+    @app.post("/api/admin/collab/failed/{event_id}/retry",
+              dependencies=[Depends(admin_auth)])
+    def collab_retry_failed(event_id: int):
+        """把一条失败事件放回待处理队列,由下一轮 worker 重新认领。
+
+        为什么要有这个动作:光"看得见"不够——运营看到一条失败的协作链之后,
+        在此之前**做不了任何事**,只能干看着。系统刻意不自动重试(坏事件会无限
+        循环),那就必须给人一个手动扳机,否则"留给人工决定"里的"决定"是空的。
+
+        幂等靠数据层条件更新(failed → pending 只对仍是 failed 的行生效):
+        连点两次、两个运营同时点,只有第一次真的改到状态,第二次拿到
+        changed=False 而不是把一条已经在跑的事件again 打回队列。
+        """
+        _require_seller_console()
+        from app.multi_agent import bus
+
+        changed = bus.retry(event_id)
+        return {"success": True, "changed": changed,
+                "message": ("已放回队列,下一轮 worker 会重新处理"
+                            if changed else "该事件不在失败状态(可能已被处理或已重试)")}
+
+    @app.get("/api/admin/customer/{user_id}/orders", dependencies=[Depends(admin_auth)])
+    def admin_customer_orders(user_id: str):
+        """坐席侧:某个客户的订单清单。
+
+        补的是坐席台上最刺眼的一个空白——**接待人看不到客户买了什么**。
+        改造前右侧客户面板只有会话 ID / 轮次 / 最后活跃这类会话元数据,而买家
+        开口第一句几乎总是关于某一笔订单。坐席要么去问买家"您的订单号是多少",
+        要么切到别的系统查——两者都是把 AI 已经知道的事情重新问一遍人。
+
+        **与买家自己的 `/api/orders` 共用同一条读取路径**(`_hmdp_my_orders` /
+        `list_user_orders`),不另写一份查询:两边看到的必须是同一份事实,否则
+        坐席据以答复的内容和买家屏幕上显示的对不上,比看不到更糟。
+
+        鉴权走 admin_auth:这是**跨用户**读取,买家 token 拿不到别人的订单。
+        """
+        orders: list[dict] = []
+        degraded = ""
+        token = _hmdp_token_for_user(user_id)
+        if token:
+            try:
+                orders = _hmdp_my_orders(token)
+            except Exception as exc:  # noqa: BLE001 坐席面板不该因订单读不到而整块 500
+                logger.warning("坐席读客户订单失败 user=%s: %s", user_id, exc)
+                degraded = (f"订单服务不可用({type(exc).__name__})，"
+                            f"下方来自本地订单库，可能不是最新")
+        # hmdp 拿不到就回落本地订单库——与 `/api/orders` 同一条回退路径。
+        # **失败时也必须回落**:坐席宁可看到一份可能过时的订单(并被明确告知),
+        # 也好过面对一片空白去问买家"您的订单号是多少"。
+        if not orders:
+            try:
+                raw = [o for o in get_db().list_orders() if o.get("user") == user_id]
+                raw.sort(key=lambda o: o.get("created_at") or "", reverse=True)
+                orders = [_fmt_order(o) for o in raw]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("坐席读客户订单失败(本地库) user=%s: %s", user_id, exc)
+                degraded = f"订单库读取失败({type(exc).__name__})"
+        # 空列表有两种含义(这个客户确实没下过单 / 订单服务连不上),必须分开。
+        return {"success": not degraded, "user_id": user_id,
+                "orders": orders, "degraded": degraded}
 
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():

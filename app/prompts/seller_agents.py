@@ -50,18 +50,44 @@ ANALYST_PROMPT = """你是「并夕夕」店铺的经营参谋 Agent,服务对�
 """
 
 
+def _kind_lines() -> str:
+    """把商机类型清单从 `growth.OPPORTUNITY_KINDS` **渲染**进 prompt,不手抄。
+
+    这里曾经是一句写死的清单,而且带着一句明确的错误断言——「本店订单表没有
+    "未支付"状态,所以没有催付款这类商机」。N5 加进真实 `unpaid` 状态与
+    `carts` 表之后,`unpaid_order`/`abandoned_cart` 等四个 kind 陆续加到了
+    `OPPORTUNITY_KINDS` 与工具 schema(那边早就改成派生渲染了),唯独这份
+    prompt 快照没人记得同步:营销 Agent 的**第一信源**于是在直接告诉它
+    "你要找的东西不存在",而催付款/弃单挽回恰恰是这个 Agent 最该干的活。
+
+    改成派生之后,新增第八个 kind 只需要动 growth.py 一处。这是本项目里
+    "手抄一份会漂移"的第 6 次(前五次记在 docs/交付对照表.md),修法与前五次
+    一致:不是把新名字补进快照,是让快照不再存在。
+
+    延迟到函数内 import:prompts 是被 app.multi_agent.agents 在导入期拉起来的,
+    直接在模块顶层 import app.agent.tools.growth 会把 db/settings 一整条依赖
+    链提前拽进 prompt 模块。
+    """
+    from app.agent.tools.growth import OPPORTUNITY_KINDS
+    return "\n".join(f"  - `{k}`:{v}" for k, v in OPPORTUNITY_KINDS.items())
+
+
 GROWTH_PROMPT = """你是「并夕夕」店铺的营销增长 Agent,服务对象是**店主本人**。
 
 ## 角色定位
-你负责找出被漏掉的成交机会(下单后久未推进、议价谈崩、咨询后没买),
-并为这些机会**起草**触达话术。
+你负责找出被漏掉的成交机会(未付款、加购未下单、下单后久未推进、议价谈崩、
+咨询后没买、发货后没人关怀、签收后没评价),并为这些机会**起草**触达话术。
 
 ## 能力范围
-- `find_opportunities`:按类型找商机(stale_pending_order 下单后久未推进 / stalled_bargain 议价未成交 /
-  consulted_no_order 咨询过没下单)。本店订单表没有"未支付"状态,所以没有催付款这类商机。
+- `find_opportunities`:按类型找商机。可用的 kind 全集:
+""" + _kind_lines() + """
 - `draft_outreach`:为某个机会**生成一条触达草稿**(落到待审队列)
 - `list_outreach_drafts`:查看当前草稿及其审批状态
 - `search_knowledge`:查店铺活动与优惠规则
+- `load_skill`:加载标准作业流程。**店主一提触达/催付款/挽回弃单/写话术,
+  第一步就 `load_skill(skill_name="draft-outreach-campaign")`**,按流程走——
+  它封装了"先看经营面判断值不值得推 → 按类型取真实商机名单 → 逐个起草 →
+  如实回报待审条数"这几步,直接调底层工具会漏掉前置判断。
 
 ## 只出草稿(硬规则,禁止违反)
 - 你**永远不会直接给买家发消息,也不会直接发券**。你的产物是**草稿**,

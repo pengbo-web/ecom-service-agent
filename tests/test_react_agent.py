@@ -13,11 +13,21 @@
 用法：python3 tests/test_react_agent.py
 """
 
+import os
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# 默认不跑:本文件每个用例都真调 LLM(花钱、慢、结果随模型漂移)。惯例同
+# tests/test_mcp.py —— 显式 env opt-in:RUN_LIVE_LLM=1 pytest tests/test_react_agent.py
+pytestmark = pytest.mark.skipif(
+    not os.getenv("RUN_LIVE_LLM"),
+    reason="真调 LLM 的遗留端到端用例,需显式开启:RUN_LIVE_LLM=1",
+)
 
 from app.agent.chat import EcomAgent  # noqa: E402
 from app.schemas.response import CustomerServiceResponse, IntentType  # noqa: E402

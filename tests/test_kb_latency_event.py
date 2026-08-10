@@ -160,7 +160,10 @@ def test_tracer_records_kb_latency_span(tmp_path):
     spans = [s for s in saved["spans"] if s["kind"] == "kb_latency"]
     assert len(spans) == 1
     assert spans[0]["latency_ms"] == 123.0
-    meta = json.loads(spans[0]["meta"])
+    # `get_trace()` 面向 API,已把 meta 解析成对象(`all_spans()` 才保留原始字符串,
+    # 因为 compute_metrics 按字符串包含判护栏动作)。两种形态都认。
+    raw = spans[0]["meta"]
+    meta = json.loads(raw) if isinstance(raw, str) else raw
     assert meta == {"backend": "aperag", "legs": ["vector"], "rows": 2, "outcome": "ok"}
 
 
