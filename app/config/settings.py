@@ -454,6 +454,21 @@ def verify_production_secrets(s: "Settings") -> None:
     if not s.is_production:
         return
     problems = []
+
+    # ---- 两条比密钥更危险的,此前漏了 ----
+    #
+    # 它们危险的地方在于:密钥弱是"可能被攻破",而这两条是**默认就对所有人开放**,
+    # 不需要任何攻击动作。
+    if s.demo_mode:
+        problems.append(
+            "DEMO_MODE=true —— 前端会自动以 demo_user_id 登录并跳过登录卡片,"
+            f"等于任何访问者直接以真实买家 {s.demo_hmdp_user_id} 身份进入:"
+            "能看他的订单与收货地址、能下单、能申请退款。这不是鉴权弱而是**无鉴权**")
+    if not s.auth_enabled:
+        problems.append(
+            "AUTH_ENABLED=false —— 回退到自报 user_id:任何人只要在请求里写上别人的 "
+            "user_id 就能读写其订单与长期记忆")
+
     if s.auth_enabled and (not s.auth_secret or s.auth_secret == DEFAULT_AUTH_SECRET):
         problems.append("AUTH_SECRET 未设置或仍为默认值(token 可被离线伪造)")
     if not s.admin_token:
