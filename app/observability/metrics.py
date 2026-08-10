@@ -61,6 +61,22 @@ def compute_metrics(store, window_hours: Optional[float] = None) -> dict:
     #   miss     → 库是通的但这一问没有相关政策 → 可能要补文档
     #   skipped  → 查询理解判定这轮不需要 KB → 正常,不是问题
     # 合成一个"召回率"会把这三件事糊在一起,而只有第一个是故障。
+    # 首字时间(TTFT)。**采集早就有,只是从没进过看板。**
+    #
+    # `reply_delta:first` 这条零时长 span 的 `started_at - trace.started_at` 就是它
+    # (见 tracer.py 那段注释)。而看板此前只有 P50/P95 **总延迟** —— 那是"整段
+    # 回复生成完"的时间,和买家体感的"多久看到第一个字"是两回事:流式下总时长 12s
+    # 但首字 1.5s 是可接受的,首字 12s 则是灾难。**在线客服的核心 KPI 是前者。**
+    #
+    # 按 trace 关联:一条 trace 至多一个 first span(tracer 只记第一块)。
+    _trace_start = {t["trace_id"]: t["started_at"] for t in traces}
+    ttfts = [
+        (s["started_at"] - _trace_start[s["trace_id"]]) * 1000.0
+        for s in spans
+        if s["kind"] == "reply_delta" and s["trace_id"] in _trace_start
+    ]
+    ttfts = [x for x in ttfts if x >= 0]      # 时钟异常的负值丢掉,不参与分位
+
     recall_spans = [s for s in spans if s["kind"] == "recall"]
     kb_spans = [s for s in recall_spans if "kb" in (s.get("name") or "")]
     kb_degraded = sum(1 for s in kb_spans
@@ -98,6 +114,12 @@ def compute_metrics(store, window_hours: Optional[float] = None) -> dict:
         "kb_recall_degraded": kb_degraded,
         "kb_degraded_rate": (kb_degraded / kb_attempted) if kb_attempted else 0.0,
         "kb_recall_skipped": kb_skipped,
+        # 首字时间:买家体感的核心指标。streamed_traces 是分母——没有流式的轮次
+        # (快路径直答、转人工短路)不该稀释它,而报出这个分母也让人看得出
+        # "这个 P50 是基于多少条算的"。
+        "ttft_p50_ms": _percentile(ttfts, 50),
+        "ttft_p95_ms": _percentile(ttfts, 95),
+        "streamed_traces": len(ttfts),
         "intent_distribution": intent_dist,
         # 口径必须跟着数字一起下发。一个百分比脱离了统计窗口就没有意义,而这
         # 几个数字正是运维判断"要不要去看一眼"的依据——看板不能让人自己猜

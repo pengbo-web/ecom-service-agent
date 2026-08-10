@@ -22,7 +22,10 @@ describe("MetricCards", () => {
     render(<MetricCards m={HEALTHY as any} />);
     expect(screen.getByText("总请求数")).toBeInTheDocument();
     expect(screen.getByText("12")).toBeInTheDocument();
-    expect(screen.getByText(/P95/)).toBeInTheDocument();
+    // 精确匹配:看板上现在有两个 P95(「延迟 P95」与新增的「首字 P95」)。
+    // 用 /P95/ 会因多处命中而失败——而那不是渲染出错,是断言不够具体。
+    expect(screen.getByText("延迟 P95")).toBeInTheDocument();
+    expect(screen.getByText("首字 P95")).toBeInTheDocument();
   });
 
   it("按角色分组,不是 14 张卡平铺", () => {

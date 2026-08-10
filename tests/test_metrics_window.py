@@ -133,3 +133,73 @@ def test_suite_does_not_depend_on_the_mcp_server_process():
 
     assert settings.mcp_enabled is False, \
         "conftest 应把 mcp_enabled 钉成 False,否则套件会去连外部 MCP 进程"
+
+
+# ---------- 首字时间(TTFT) ----------
+#
+# 采集早就有(`reply_delta:first` span,tracer 里那段注释写得很清楚),但**从没
+# 进过看板**。看板此前只有 P50/P95 总延迟 —— 那是"整段回复生成完"的时间,和买家
+# 体感的"多久看到第一个字"是两回事:流式下总时长 12s 但首字 1.5s 是可接受的,
+# 首字 12s 则等同于没有回应。在线客服的核心 KPI 是后者。
+
+def _trace_with_ttft(tid: str, started: float, first_delta_at: float) -> Trace:
+    tr = Trace(trace_id=tid, session_id="s", user_input="hi", intent=None,
+               started_at=started, ended_at=started + 12.0, latency_ms=12000.0,
+               status="ok", error=None)
+    tr.spans.append(Span(span_id=f"{tid}-d", trace_id=tid, name="reply_delta:first",
+                         kind="reply_delta", started_at=first_delta_at,
+                         ended_at=first_delta_at, latency_ms=0.0, success=True))
+    return tr
+
+
+def test_ttft_is_measured_from_trace_start(tmp_path):
+    s = TraceStore(str(tmp_path / "t.db"))
+    s.init_schema()
+    s.save_trace(_trace_with_ttft("a", 100.0, 101.5))     # 1.5s
+    s.save_trace(_trace_with_ttft("b", 200.0, 202.5))     # 2.5s
+    m = compute_metrics(s)
+    assert m["streamed_traces"] == 2
+    assert m["ttft_p50_ms"] == pytest.approx(1500, abs=1) or \
+           m["ttft_p50_ms"] == pytest.approx(2500, abs=1)
+
+
+def test_ttft_is_independent_of_total_latency(tmp_path):
+    """首字 1.5s 而总时长 12s —— 这正是流式该有的样子,两个数必须分开报。"""
+    s = TraceStore(str(tmp_path / "t.db"))
+    s.init_schema()
+    s.save_trace(_trace_with_ttft("a", 100.0, 101.5))
+    m = compute_metrics(s)
+    assert m["ttft_p50_ms"] == pytest.approx(1500, abs=1)
+    assert m["latency_p50_ms"] == pytest.approx(12000, abs=1)
+
+
+def test_non_streamed_traces_do_not_dilute_ttft(tmp_path):
+    """没有流式的轮次(快路径直答、转人工短路)不进分母。
+
+    把它们算成 0 会让首字 P50 被无声拉低——而拉低之后的数字恰好会在真的慢时
+    看起来没事。
+    """
+    s = TraceStore(str(tmp_path / "t.db"))
+    s.init_schema()
+    s.save_trace(_trace_with_ttft("a", 100.0, 103.0))     # 3s
+    s.save_trace(_trace("plain", 200.0, tool_ok=True))    # 无 reply_delta span
+    m = compute_metrics(s)
+    assert m["streamed_traces"] == 1
+    assert m["ttft_p50_ms"] == pytest.approx(3000, abs=1)
+
+
+def test_no_streamed_traces_reports_zero(tmp_path):
+    s = TraceStore(str(tmp_path / "t.db"))
+    s.init_schema()
+    s.save_trace(_trace("plain", 100.0, tool_ok=True))
+    m = compute_metrics(s)
+    assert m["streamed_traces"] == 0
+    assert m["ttft_p50_ms"] == 0.0
+
+
+def test_negative_ttft_from_clock_skew_is_dropped(tmp_path):
+    """span 时间早于 trace 起点(时钟异常)不该产出负的首字时间。"""
+    s = TraceStore(str(tmp_path / "t.db"))
+    s.init_schema()
+    s.save_trace(_trace_with_ttft("bad", 100.0, 99.0))
+    assert compute_metrics(s)["streamed_traces"] == 0

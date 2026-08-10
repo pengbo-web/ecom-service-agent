@@ -4,6 +4,15 @@ export type Metrics = {
   total_traces: number; error_rate: number; latency_p50_ms: number; latency_p95_ms: number;
   tool_success_rate: number; tool_calls: number; guard_blocks: number; block_rate: number;
   guard_sanitizes: number; handoffs: number; escalation_rate: number;
+  // KB 召回降级:本项目最后一条曾经没有出口的降级路径。实测 ApeRAG 停了 24 分钟
+  // 无人发现——客服照常回答,只是答案里没有任何政策依据。三个数分开报,因为处置
+  // 完全不同:degraded 去修依赖 / miss 可能要补文档 / skipped 是正常。
+  kb_recall_attempts?: number; kb_recall_degraded?: number;
+  kb_degraded_rate?: number; kb_recall_skipped?: number;
+  // 首字时间:采集早就有(reply_delta:first span),但从没进过看板。总延迟是
+  // "整段回复生成完",首字是"买家多久看到第一个字"——流式下总时长 12s 但首字
+  // 1.5s 可接受,首字 12s 是灾难。在线客服的核心 KPI 是后者。
+  ttft_p50_ms?: number; ttft_p95_ms?: number; streamed_traces?: number;
   total_prompt_tokens: number; total_completion_tokens: number; est_cost_usd: number;
   intent_distribution: Record<string, number>;
   // 统计窗口(小时)。null/缺失 = 全部历史。口径必须跟着数字一起显示:
@@ -39,6 +48,12 @@ const LINES: Record<string, Line> = {
     note: "工具失败会让 Agent 靠猜作答;低于 90% 时回答可信度已不可控" },
   escalation_rate: { warn: 0.15, bad: 0.3, lowerIsBetter: true,
     note: "转人工率是 AI 顶不顶得住的直接体现;偏高说明知识或能力有缺口" },
+  ttft_p50: { warn: 1500, bad: 3000, lowerIsBetter: true,
+    note: "买家从发送到看到第一个字的时间。这是在线客服真正的体感指标——"
+        + "总延迟 12s 但首字 1.5s 是可接受的,首字 12s 则等同于没有回应" },
+  kb_degraded_rate: { warn: 0.02, bad: 0.1, lowerIsBetter: true,
+    note: "知识库连不上时客服会照常回答、但答案里没有任何政策依据(退货运费之类答的是模型常识)。"
+        + "买家侧完全无症状,所以这个数是唯一的信号——线划得很低是刻意的" },
 };
 
 function toneOf(key: string, value: number): { dot: string; text: string } | null {
@@ -75,8 +90,10 @@ function windowLabel(hours?: number | null): string {
  * 决策(要不要加预算 / AI 顶不顶得住),混在一列会让看板变成一张数字清单。
  */
 const GROUPS: { title: string; hint: string; keys: string[] }[] = [
-  { title: "服务质量", hint: "买家这一侧的体感", keys: ["total_traces", "latency_p50", "latency_p95", "error_rate"] },
+  { title: "服务质量", hint: "买家这一侧的体感", keys: ["total_traces", "ttft_p50", "ttft_p95", "latency_p50", "latency_p95", "error_rate"] },
   { title: "AI 能力", hint: "AI 自己顶住了多少", keys: ["tool_success_rate", "tool_calls", "handoffs", "escalation_rate"] },
+  { title: "知识库", hint: "客服回答政策问题时有没有依据",
+    keys: ["kb_degraded_rate", "kb_recall_degraded", "kb_recall_attempts"] },
   { title: "安全与合规", hint: "护栏拦下了什么", keys: ["guard_blocks", "block_rate", "guard_sanitizes"] },
   { title: "成本", hint: "这些对话花了多少", keys: ["est_cost", "total_prompt_tokens", "total_completion_tokens"] },
 ];
@@ -85,6 +102,11 @@ export function MetricCards({ m }: { m: Metrics }) {
   const all: Record<string, Item> = {
     total_traces: { key: "total_traces", label: "总请求数", display: num(m.total_traces) },
     error_rate: { key: "error_rate", label: "错误率", display: pct(m.error_rate), raw: m.error_rate },
+    ttft_p50: { key: "ttft_p50", label: "首字 P50",
+      display: m.streamed_traces ? ms(m.ttft_p50_ms ?? 0) : "—",
+      raw: m.streamed_traces ? (m.ttft_p50_ms ?? 0) : undefined },
+    ttft_p95: { key: "ttft_p95", label: "首字 P95",
+      display: m.streamed_traces ? ms(m.ttft_p95_ms ?? 0) : "—" },
     latency_p50: { key: "latency_p50", label: "延迟 P50", display: ms(m.latency_p50_ms), raw: m.latency_p50_ms },
     latency_p95: { key: "latency_p95", label: "延迟 P95", display: ms(m.latency_p95_ms), raw: m.latency_p95_ms },
     tool_success_rate: { key: "tool_success_rate", label: "工具成功率", display: pct(m.tool_success_rate), raw: m.tool_success_rate },
@@ -94,6 +116,13 @@ export function MetricCards({ m }: { m: Metrics }) {
     guard_sanitizes: { key: "guard_sanitizes", label: "脱敏次数", display: num(m.guard_sanitizes) },
     handoffs: { key: "handoffs", label: "转人工数", display: num(m.handoffs) },
     escalation_rate: { key: "escalation_rate", label: "转人工率", display: pct(m.escalation_rate), raw: m.escalation_rate },
+    kb_degraded_rate: { key: "kb_degraded_rate", label: "知识库降级率",
+      display: m.kb_recall_attempts ? pct(m.kb_degraded_rate ?? 0) : "—",
+      raw: m.kb_recall_attempts ? (m.kb_degraded_rate ?? 0) : undefined },
+    kb_recall_degraded: { key: "kb_recall_degraded", label: "降级轮次",
+      display: num(m.kb_recall_degraded ?? 0) },
+    kb_recall_attempts: { key: "kb_recall_attempts", label: "尝试检索轮次",
+      display: num(m.kb_recall_attempts ?? 0) },
     est_cost: { key: "est_cost", label: "估算成本", display: "$" + m.est_cost_usd.toFixed(4) },
     total_prompt_tokens: { key: "total_prompt_tokens", label: "Prompt tokens", display: num(m.total_prompt_tokens) },
     total_completion_tokens: { key: "total_completion_tokens", label: "Completion tokens", display: num(m.total_completion_tokens) },
