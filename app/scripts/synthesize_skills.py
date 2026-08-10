@@ -161,6 +161,12 @@ def run_improvements(
 
     manager = SkillManager(skills_dir=skills_dir, enabled=True)
     out_paths: list[Path] = []
+    # 这里**刻意**用按 actor 过滤的 get_catalog():离线跑没有 actor 上下文,
+    # 于是它只会返回买家 skill——这正是想要的。失败样本取自买家会话归档
+    # (session_archive),拿它去"改进"一份卖家营销 skill 本就没有意义;更要紧
+    # 的是改进版的 frontmatter 是 LLM 重写的,一旦漏掉 `actor: seller` 这一行,
+    # promote 之后那份 skill 就会静默变成买家可见——正是这次要堵的那个方向。
+    # 卖家 skill 的迭代目前走人工编辑,不进自动合成闭环。
     for entry in manager.get_catalog():
         name = entry["name"]
         description = entry["description"]
@@ -272,6 +278,23 @@ def main() -> None:
             failed_traces = get_db().list_skill_traces(
                 outcomes=["handoff", "tool_error"], limit=trace_cap,
             )
+            # 剔掉纯基础设施故障的轨迹:一次代理抖动/Redis 掉线/上游超时产生的
+            # 失败,与 skill 的流程文档毫无关系。照单全收 = **基础设施坏了,
+            # 系统去改一份没写错的流程文档**,还要走灰度、占审批位。
+            # 实测撞到过:track-order 成功率被打到 3%(tool_error:37),根因是
+            # MCP 连接被系统代理打断后静默降级读了本地库,skill 一个字没错。
+            from app.agent.skills.execution_trace import trace_is_infrastructure_only
+
+            before = len(failed_traces)
+            failed_traces = [t for t in failed_traces
+                             if not trace_is_infrastructure_only(t.get("tool_calls"))]
+            dropped = before - len(failed_traces)
+            if dropped:
+                # 剔除必须**说出来**:静默过滤会让"为什么这轮没产出改进候选"
+                # 变成一个查不下去的问题。
+                print(f"③ 已剔除 {dropped}/{before} 条纯基础设施故障轨迹"
+                      f"(连接/超时/服务不可用)——它们不构成 skill 需要改进的证据。"
+                      f"若这个数字很大,先去修依赖,不要指望自进化把它绕过去")
             if failed_traces:
                 improve_paths = run_improvements_from_traces(
                     client, model, failed_traces, samples,

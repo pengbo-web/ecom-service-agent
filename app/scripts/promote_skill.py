@@ -346,6 +346,44 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
         shutil.rmtree(snapshot, ignore_errors=True)
 
 
+#: 已处理完的候选归档到这两个目录(**不删**)。
+#: 保留而不是 `rm -rf`:被驳回的候选是下一轮改进的输入,已转正的候选是"线上这份
+#: 正文当时长什么样"的证据(配合 `.version` 才能对上账)。
+PROMOTED_DIR = "app/agent/skills/definitions/_promoted"
+REJECTED_DIR = "app/agent/skills/definitions/_rejected"
+
+
+def archive_candidate(skill_name: str, candidates_dir: str, dest_root: str,
+                      timestamp: str) -> dict:
+    """把处理完的候选从待审目录移进归档目录。
+
+    **为什么必须有这一步**:`promote()` 刻意只删自己的快照,不碰候选目录。CLI 下
+    这可以容忍(操作者知道自己刚做了什么),但候选目录同时是**产品里的"待审队列"**
+    ——已经转正的候选一直躺在队列里,会让运营分不清哪些还需要处理,而重复点一次
+    "转正"只会把版本号无意义地又推一格。
+
+    `promote()`/`reject` 两条路径都调它,**避免 CLI 与界面行为分叉**(本项目已多次
+    因为"一半组件做对、另一半漏了"出问题)。
+
+    归档失败**不算整体失败**:技能已经装上线了,这一步只是清队列。如实报出来,
+    让人手动收拾,而不是把一次成功的转正回报成失败。
+    """
+    if not is_safe_skill_name(skill_name):
+        return {"archived": False, "reason": f"非法 skill 名: {skill_name!r}"}
+    src = Path(candidates_dir) / skill_name
+    if not src.exists():
+        return {"archived": False, "reason": "候选目录不存在(可能已被处理)"}
+    try:
+        root = Path(dest_root)
+        root.mkdir(parents=True, exist_ok=True)
+        # 带时间戳:同一个 skill 可能被反复驳回/多次转正,不能互相覆盖
+        dest = root / f"{skill_name}-{timestamp}"
+        shutil.move(str(src), str(dest))
+        return {"archived": True, "archived_to": str(dest)}
+    except OSError as exc:
+        return {"archived": False, "reason": f"归档失败: {exc}"}
+
+
 def rollback(skill_name: str, definitions_dir: str, archive_dir: str) -> dict:
     """从最新备份恢复正式目录里的该 skill(劣化回滚)。"""
     if not is_safe_skill_name(skill_name):
@@ -439,6 +477,11 @@ def main() -> None:
                      gate_result=gate_result, force=args.force, timestamp=_now_stamp())
     print(result)
     if result["promoted"]:
+        # 清待审队列(候选目录同时是产品里的"待审队列",见 archive_candidate)。
+        # 归档失败不改变"已转正"这个结论,只如实提示。
+        arch = archive_candidate(args.skill_name, CANDIDATES_DIR, PROMOTED_DIR,
+                                 _now_stamp())
+        print(f"候选归档: {arch}")
         print("已生效。如需回滚: python -m app.scripts.promote_skill "
               f"{args.skill_name} --rollback")
 

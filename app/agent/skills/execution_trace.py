@@ -18,6 +18,56 @@ OUTCOME_TOOL_ERROR = "tool_error"
 OUTCOME_HANDOFF = "handoff"
 
 
+#: 判定"这次工具失败是基础设施问题"的关键词。命中即**不该**作为
+#: "这份 skill 写得不好"的证据喂给自改进。
+#:
+#: 大小写不敏感匹配英文串;中文串直接子串匹配。故意只列**明说自己是连接/超时/
+#: 服务不可用**的措辞——不做语义猜测。
+_INFRA_MARKERS = (
+    "无法连接", "连接失败", "服务暂时不可用", "服务不可用", "请稍后再试",
+    "connecterror", "connectionerror", "readtimeout", "connecttimeout",
+    "timeout", "timed out", "502", "503", "504",
+    "未登录或登录已过期", "返回异常",
+)
+
+
+def is_infrastructure_failure(error_text: str | None) -> bool:
+    """这条工具错误是不是基础设施造成的(而非 skill 流程写得不好)。
+
+    **为什么必须区分**:自进化第 ③ 步(`synthesize_skills.py`)会把 `tool_error`
+    轨迹当成"这个 skill 需要改进"的证据,交给 LLM 重写。而一次代理抖动、
+    Redis 掉线、上游超时产生的失败,与 skill 的流程文档毫无关系——
+    照单全收的结果是**基础设施坏了,系统去改一份没写错的流程文档**,
+    还要走灰度、占审批位。
+
+    实测撞到过:`track-order` 的实战成功率被打到 3%(success:1 · tool_error:37),
+    而根因是 MCP 连接被系统代理打断后 Agent 静默降级读了本地库——
+    skill 本身一个字都没错。
+
+    **这个判据只挡"明说自己是连接/超时/不可用"的失败。** 一个坏掉的依赖如果
+    返回的是一句像模像样的业务错误(比如上面那次的「未找到订单 ORD-xxx」),
+    在这一层与真实业务结果无法区分——那正是失败原因可见性(trace 记 error)
+    和数据源一致性必须先做对的原因,不能指望这里兜住。
+    """
+    if not error_text:
+        return False
+    text = str(error_text).lower()
+    return any(m in text or m in str(error_text) for m in _INFRA_MARKERS)
+
+
+def trace_is_infrastructure_only(tool_calls: list[dict] | None) -> bool:
+    """整条轨迹的失败**全部**由基础设施造成 → 不作为自改进样本。
+
+    要求"全部"而不是"存在":一条轨迹里既有连接失败、又有真实的流程问题时,
+    那个流程问题仍然值得学——宁可多留一条样本,也不要把真实缺陷一起滤掉。
+    """
+    failures = [c for c in (tool_calls or [])
+                if not c.get("ok") and not c.get("blocked")]
+    if not failures:
+        return False
+    return all(is_infrastructure_failure(c.get("error")) for c in failures)
+
+
 def _parse_result(result_str: str) -> tuple[bool, str | None]:
     """从工具返回的 JSON 串判定成败。
 

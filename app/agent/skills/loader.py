@@ -30,6 +30,11 @@ class SkillMeta:
     path: Path
     body: str = ""
     workflow: dict = field(default_factory=dict)   # G1 工作流声明(无则空,行为不变)
+    #: 这份 skill 服务于谁:"buyer"(默认,C 端客服)/ "seller"(B 端经营与营销)。
+    #: frontmatter 不写就是 buyer——既有三份 skill 都不带这个字段,默认值保证它们
+    #: 行为逐字节不变;新增卖家侧 skill 必须显式写 `actor: seller`,否则会漏进
+    #: 买家会话(见 app/agent/runtime_context.py 里那段说明)。
+    actor: str = "buyer"
     _body_loaded: bool = field(default=False, repr=False)
 
     def load_body(self) -> str:
@@ -98,9 +103,18 @@ class SkillManager:
 
             from app.agent.skills.workflow import parse_workflow
 
+            from app.agent.runtime_context import ACTOR_BUYER, ACTOR_SELLER
+
+            raw_actor = str(meta.get("actor") or ACTOR_BUYER).strip().lower()
+            # 非法值按 buyer 处理是**故意**的保守方向:写错一个字(比如 "Seller "
+            # 之外的 "b2b")时,后果是这份 skill 只在买家侧可见——那会被发现(店主
+            # 问它却说没有这个技能),而反过来"认不出就当卖家 skill"会让一份写歧了
+            # 的 skill 悄悄对买家隐身、对店主可见,错误方向相反但更难察觉。
+            actor = raw_actor if raw_actor in (ACTOR_BUYER, ACTOR_SELLER) else ACTOR_BUYER
+
             self._skills[name] = SkillMeta(
                 name=name, description=description, path=skill_file,
-                workflow=parse_workflow(meta),
+                workflow=parse_workflow(meta), actor=actor,
             )
 
     @property
@@ -111,16 +125,46 @@ class SkillManager:
     def skill_names(self) -> list[str]:
         return list(self._skills.keys())
 
-    def get_catalog(self) -> list[dict]:
-        """返回 skill catalog（name + description），用于注入 system prompt。"""
+    def _visible_skills(self, actor: str | None = None) -> list[SkillMeta]:
+        """当前 actor 能看见的 skill。
+
+        actor=None 时从 runtime_context 取(每轮由编排器刷新);取不到按 buyer
+        处理——保守默认是"少看见",不是"看见全部"。管理端要看全量时显式传
+        actor 或直接读 `_skills`(见 /api/admin/skills)。
+        """
+        from app.agent.runtime_context import get_current_actor
+
+        who = (actor or get_current_actor())
+        return [s for s in self._skills.values() if s.actor == who]
+
+    def get_catalog(self, actor: str | None = None) -> list[dict]:
+        """返回 skill catalog（name + description），用于注入 system prompt。
+
+        只含当前 actor 归属的 skill:卖家侧的营销/经营 skill 绝不出现在买家
+        会话里(反之亦然)——与买卖两侧工具子集不相交是同一条纪律,只是这条
+        以前漏在 skill 这一层。
+        """
         return [
             {"name": s.name, "description": s.description}
-            for s in self._skills.values()
+            for s in self._visible_skills(actor)
         ]
 
-    def build_catalog_prompt(self) -> str:
-        """构建注入 system prompt 的 skill catalog 文本。"""
-        if not self.enabled or not self._skills:
+    def get_catalog_all(self) -> list[dict]:
+        """**全部** skill 的 catalog,不按 actor 过滤。
+
+        只给管理面板用(`/api/admin/skills`):技能管理页要列出仓库里真实存在的
+        每一份 skill 并显示其归属,否则店主在页面上根本看不到自己那些卖家 skill。
+        它跑在 HTTP 请求上下文里、没有 actor,若走 `get_catalog()` 会退化成
+        "只看买家",页面就会凭空少几行。
+        **不要**在任何进 prompt 的路径上用它——那正是这次要堵的洞。
+        """
+        return [{"name": s.name, "description": s.description, "actor": s.actor}
+                for s in self._skills.values()]
+
+    def build_catalog_prompt(self, actor: str | None = None) -> str:
+        """构建注入 system prompt 的 skill catalog 文本(只列当前 actor 的 skill)。"""
+        visible = self._visible_skills(actor)
+        if not self.enabled or not visible:
             return ""
 
         lines = [
@@ -131,7 +175,7 @@ class SkillManager:
             "查物流需先确认订单再查轨迹），直接调用底层工具会漏掉步骤。首轮即应加载。\n",
         ]
 
-        for skill in self._skills.values():
+        for skill in visible:
             lines.append(f"- **{skill.name}**：{skill.description}")
 
         lines.append("\n### 技能使用方式")
@@ -302,9 +346,20 @@ class SkillManager:
         if not self.enabled:
             return {"success": False, "error": "技能系统未启用"}
 
+        from app.agent.runtime_context import get_current_actor
+
+        # 跨 actor 的加载与"不存在"回同一句话,且可用清单也只列当前 actor 的。
+        # 刻意不回"这是卖家技能,你无权加载"——那等于告诉买家侧会话"本店有一套
+        # 营销技能",技能名本身就是信息泄露(与 ensure_active 对别人的会话按
+        # 未知处理、不回 403 是同一条口径:零信息泄露)。
+        # 目录里不列 ≠ 点名要不到:模型可能从历史消息、注入文本里拿到技能名,
+        # 所以过滤必须落在这里,而不是只靠 build_catalog_prompt 少列一行。
+        who = get_current_actor()
         skill = self._skills.get(skill_name)
+        if skill is not None and skill.actor != who:
+            skill = None
         if not skill:
-            available = ", ".join(self._skills.keys()) or "无"
+            available = ", ".join(s.name for s in self._visible_skills(who)) or "无"
             return {
                 "success": False,
                 "error": f"未找到技能「{skill_name}」，可用技能：{available}",

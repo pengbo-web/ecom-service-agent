@@ -44,6 +44,21 @@ CANARY_PERCENT = 50
 CANARY_MIN_SAMPLES = 10
 CANARY_MAX_DROP = 0.1
 
+#: A/B 的**数据可信下限**。两臂成功率都低于它时不做转正判定(判 wait)。
+#:
+#: 补的是 A/B 判据的一个结构性盲区:它只问"有没有比现行版更差",从不问
+#: "够不够好"。当现行版的成功率被**基础设施故障**压塌时,
+#: `canary_rate < live_rate - max_drop` 会变成一个永远不成立的条件——
+#: live=0.03 时它等价于 `canary_rate < -0.07`,于是**任何候选都自动转正**。
+#:
+#: 实测撞到过:`track-order` 因为 MCP 数据源被代理打断,实战成功率 3%
+#: (success:1 · tool_error:37),而候选池里正好躺着一份它的 `low/canary_ab`
+#: 改进候选——那份候选本可以在这种基线下无条件上线。
+#:
+#: 取 0.3 而不是 medium 档的 0.6:这里要表达的不是"达到可用水准",而是
+#: "两臂都这么低,数据本身可疑,先去查依赖"。定得太高会拦下本来正常的迭代。
+AB_SANITY_FLOOR = 0.3
+
 # 绝对成功率看门狗参数(medium 档转正后)
 ABSOLUTE_MIN_SAMPLES = 30
 ABSOLUTE_MIN_RATE = 0.6

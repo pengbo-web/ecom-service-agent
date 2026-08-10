@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { distillSkillFromDoc, getSkillsOverview, uploadSkillBundle,
-  type SkillDistillResult, type SkillUploadResult, type SkillsOverview } from "@/lib/api";
+  promoteSkill, rejectSkill, rollbackSkill,
+  type SkillCandidate, type SkillDistillResult, type SkillUploadResult,
+  type SkillsOverview } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RotateCcw } from "lucide-react";
@@ -36,6 +38,12 @@ export function SkillsView() {
   // (反之亦然),操作者会以为自己触发了一个根本没发生的动作。
   const [upBusy, setUpBusy] = useState(false);
   const [dsBusy, setDsBusy] = useState(false);
+  // 转正/驳回/回滚:**按 skill 名分别记 busy 与结果**。用单个标量会让同时操作
+  // 两个候选时互相覆盖——后完成的那次把标量清空,会连带把还在途中的那一行按钮
+  // 重新点亮,等于放行一次仍在进行的转正(与 GrowthPanel 的 busyIds 同一道理)。
+  const [actBusy, setActBusy] = useState<Set<string>>(new Set());
+  const [actErr, setActErr] = useState<Record<string, string>>({});
+  const [actOk, setActOk] = useState<Record<string, string>>({});
   // 刷新失败时下方仍是上一次成功拉取的旧数据。操作者正是靠这个面板判断某个
   // high 风险候选要不要处理,所以必须显式标出"这是过期数据",不能默默照常渲染。
   const [stale, setStale] = useState(false);
@@ -90,6 +98,74 @@ export function SkillsView() {
   async function load() {
     try { setData(await getSkillsOverview()); setErr(""); setStale(false); }
     catch (e) { setErr(String(e)); setStale(true); }
+  }
+
+  function setRowBusy(name: string, busy: boolean) {
+    setActBusy((prev) => {
+      const next = new Set(prev);
+      if (busy) next.add(name); else next.delete(name);
+      return next;
+    });
+  }
+
+  /** 跑一次行操作,把成败按 skill 名记在该行,不冒泡成页面级错误。 */
+  async function runAct(name: string, fn: () => Promise<string>) {
+    setRowBusy(name, true);
+    setActErr((m) => { const n = { ...m }; delete n[name]; return n; });
+    setActOk((m) => { const n = { ...m }; delete n[name]; return n; });
+    try {
+      const msg = await fn();
+      setActOk((m) => ({ ...m, [name]: msg }));
+      await load();
+    } catch (e) {
+      setActErr((m) => ({ ...m, [name]: String(e) }));
+    } finally {
+      setRowBusy(name, false);
+    }
+  }
+
+  // 转正会把这份正文**立刻**装到线上,客服下一轮就按它说话——必须二次确认。
+  // 高危档要在确认文案里说清风险来源,而不是只说"确认吗"。
+  async function onPromote(c: SkillCandidate) {
+    const isHigh = c.risk === "high" || c.policy === "manual";
+    const tip = isHigh
+      ? `【高危候选】${c.name}\n\n风险档：${c.risk ?? "未判定"}（放行策略：${c.policy ?? "未知"}）\n`
+        + "高危通常意味着正文里含动钱/承诺类指令，转正后客服会立刻按它执行。\n\n"
+      : `${c.name}\n\n`;
+    // 门禁默认不跑(会真跑两轮评测、一两分钟且花钱),所以必须把"未经门禁"这件事
+    // 摆在人点下去之前,而不是让后端拒绝之后再解释。
+    if (!window.confirm(
+      tip + "转正将立即上线这份技能正文。\n"
+      + "注意：为避免长时间等待，本次**不跑评测门禁**（门禁会真跑两轮评测、耗时数分钟并消耗 token）。\n"
+      + "确认在未经门禁的前提下放行？"
+    )) return;
+    await runAct(c.name, async () => {
+      // force=true 才能在未跑门禁时放行(后端对 gate=None 是 fail-closed 的)。
+      // 这不是"绕过安全检查":校验、风险判档、备份全都照走,force 只放行评测门禁,
+      // 而操作者刚刚在确认框里明确接受了这一点。
+      const r = await promoteSkill(c.name, { force: true });
+      return `已上线${r.risk ? `（风险档 ${r.risk}）` : ""}`
+        + `${r.backup ? `，旧版本已备份到 ${r.backup}` : ""}`;
+    });
+  }
+
+  async function onReject(c: SkillCandidate) {
+    // 驳回不上线任何东西,后果也可逆(候选归档进 _rejected/,不删),所以不做
+    // 二次确认——与 GrowthPanel 里"批准要确认、驳回不用"同一条取舍。
+    await runAct(c.name, async () => {
+      const r = await rejectSkill(c.name);
+      return `已驳回，候选归档到 ${r.archived_to}`;
+    });
+  }
+
+  async function onRollback(name: string) {
+    if (!window.confirm(
+      `${name}\n\n回滚会把线上技能恢复到最近一次备份（即上一次转正前的版本）。\n确认回滚？`
+    )) return;
+    await runAct(name, async () => {
+      await rollbackSkill(name);
+      return "已回滚到上一版";
+    });
   }
 
   // 手动刷新要顺带清掉上一轮的上传/提炼结论:否则一条来自上次上传的红色
@@ -148,6 +224,24 @@ export function SkillsView() {
                     )}
                   </div>
                   <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{s.description}</div>
+                  {/* 回滚是转正的对偶动作:没有它,「一键转正」就是一个**没有退路**
+                      的按钮——而技能正文直接决定客服说什么,上线后发现不对必须能
+                      立刻退回去,不该要求运营去登服务器。 */}
+                  <div className="mt-2 flex items-center gap-2">
+                    <Button size="sm" variant="ghost" disabled={actBusy.has(s.name)}
+                            onClick={() => onRollback(s.name)}
+                            data-testid={`rollback-${s.name}`}>
+                      {actBusy.has(s.name) ? "处理中…" : "回滚到上一版"}
+                    </Button>
+                  </div>
+                  {actErr[s.name] && (
+                    <div role="alert" className="mt-2 text-xs text-destructive"
+                         data-testid={`act-err-${s.name}`}>⚠️ {actErr[s.name]}</div>
+                  )}
+                  {actOk[s.name] && (
+                    <div className="mt-2 text-xs text-emerald-700 dark:text-emerald-400"
+                         data-testid={`act-ok-${s.name}`}>✅ {actOk[s.name]}</div>
+                  )}
                 </Card>
               );
             })}
@@ -182,6 +276,42 @@ export function SkillsView() {
                   <div className="mt-1 text-xs text-destructive">{c.errors.join("；")}</div>
                 )}
                 <div className="mt-1 font-mono text-[11px] text-muted-foreground">{c.path}</div>
+
+                {/* 转正/驳回:改造前这两个动作只能登进服务器敲 CLI,7 步自进化闭环
+                    因此断在最后一环。校验未过的候选不给转正按钮——转正会当场被
+                    后端校验拦下,给一个必然失败的按钮只是让人白点一次。 */}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {c.valid && (
+                    <Button size="sm" disabled={actBusy.has(c.name)}
+                            onClick={() => onPromote(c)}
+                            data-testid={`promote-${c.name}`}>
+                      {actBusy.has(c.name) ? "处理中…" : "转正上线"}
+                    </Button>
+                  )}
+                  <Button size="sm" variant="outline" disabled={actBusy.has(c.name)}
+                          onClick={() => onReject(c)}
+                          data-testid={`reject-${c.name}`}>
+                    驳回
+                  </Button>
+                  {c.policy && (
+                    <span className="text-[11px] text-muted-foreground">
+                      放行策略：{c.policy}
+                    </span>
+                  )}
+                </div>
+                {actErr[c.name] && (
+                  <div role="alert" className="mt-2 rounded-md border border-destructive
+                                               bg-destructive/10 p-2 text-xs text-destructive"
+                       data-testid={`act-err-${c.name}`}>
+                    ⚠️ {actErr[c.name]}
+                  </div>
+                )}
+                {actOk[c.name] && (
+                  <div className="mt-2 text-xs text-emerald-700 dark:text-emerald-400"
+                       data-testid={`act-ok-${c.name}`}>
+                    ✅ {actOk[c.name]}
+                  </div>
+                )}
               </Card>
             ))}
             {data && data.candidates.length === 0 && (
@@ -275,9 +405,37 @@ export function SkillsView() {
             {dsResult && (dsResult.created ? (
               <div className="text-xs text-emerald-600 dark:text-emerald-400">
                 ✅ 已提炼出候选 <b>{dsResult.name}</b> · 风险 {dsResult.risk} · 放行 {dsResult.policy}
+                {dsResult.attempts === 2 && (
+                  <span className="ml-1 text-muted-foreground">
+                    （首次产物引用了本店没有的工具，已自动修正后重新生成）
+                  </span>
+                )}
               </div>
             ) : (
-              <div className="text-xs text-destructive">❌ {dsResult.errors.join("；")}</div>
+              // 失败要**可行动**。改造前后端只回一句三选一的「frontmatter 不全 /
+              // 工具名不实 / 名字非法」,店主既不知道是哪一种也不知道该改什么;
+              // 而实测真因往往只是资料里写了一个本店没有的工具名。
+              <div className="text-xs" data-testid="distill-error">
+                <div className="text-destructive">❌ {dsResult.errors.join("；")}</div>
+                {(dsResult.unknown_tools?.length ?? 0) > 0
+                  && (dsResult.available_tools?.length ?? 0) > 0 && (
+                  <details className="mt-1">
+                    <summary className="cursor-pointer text-muted-foreground">
+                      查看本店可用工具（{dsResult.available_tools!.length} 个）
+                    </summary>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {dsResult.available_tools!.map((t) => (
+                        <code key={t} className="rounded bg-muted px-1 py-0.5 text-[10px]">{t}</code>
+                      ))}
+                    </div>
+                  </details>
+                )}
+                {dsResult.attempts === 2 && (
+                  <div className="mt-1 text-muted-foreground">
+                    已自动把错误原因回喂模型重试过一次，仍未通过——请按上面的提示改一下资料再试。
+                  </div>
+                )}
+              </div>
             ))}
           </Card>
         </section>

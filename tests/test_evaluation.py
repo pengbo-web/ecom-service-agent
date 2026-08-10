@@ -11,12 +11,14 @@
 用法：python3 tests/test_evaluation.py
 """
 
+import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+import pytest  # noqa: E402
 from openai import OpenAI  # noqa: E402
 
 from app.config.settings import settings  # noqa: E402
@@ -27,6 +29,17 @@ from app.evaluation.sandbox import Sandbox  # noqa: E402
 from app.evaluation.trace import ToolObservation  # noqa: E402
 
 DATASET = ROOT / "app" / "evaluation" / "cases.json"
+
+#: 本文件里标注「需要 API」的三个用例真的会打模型端点(沙箱重跑用例、LLM judge、
+#: 双层评分)。默认跳过,与 tests/test_agent.py 等遗留端到端用例同一惯例:
+#:     RUN_LIVE_LLM=1 pytest tests/test_evaluation.py -v
+#:
+#: 不挂门的代价是实打实的:端点抖动时 `test_judges` 会带着重试一路超时,曾把
+#: 一次本该 4 分钟的全量拖到 **4 小时 54 分**,而且失败原因(APITimeoutError)
+#: 与被测代码毫无关系——一次正常的回归被外部服务判了死刑。
+_live = pytest.mark.skipif(
+    not os.getenv("RUN_LIVE_LLM"),
+    reason="真调模型端点的评估用例,需显式开启:RUN_LIVE_LLM=1")
 
 
 def _ok(msg: str):
@@ -112,6 +125,7 @@ def test_metrics_rule_based():
 
 
 # ---------- 测试 3：沙箱采集 ----------
+@_live
 def test_sandbox_trace():
     print("\n[3/6] 沙箱采集测试（E2E，需要 API）")
     sandbox = Sandbox(mode="single")
@@ -159,7 +173,11 @@ def test_sandbox_isolation():
     else:
         _fail("session 路径未隔离")
 
-    agent = sandbox._build_agent(p1)
+    # 传 patches 并在 finally 里还原:_build_agent 改的是**进程级** settings 单例,
+    # 不还原就会把 memory_enabled=False 泄漏给本进程后续的每一个测试(这正是
+    # tests/test_memory_tool_isolation.py 曾经在全量跑里失败、单独跑却通过的原因)。
+    patches: list = []
+    agent = sandbox._build_agent(p1, patches)
     try:
         if agent.memory_manager.memory_enabled is False:
             _ok("沙箱构建的 Agent 已关闭记忆（不污染评分）")
@@ -167,9 +185,12 @@ def test_sandbox_isolation():
             _fail("记忆未关闭，会读 default.json 污染评分")
     finally:
         sandbox._close_tool_managers(agent)
+        for obj, attr, original in patches:
+            setattr(obj, attr, original)
 
 
 # ---------- 测试 5：LLM judge ----------
+@_live
 def test_judges():
     print("\n[5/6] LLM judge 测试（需要 API）")
     client = _client()
@@ -209,6 +230,7 @@ def test_judges():
 
 
 # ---------- 测试 6：Evaluator 双层 ----------
+@_live
 def test_evaluator_two_tier():
     print("\n[6/6] Evaluator 双层评分测试（E2E，需要 API）")
     cases = [

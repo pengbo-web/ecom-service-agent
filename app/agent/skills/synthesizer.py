@@ -24,9 +24,13 @@ H3.5 复用本文件全部函数。
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
+from app.agent.skills.clustering import cluster_texts
 from app.agent.skills.validator import is_safe_skill_name, known_tool_names, validate_candidate
+
+logger = logging.getLogger(__name__)
 
 # 粗聚类：会话首条 user 消息命中的意图关键词组（朴素规则，按顺序匹配，先中先得）
 INTENT_KEYWORDS: list[tuple[str, list[str]]] = [
@@ -108,16 +112,46 @@ def _classify(text: str) -> str:
 
 
 def group_samples(archived: list[dict]) -> dict[str, list[dict]]:
-    """按首条 user 消息命中的意图关键词组粗聚类归档会话。
+    """把归档会话按**语义**聚类;embedding 不可用时回落关键词粗聚类。
 
     每条 archived 样本须含 `messages`（已是 list——调用方负责 json.loads）。
+
+    为什么从关键词换成语义(见 app/agent/skills/clustering.py 的完整理由):
+    原来那张 `INTENT_KEYWORDS` 只有四个桶、先中先得、只看首条 user 消息。测试
+    阶段样本少时看不出问题,**生产上"鞋子穿着挤脚想换大一码"这类根本落不进
+    任何桶,或者落错桶**——而落桶结果直接决定合成出什么 skill,输入端的失真
+    会一路传到产出。
+
+    **关键词聚类保留为兜底,不是删掉**:embedding 端点故障 / 维度不匹配 /
+    没配 key 时仍能跑完整条合成流程。自进化是离线增强,不该因为向量这一步挂了
+    就整个跑不动。回落时记 warning,不静默——否则"为什么这次聚类结果变差了"
+    会查不出来。
     """
-    groups: dict[str, list[dict]] = {}
-    for item in archived:
-        messages = item.get("messages") or []
-        label = _classify(_first_user_message(messages))
-        groups.setdefault(label, []).append(item)
-    return groups
+    if not archived:
+        return {}
+
+    texts = [_first_user_message(item.get("messages") or []) for item in archived]
+    clusters = cluster_texts(texts)
+    if clusters is None:
+        logger.warning("语义聚类不可用,本次回落关键词聚类(合成质量可能下降)")
+        groups: dict[str, list[dict]] = {}
+        for item in archived:
+            label = _classify(_first_user_message(item.get("messages") or []))
+            groups.setdefault(label, []).append(item)
+        return groups
+
+    # 簇标签仍用关键词分类器给一个**可读**的名字(它决定产出文件名的一部分),
+    # 但**分组本身已由语义决定**——关键词在这里只负责命名,不再负责归类。
+    # 同一关键词命中多个语义簇时加序号,避免两个不同意图的簇撞同一个名字。
+    out: dict[str, list[dict]] = {}
+    used: dict[str, int] = {}
+    for idx in clusters:
+        members = [archived[i] for i in idx]
+        base = _classify(texts[idx[0]])
+        used[base] = used.get(base, 0) + 1
+        label = base if used[base] == 1 else f"{base}-{used[base]}"
+        out[label] = members
+    return out
 
 
 def _truncate_sample(sample: dict) -> dict:

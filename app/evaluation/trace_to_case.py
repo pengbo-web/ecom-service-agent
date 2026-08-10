@@ -20,8 +20,14 @@ def collect_reflow_cases(store, limit: int = 200, db=None) -> list:
     (session_archive 表)两处,靠 trace 里的 session_id 关联。传 db 时,若该
     session 归档里有人工坐席回复(HUMAN_AGENT_INTENT),连带抽成
     expected_keywords;不传 db 则完全保持原行为(不查归档,不设关键词)。
+
+    **按用户输入去重。** 改造前不去重,实测一次回流产出 25 条候选里,同一句
+    「我买的洗衣机坏了想退货,运费需要我自己出吗」重复了 5 条以上——因为线上
+    确实被反复问了很多次。一个回归集里放 5 条一模一样的用例:每次评估都为它
+    们各付一次 token、一个偶发行为按 5 倍权重扭曲通过率,而覆盖面一点没增加。
     """
     cases = []
+    seen: dict[str, int] = {}          # 归一化输入 → 在 cases 里的下标
     for row in store.recent_traces(limit=limit):
         full = store.get_trace(row["trace_id"])
         if not full or not is_problem_trace(full):
@@ -33,8 +39,30 @@ def collect_reflow_cases(store, limit: int = 200, db=None) -> list:
                 archived = db.get_archived_session(session_id)
                 if archived:
                     human_reply = extract_human_reply(archived)
-        cases.append(trace_to_case(full, human_reply=human_reply))
+        case = trace_to_case(full, human_reply=human_reply)
+        key = " ".join((full.get("user_input") or "").split())   # 折叠空白后比对
+        if not key:
+            cases.append(case)         # 空输入无从去重,原样保留
+            continue
+        if key not in seen:
+            seen[key] = len(cases)
+            cases.append(case)
+        elif _richer(case, cases[seen[key]]):
+            # 同一句话的多条 trace 里保留**信息量最大**的那条:带人工回复关键词、
+            # 带期望工具的用例断言更强。先到先得会让一条什么都没断言的空壳
+            # 挤掉后面那条真正有价值的。
+            cases[seen[key]] = case
     return cases
+
+
+def _richer(a: dict, b: dict) -> bool:
+    """a 是否比 b 更值得留在回归集里(断言更多 = 更强)。"""
+    def score(c: dict) -> int:
+        return (len(c.get("expected_keywords") or []) * 2
+                + len(c.get("expected_tools") or [])
+                + (1 if c.get("expected_intent") else 0)
+                + (1 if c.get("expected_requires_human") else 0))
+    return score(a) > score(b)
 
 
 def trace_to_case(trace: dict, human_reply: str = "") -> dict:

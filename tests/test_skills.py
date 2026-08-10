@@ -12,11 +12,21 @@
 用法：python3 tests/test_skills.py
 """
 
+import os
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+#: 本文件只有 test_agent_integration 真调模型(其余六个都是纯逻辑),所以按用例挂,
+#: 不整份文件跳。惯例同 tests/test_mcp.py —— 显式 env opt-in。
+_live = pytest.mark.skipif(
+    not os.getenv("RUN_LIVE_LLM"),
+    reason="真调 LLM 的端到端用例,需显式开启:RUN_LIVE_LLM=1",
+)
 
 from app.agent.skills import SkillManager  # noqa: E402
 from app.agent.tools.skill_tool import load_skill, set_skill_manager  # noqa: E402
@@ -174,6 +184,7 @@ def test_lazy_loading():
 
 
 # ---------- 测试 7：Agent 集成 ----------
+@_live
 def test_agent_integration():
     print("\n[7/7] Agent 集成测试（E2E，需要 API 调用）")
     _clean()

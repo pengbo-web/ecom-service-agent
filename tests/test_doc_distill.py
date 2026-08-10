@@ -63,7 +63,7 @@ def test_distill_writes_candidate(tmp_path):
     client = FakeClient([GOOD_SKILL])
     out = distill_from_doc(client, "test-model", DOC, str(tmp_path))
 
-    assert out is not None
+    assert out["ok"] is True
     assert out["name"] == "sop-return"
     assert Path(out["path"]).read_text(encoding="utf-8") == GOOD_SKILL
 
@@ -75,15 +75,51 @@ def test_distill_injects_real_tool_list(tmp_path):
 
 
 def test_distill_rejects_unknown_tool(tmp_path):
+    """未知工具不写盘,且**失败原因要带出来**。
+
+    改造前失败一律 return None,校验报告连同 unknown_tools/errors 被整个丢掉,
+    端点只能回一句三选一的「frontmatter 不全 / 工具名不实 / 名字非法」——店主既
+    不知道是哪一种,也不知道该改什么。而实测真因往往只是资料里写了一个本店没有的
+    工具名(SOP 里的"走人工工单"被模型写成 escalate_to_human),产物其余部分完全正确。
+
+    repair=False:这条测的是"失败契约",修复重试单独测。
+    """
     client = FakeClient([BAD_TOOL_SKILL])
-    assert distill_from_doc(client, "test-model", DOC, str(tmp_path)) is None
+    out = distill_from_doc(client, "test-model", DOC, str(tmp_path), repair=False)
+    assert out is not None and out["ok"] is False
+    assert out["unknown_tools"] == ["order_lookup"]
+    assert out["available_tools"], "要把可用工具清单带给操作者"
     assert not (tmp_path / "sop-return").exists()
+
+
+def test_distill_retries_once_with_the_exact_reason(tmp_path):
+    """第一次引用了未知工具 → 带精确原因重试一次 → 第二次通过。
+
+    95% 正确的产物因一个工具名被整份丢弃,店主付的那次 LLM 费用也白花;
+    把"这个工具不存在,可用的是这些"回喂给模型再来一次,极可能就过了。
+    """
+    client = FakeClient([BAD_TOOL_SKILL, GOOD_SKILL])
+    out = distill_from_doc(client, "test-model", DOC, str(tmp_path))
+    assert out["ok"] is True and out["name"] == "sop-return"
+    assert len(client.calls) == 2, "只重试一次"
+    repair_msg = client.calls[1]["messages"][-1]["content"]
+    assert "order_lookup" in repair_msg, "修复提示要点名那个不存在的工具"
+    assert "不要发明工具名" in repair_msg
+
+
+def test_distill_gives_up_after_one_retry(tmp_path):
+    """第二次仍失败就如实报错,不做无限循环烧钱。"""
+    client = FakeClient([BAD_TOOL_SKILL, BAD_TOOL_SKILL])
+    out = distill_from_doc(client, "test-model", DOC, str(tmp_path))
+    assert out["ok"] is False and out["attempts"] == 2
+    assert len(client.calls) == 2
 
 
 def test_distill_rejects_unsafe_name(tmp_path):
     """资料可被注入去诱导越权名字:必须在写盘前挡住。"""
-    client = FakeClient([TRAVERSAL_SKILL])
-    assert distill_from_doc(client, "test-model", DOC, str(tmp_path)) is None
+    client = FakeClient([TRAVERSAL_SKILL, TRAVERSAL_SKILL])
+    out = distill_from_doc(client, "test-model", DOC, str(tmp_path))
+    assert out["ok"] is False
     assert not (tmp_path.parent / "process-return").exists()
 
 
@@ -97,7 +133,7 @@ def test_distill_accepts_injected_known_tools(tmp_path):
     client = FakeClient([BAD_TOOL_SKILL])
     out = distill_from_doc(client, "test-model", DOC, str(tmp_path),
                            known_tools={"order_lookup"})
-    assert out is not None
+    assert out["ok"] is True
 
 
 # ---------- 端点 ----------
@@ -124,7 +160,9 @@ def _fake_distill(client, model, doc_text, out_dir, **kwargs):
     skill_dir = Path(out_dir) / "sop-return"
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(GOOD_SKILL, encoding="utf-8")
-    return {"name": "sop-return", "path": str(skill_dir / "SKILL.md"),
+    # `ok` 是新契约:失败时返回 {"ok": False, ...} 带上精确原因,而不是 None
+    # (旧行为把 unknown_tools/errors 整个丢掉,端点只能回一句三选一的笼统话)。
+    return {"ok": True, "name": "sop-return", "path": str(skill_dir / "SKILL.md"),
             "content": GOOD_SKILL}
 
 
@@ -235,7 +273,7 @@ def _fake_distill_capturing_client(captured: dict):
         skill_dir = Path(out_dir) / "sop-return"
         skill_dir.mkdir(parents=True, exist_ok=True)
         (skill_dir / "SKILL.md").write_text(GOOD_SKILL, encoding="utf-8")
-        return {"name": "sop-return", "path": str(skill_dir / "SKILL.md"),
+        return {"ok": True, "name": "sop-return", "path": str(skill_dir / "SKILL.md"),
                 "content": GOOD_SKILL}
     return _inner
 

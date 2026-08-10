@@ -70,38 +70,96 @@ def is_doc_truncated(doc_text: str) -> bool:
     return len((doc_text or "").strip()) > MAX_DOC_CHARS
 
 
+def build_repair_prompt(errors: list[str], unknown_tools: list[str],
+                        known: set[str], previous: str) -> str:
+    """把校验失败的**精确原因**回喂给模型,要求它改正后重出一份。
+
+    存在的理由:实测一次真实蒸馏,LLM 产出的 SKILL.md 结构完整、步骤正确、
+    `query_order` 也用对了,唯一问题是引用了 `escalate_to_human`——而这个工具在
+    本项目里**根本不存在**(转人工由 HITL 层按置信度自动判定,不是 Agent 可调工具)。
+    一个 95% 正确的产物因一个工具名被整份丢弃,店主付的那次 LLM 费用也白花。
+
+    为什么这类错误特别容易发生:店主的 SOP 里会写他们自己系统的术语("走人工工单"
+    "转专员"),模型倾向于跟着**文档**走而不是跟着工具清单走。所以修复提示里要
+    明确"文档里提到的这些不是本店工具",而不是只重复一遍工具清单。
+    """
+    parts = ["你上一次的产出没有通过校验,请修正后**重新输出完整的 SKILL.md**。", ""]
+    if unknown_tools:
+        parts += [
+            f"❌ 这些工具名不存在:{', '.join(unknown_tools)}",
+            "  资料里可能提到了店铺自己系统的术语(如『转人工工单』『转专员』),"
+            "但它们不是本 Agent 可调用的工具。",
+            "  处理办法:改用下面清单里语义最接近的工具;若没有对应工具,"
+            "就把那一步改写成**不依赖工具的话术指引**(例如『告知买家将由人工跟进』),"
+            "不要发明工具名。",
+            "",
+        ]
+    other = [e for e in (errors or []) if "未知工具" not in e]
+    if other:
+        parts += ["❌ 其它问题:"] + [f"  - {e}" for e in other] + [""]
+    parts += [build_tool_hint(known), "",
+              "上一次的产出(供你对照修改):", "---", previous.strip()[:4000]]
+    return "\n".join(parts)
+
+
 def distill_from_doc(client, model: str, doc_text: str, out_dir: str,
-                     known_tools: set[str] | None = None) -> dict | None:
+                     known_tools: set[str] | None = None,
+                     repair: bool = True) -> dict | None:
     """从资料正文蒸馏一个候选技能,写入 out_dir/<name>/SKILL.md。
 
     - 空/纯空白文档 → None,**不调 LLM**(不花钱);
-    - 坏 frontmatter / 引用未知工具 / 名字不是安全路径段 → None,不写盘(fail-soft);
-    - 成功返回 {"name", "path", "content"}。
+    - 校验不过 → 带上精确原因重试**一次**(见 `build_repair_prompt`);仍不过则
+      返回 `{"ok": False, ...}`,不写盘(fail-soft);
+    - 成功返回 `{"ok": True, "name", "path", "content"}`。
+
+    **失败时返回结构而不是 None**:改造前是 `if not report["valid"]: return None`,
+    校验报告连同 `unknown_tools`/`errors` 被整个丢掉,端点只能报一句三选一的
+    「frontmatter 不全 / 工具名不真实 / 名字非法」。店主看到那句话既不知道是哪一种,
+    也不知道该改什么——而真因往往只是资料里写了一个本店没有的工具名。
+
+    只重试**一次**:不做无限循环烧钱。第二次仍失败就如实报错,把原因交给人。
     """
     text = (doc_text or "").strip()
     if not text:
         return None
 
     known = known_tools if known_tools is not None else known_tool_names()
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": DOC_SYNTH_SYSTEM_PROMPT + build_tool_hint(known)},
+    system = DOC_SYNTH_SYSTEM_PROMPT + build_tool_hint(known)
+    messages = [{"role": "system", "content": system},
+                {"role": "user", "content": build_doc_prompt(text)}]
+
+    content = ""
+    report: dict = {}
+    attempt = 1
+    for attempt in (1, 2):
+        response = client.chat.completions.create(model=model, messages=messages)
+        content = response.choices[0].message.content or ""
+        report = validate_candidate(content, known=known)
+        if report["valid"] and is_safe_skill_name(report["name"]):
+            break
+        if attempt == 2 or not repair:
+            # 名字不安全时**不要把它回显给模型**:名字来自 LLM 产物,而资料可被
+            # 注入去诱导越权名字;把它塞回 prompt 只会让下一轮继续围着它转。
+            return {"ok": False, "name": report.get("name"),
+                    "errors": list(report.get("errors") or []),
+                    "unknown_tools": list(report.get("unknown_tools") or []),
+                    "available_tools": sorted(known),
+                    "attempts": attempt, "content": content}
+        messages = [
+            {"role": "system", "content": system},
             {"role": "user", "content": build_doc_prompt(text)},
-        ],
-    )
-    content = response.choices[0].message.content or ""
+            {"role": "assistant", "content": content},
+            {"role": "user", "content": build_repair_prompt(
+                list(report.get("errors") or []),
+                list(report.get("unknown_tools") or []), known, content)},
+        ]
 
-    report = validate_candidate(content, known=known)
-    if not report["valid"]:
-        return None
     name = report["name"]
-    # 兜底:写盘前再确认目录名安全(名字来自 LLM 产物,而资料可被注入去诱导越权名字)
-    if not is_safe_skill_name(name):
-        return None
-
     skill_dir = Path(out_dir) / name
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_file = skill_dir / "SKILL.md"
     skill_file.write_text(content, encoding="utf-8")
-    return {"name": name, "path": str(skill_file), "content": content}
+    # 带上 attempts:成功但 attempts==2 意味着"第一次产物有问题、已自动修正",
+    # 值得告诉操作者(他的资料里有个词对不上,下次写 SOP 可以避开)。
+    return {"ok": True, "name": name, "path": str(skill_file),
+            "content": content, "attempts": attempt}

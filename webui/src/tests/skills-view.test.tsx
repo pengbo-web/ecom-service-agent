@@ -169,3 +169,94 @@ describe("SkillsView 刷新失败与卡片独立状态", () => {
     await waitFor(() => expect(screen.queryByText(/LLM 产物未通过校验/)).toBeNull());
   });
 });
+
+// 转正 / 驳回 / 回滚:自进化闭环的最后一环。
+// 改造前这三个动作只能登进服务器敲 CLI,界面上 7 个候选无从处理。
+describe("SkillsView 候选生命周期", () => {
+  function stub(onPost?: (url: string) => void, fail?: string) {
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (init?.method === "POST") {
+        onPost?.(u);
+        if (fail) return { ok: false, status: 400, json: async () => ({ detail: fail }) };
+        return { ok: true, json: async () => ({
+          success: true, promoted: true, rejected: true, risk: "low",
+          backup: "app/.../_archive/x", archived_to: "app/.../_rejected/x-ts" }) };
+      }
+      return { ok: true, json: async () => OVERVIEW };
+    }));
+  }
+
+  beforeEach(() => { localStorage.clear(); });
+
+  it("校验通过的候选给转正按钮,校验未过的不给", async () => {
+    // 转正会当场被后端校验拦下,给一个必然失败的按钮只是让人白点一次
+    stub();
+    render(<SkillsView />);
+    expect(await screen.findByTestId("promote-track-order")).toBeInTheDocument();
+    expect(screen.queryByTestId("promote-unknown-one")).toBeNull();
+    // 但驳回按钮对所有候选都该有——校验未过的候选正是最该被清出队列的
+    expect(screen.getByTestId("reject-unknown-one")).toBeInTheDocument();
+  });
+
+  it("转正要二次确认,且确认文案说明未跑门禁", async () => {
+    // 门禁会真跑两轮评测、耗时数分钟并花钱,不能默认同步等;
+    // 所以必须把"未经门禁"摆在人点下去之前,而不是等后端拒绝再解释
+    const spy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const posted: string[] = [];
+    stub((u) => posted.push(u));
+    render(<SkillsView />);
+    fireEvent.click(await screen.findByTestId("promote-track-order"));
+    expect(spy.mock.calls[0][0]).toMatch(/不跑评测门禁/);
+    expect(posted).toHaveLength(0);   // 点了取消就不该发请求
+    spy.mockRestore();
+  });
+
+  it("高危候选的确认文案要说清风险来源", async () => {
+    const spy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    stub();
+    render(<SkillsView />);
+    fireEvent.click(await screen.findByTestId("promote-money-one"));
+    expect(spy.mock.calls[0][0]).toMatch(/高危/);
+    expect(spy.mock.calls[0][0]).toMatch(/动钱|承诺/);
+    spy.mockRestore();
+  });
+
+  it("确认后打到转正端点", async () => {
+    const spy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const posted: string[] = [];
+    stub((u) => posted.push(u));
+    render(<SkillsView />);
+    fireEvent.click(await screen.findByTestId("promote-track-order"));
+    await waitFor(() => expect(posted.some((u) =>
+      u.includes("/api/admin/skills/track-order/promote"))).toBe(true));
+    spy.mockRestore();
+  });
+
+  it("驳回不做二次确认(不上线任何东西,且候选是归档不是删除)", async () => {
+    const spy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const posted: string[] = [];
+    stub((u) => posted.push(u));
+    render(<SkillsView />);
+    fireEvent.click(await screen.findByTestId("reject-track-order"));
+    await waitFor(() => expect(posted.some((u) => u.includes("/reject"))).toBe(true));
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("现行技能有回滚入口(转正的对偶动作)", async () => {
+    stub();
+    render(<SkillsView />);
+    expect(await screen.findByTestId("rollback-process-return")).toBeInTheDocument();
+  });
+
+  it("失败原因记在该行,不冒泡成页面级错误", async () => {
+    const spy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    stub(undefined, "缺少门禁结果,拒绝转正");
+    render(<SkillsView />);
+    fireEvent.click(await screen.findByTestId("promote-track-order"));
+    const err = await screen.findByTestId("act-err-track-order");
+    expect(err.textContent).toMatch(/缺少门禁结果/);
+    spy.mockRestore();
+  });
+});

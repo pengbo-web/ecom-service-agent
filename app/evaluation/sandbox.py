@@ -51,11 +51,32 @@ class Sandbox:
             allowed |= set(cfg["tools"])
         return allowed
 
-    def _build_agent(self, session_path: str):
-        """在隔离配置下构建被测 Agent。"""
-        # 关闭记忆读写与 MCP，保证可复现（agent.__init__ 直接读全局 settings）
-        settings.memory_enabled = False
-        settings.mcp_enabled = False
+    #: 沙箱隔离期间要临时改成的全局 settings(构造 Agent 时 __init__ 直接读全局,
+    #: 没有别的注入口)。值必须在 run() 的 finally 里还原,见 _build_agent。
+    _ISOLATED_SETTINGS = {"memory_enabled": False, "mcp_enabled": False}
+
+    def _build_agent(self, session_path: str, patches: list[tuple] | None = None):
+        """在隔离配置下构建被测 Agent。
+
+        关闭记忆读写与 MCP 保证可复现(agent.__init__ 直接读全局 settings,
+        没有构造参数可传)。**这两个写的是进程级单例 `settings`**,所以必须
+        跟插桩补丁一样登记进 `patches` 由 run() 的 finally 还原。
+
+        曾经这里是两句裸赋值、从不还原,后果不止是测试互相污染:
+        `POST /api/eval/run`(看板上的"运行评估"按钮)是在**服务进程内**起
+        线程跑评估的(见 app/evaluation/runner.py),所以在线上点一次评估,
+        就会把整个进程的记忆系统与 MCP 永久关掉直到重启——之后所有买家会话
+        都不再注入长期/短期记忆,`recall_user_memory` 一律回"记忆系统未启用",
+        而且没有任何日志或告警。模块顶部"所有补丁在 finally 中还原"这句话
+        当时并不包括这两行。
+
+        `patches=None` 只为兼容直接调用本方法的旧调用点(此时行为同旧版:改了
+        不还原);run() 一律传入。
+        """
+        for name, value in self._ISOLATED_SETTINGS.items():
+            if patches is not None:
+                patches.append((settings, name, getattr(settings, name)))
+            setattr(settings, name, value)
 
         if self.mode == "multi":
             from app.multi_agent.orchestrator import MultiAgentOrchestrator
@@ -88,7 +109,7 @@ class Sandbox:
         agent = None
         patches: list[tuple] = []  # (obj, attr, original) 供还原
         try:
-            agent = self._build_agent(session_path)
+            agent = self._build_agent(session_path, patches)
             self._instrument(agent, trace, patches)
 
             result = None
