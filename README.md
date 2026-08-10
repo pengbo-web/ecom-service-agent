@@ -274,8 +274,25 @@ python -m app.scripts.run_eval
 ```bash
 python -m app.scripts.agent_collab --scan               # 只跑一次异常扫描并发信号
 python -m app.scripts.agent_collab --once                # 消费一轮事件（跑完 signal→diagnosis→drafts 全链路）
-python -m app.scripts.agent_collab --loop --interval 60  # 常驻：每 60 秒跑一轮 scan + 消费
+python -m app.scripts.agent_collab --loop                 # 常驻：消费 5s 一轮，扫描/归因/跟进约 100s 一轮
+python -m app.scripts.agent_collab --loop --interval 2 --scan-every 60   # 更快的消费
 ```
+
+**常驻模式下两种节奏是分开的**，这是刻意的：
+
+| 参数 | 默认 | 管什么 |
+|---|---|---|
+| `--interval` | 5s | 消费轮询间隔。**唯一有延迟意义的一段** —— `buyer_hints` 靠它：买家转人工 → 参谋归因 → 写共享上下文 → 买家下一轮读到提示 |
+| `--scan-every` | 20 轮 | 每 N 轮消费才跑一次扫描/归因/跟进（约 100s 一次，与改造前 60s 同量级） |
+
+**限频的理由是钱不是 CPU。** 实测四段空转耗时 `consume 8.6ms / scan 14.8ms /
+attribute 2.0ms / followup 2.2ms`，全跑也才约 332ms/分钟（0.55% 单核）。真正的成本在
+下游：`scan_and_publish` 对当前跨线异常**无条件全量 publish、不去重**，而退款率跨线
+这类异常会持续存在 —— 扫描频率 ×12 = 异常事件 ×12 = 参谋归因的 LLM 调用 ×12，
+`collab_daily_llm_budget`（默认 200）几分钟就烧穿。
+
+改造前四件事绑在同一个 `--interval` 上，于是只有两个选择：整体快（烧穿预算）或
+整体慢（牺牲 `buyer_hints` 新鲜度）。
 
 `run_once()` 在同一次调用里先消费参谋段、再消费刚发布的营销段——对一条新到的
 `signal.anomaly`，调一次就足以走完全链路，不需要连续调两次"分段推进"。
