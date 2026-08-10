@@ -14,6 +14,9 @@ type Span = {
   // W1:stage 嵌套树的父指针。旧后端/旧数据没有这个键时按顶层处理，
   // 不强求存在——纯新增字段，不破坏对老响应的兼容。
   parent_span_id?: string | null;
+  // 工具失败原因。后端只在 success=false 时写入 meta.error(只取原因字段、
+  // 截断 200 字符,避免把带 PII 的整段响应体留进 trace 库)。旧数据没有。
+  meta?: { error?: string } | null;
 };
 type Detail = { trace_id?: string; user_input?: string; intent?: string; status?: string; spans?: Span[]; error?: string };
 
@@ -49,6 +52,17 @@ function SpanRow({ span, depth, spans }: { span: Span; depth: number; spans: Spa
         {span.success != null && <span>{span.success ? "✅" : "❌"}</span>}
         {!!span.prompt_tokens && (
           <span className="text-muted-foreground">tok:{span.prompt_tokens}+{span.completion_tokens ?? 0}</span>
+        )}
+        {/* 失败原因跟在 ❌ 后面。没有它的话,一条 `tool:query_order ❌` 只能告诉你
+            "这次失败了",而看板上"三成工具在失败"这个结论就查不下去了。
+
+            判失败用真值而不是 `=== false`:success 在库里是 INTEGER,响应体里
+            是 `0` 不是 `false`,严格相等永远不成立(上面 ✅/❌ 用的也是真值判断,
+            所以图标正常显示、原因却不显示——这种不一致最难看出来)。 */}
+        {span.success != null && !span.success && span.meta?.error && (
+          <span className="text-destructive" title={span.meta.error}>
+            {span.meta.error}
+          </span>
         )}
       </div>
       {kids.map((k, i) => <SpanRow key={k.span_id ?? `${depth}-${i}`} span={k} depth={depth + 1} spans={spans} />)}

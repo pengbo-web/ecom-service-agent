@@ -66,4 +66,58 @@ describe("TracesTable", () => {
     render(<TracesTable traces={[]} />);
     expect(screen.getByText("暂无记录")).toBeInTheDocument();
   });
+
+  // 看板显示"三成工具调用在失败",而点开 trace 只有一个 ❌ ——这个结论就查不
+  // 下去了。失败原因由后端写进 span.meta.error(只取原因字段、截断 200 字符)。
+  it("工具失败时把原因显示出来,不是只给一个 ❌", async () => {
+    const detail = {
+      ...DETAIL,
+      spans: [{ span_id: "s1", kind: "tool", name: "tool:query_order", latency_ms: 22,
+                success: 0, parent_span_id: null,
+                meta: { args: {}, error: "未找到订单 ORD-20240115-001，请核实订单号" }}],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => detail })));
+    render(<TracesTable traces={TRACES} />);
+    fireEvent.click(screen.getByText("after_sale"));
+    expect(await screen.findByText(/未找到订单 ORD-20240115-001/)).toBeInTheDocument();
+  });
+
+  it("success 为数字 0 也算失败(库里是 INTEGER,不是布尔)", async () => {
+    // 这条钉的是一个已经踩过的坑:`span.success === false` 对 `0` 恒不成立,
+    // 于是 ✅/❌ 图标(真值判断)正常、原因却不显示——两处判据不一致最难看出来。
+    const detail = {
+      ...DETAIL,
+      spans: [{ span_id: "s1", kind: "tool", name: "tool:x", latency_ms: 1,
+                success: 0, parent_span_id: null, meta: { error: "订单不存在" }}],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => detail })));
+    render(<TracesTable traces={TRACES} />);
+    fireEvent.click(screen.getByText("after_sale"));
+    expect(await screen.findByText("订单不存在")).toBeInTheDocument();
+  });
+
+  it("成功的 span 不显示 error(即使数据里带了)", async () => {
+    const detail = {
+      ...DETAIL,
+      spans: [{ span_id: "s1", kind: "tool", name: "tool:x", latency_ms: 1,
+                success: 1, parent_span_id: null, meta: { error: "不该出现" }}],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => detail })));
+    render(<TracesTable traces={TRACES} />);
+    fireEvent.click(screen.getByText("after_sale"));
+    expect(await screen.findByText("tool:x")).toBeInTheDocument();
+    expect(screen.queryByText("不该出现")).toBeNull();
+  });
+
+  it("旧数据没有 meta 时不报错", async () => {
+    const detail = {
+      ...DETAIL,
+      spans: [{ span_id: "s1", kind: "tool", name: "tool:x", latency_ms: 1, success: 0,
+                parent_span_id: null }],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => detail })));
+    render(<TracesTable traces={TRACES} />);
+    fireEvent.click(screen.getByText("after_sale"));
+    expect(await screen.findByText("tool:x")).toBeInTheDocument();
+  });
 });

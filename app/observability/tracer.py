@@ -200,6 +200,12 @@ class Tracer:
             sp.ended_at = self._now()
             sp.latency_ms = (sp.ended_at - sp.started_at) * 1000.0
             sp.success = _parse_success(event.get("content"))
+            if sp.success is False:
+                # 只有失败才留原因:成功的返回里没有"原因"可言,而那些字段
+                # (message 之类)恰恰最容易带上订单/地址等业务数据。
+                err = _parse_error(event.get("content"))
+                if err:
+                    sp.meta = {**(sp.meta or {}), "error": err}
             trace.spans.append(sp)
         elif etype == "guard":
             now = self._now()
@@ -279,4 +285,40 @@ def _parse_success(content) -> Optional[bool]:
             return bool(data["success"])
     except Exception:
         pass
+    return None
+
+
+#: 工具失败原因可能出现的字段名。各工具/上游(hmdp)用词不统一,按优先级取第一个非空。
+_ERROR_KEYS = ("errorMsg", "error", "message", "reason", "detail")
+
+#: 失败原因的最大留存长度。留原因是为了能判断"这一类失败是什么",不是为了存副本。
+_ERROR_MAX = 200
+
+
+def _parse_error(content) -> Optional[str]:
+    """从失败的工具返回里取出**原因**(只取原因字段,不留整个响应体)。
+
+    补的是一个真实的观测盲区:span 记了 `success=0` 却不记为什么。实跑走查里
+    看板显示工具成功率 69.9%——三成调用在失败——而点开任何一条 trace,
+    `meta` 里只有 `{"args": {...}}`,没有任何线索说明失败原因。于是"三成工具在
+    失败"这个结论只能停在这里,查不下去。`guard` 与 `recall` span 早就在记
+    `reason` 了,工具这一类是漏的。
+
+    **只取原因字段,不整段留存响应体**:工具返回里常带订单、地址、手机号,
+    整段落进 trace 库等于给自己造一份长期留存的 PII 副本,而排障需要的只是
+    那一句"订单不存在"/"无权访问"。截断到 200 字符,同理。
+
+    解析不出结构时返回 None 而不是原文:非 JSON 的返回可能是任意长度的自由文本
+    (甚至是模型输出),留进 meta 会把这个字段变成一个不可控的黑洞。
+    """
+    try:
+        data = json.loads(content)
+    except Exception:  # noqa: BLE001 非 JSON 返回不猜
+        return None
+    if not isinstance(data, dict):
+        return None
+    for key in _ERROR_KEYS:
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()[:_ERROR_MAX]
     return None

@@ -15,9 +15,19 @@ def _tracer(tmp_path):
 
 
 def _meta(span: dict) -> dict:
-    """store 落库时把 meta 序列化成了 JSON 字符串(见 TraceStore.save_trace)，
-    读出来也是原样字符串，测试里要断言字段得先解回 dict。"""
-    return json.loads(span["meta"])
+    """取 span 的 meta,兼容"字符串"与"已解析成 dict"两种形态。
+
+    落库时 meta 被序列化成 JSON 字符串(见 `TraceStore.save_trace`)。读出来是
+    哪种形态**取决于走哪个读取口**:`get_trace()` 面向 API,会解析成对象
+    (否则前端拿到的是"JSON 里套一个 JSON 字符串",每个消费方都得自己再 parse
+    一次,而第一个忘记的地方会静默拿不到字段);`all_spans()` 保持原始字符串,
+    因为 `compute_metrics` 是按字符串包含判断护栏动作的。
+
+    两处口径不同是既有事实,不在这里"统一"掉——统一到对象会当场把护栏拦截
+    计数改成 0。所以助手两种都认。
+    """
+    meta = span["meta"]
+    return json.loads(meta) if isinstance(meta, str) else (meta or {})
 
 
 def test_start_trace_persists_on_exit(tmp_path):

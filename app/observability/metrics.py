@@ -1,5 +1,8 @@
 """基于 TraceStore 的指标聚合。"""
 
+import time
+from typing import Optional
+
 from app.config.settings import settings
 
 
@@ -11,9 +14,22 @@ def _percentile(values: list[float], pct: float) -> float:
     return ordered[k]
 
 
-def compute_metrics(store) -> dict:
-    traces = store.all_traces()
-    spans = store.all_spans()
+def compute_metrics(store, window_hours: Optional[float] = None) -> dict:
+    """聚合指标。`window_hours` 为 None 时统计全部历史(与改造前一致)。
+
+    为什么需要时间窗:改造前只有"全部历史"一种口径,于是一个**已经修好**的问题
+    会永远留在看板上——修完之后新调用全成功,而累计值被几百条旧失败压着,
+    红色要好几周才褪。运维看到的是"改了没用",实际是"口径不对"。
+
+    默认仍是全历史,不是偷懒:调用方(HTTP 端点)显式传窗口,而
+    `compute_metrics(store)` 这个既有签名的行为**逐字节不变**——它有既有回归
+    钉着,不该因为新增一个能力就改掉旧语义。
+    """
+    since = None
+    if window_hours is not None and window_hours > 0:
+        since = time.time() - float(window_hours) * 3600.0
+    traces = store.all_traces(since=since)
+    spans = store.all_spans(since=since)
 
     total = len(traces)
     errors = sum(1 for t in traces if t["status"] == "error")
@@ -58,4 +74,8 @@ def compute_metrics(store) -> dict:
         "handoffs": len(hitl_spans),
         "escalation_rate": (len(hitl_spans) / total) if total else 0.0,
         "intent_distribution": intent_dist,
+        # 口径必须跟着数字一起下发。一个百分比脱离了统计窗口就没有意义,而这
+        # 几个数字正是运维判断"要不要去看一眼"的依据——看板不能让人自己猜
+        # 它统计的是最近一小时还是开服至今。None = 全部历史。
+        "window_hours": window_hours,
     }

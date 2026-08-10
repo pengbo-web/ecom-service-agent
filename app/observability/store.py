@@ -112,19 +112,68 @@ class TraceStore:
         finally:
             conn.close()
 
-    def all_traces(self) -> list[dict]:
+    def all_traces(self, since: Optional[float] = None) -> list[dict]:
+        """全部 trace;给了 `since`(unix 秒)则只取该时刻之后开始的。
+
+        时间窗是后加的:`compute_metrics` 原先聚合**全部历史**,于是一个已经修好
+        的问题会永远留在看板上——修完之后新调用全成功,而累计值被几百条旧失败
+        压着,红色要好几周才褪。运维看到的是"改了没用",实际是"口径不对"。
+        """
         conn = self.connect()
         try:
-            return [dict(r) for r in conn.execute("SELECT * FROM traces").fetchall()]
+            if since is None:
+                rows = conn.execute("SELECT * FROM traces").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM traces WHERE started_at >= ?", (float(since),)
+                ).fetchall()
+            return [dict(r) for r in rows]
         finally:
             conn.close()
 
-    def all_spans(self) -> list[dict]:
+    def all_spans(self, since: Optional[float] = None) -> list[dict]:
+        """全部 span;`since` 同 `all_traces`。
+
+        按 span 自己的 `started_at` 过滤,而不是先查窗内 trace 再按 trace_id 关联:
+        后者要么发一条 `IN (几百个 id)`,要么两次查询在 Python 里 join,而两者
+        都会随历史增长变慢——这个端点是看板每次刷新都要调的。
+        """
         conn = self.connect()
         try:
-            return [dict(r) for r in conn.execute("SELECT * FROM spans").fetchall()]
+            if since is None:
+                rows = conn.execute("SELECT * FROM spans").fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM spans WHERE started_at >= ?", (float(since),)
+                ).fetchall()
+            # 注意:这里**保持 meta 的原始字符串形态**,不走 `_decode_meta`——
+            # `compute_metrics` 按字符串包含判护栏动作。见 `_decode_meta` 的说明。
+            return [dict(r) for r in rows]
         finally:
             conn.close()
+
+    @staticmethod
+    def _decode_meta(row: dict) -> dict:
+        """把 span 行里 JSON 字符串形式的 `meta` 解析成对象。
+
+        库里 `meta` 存的是 TEXT(JSON 串)。`get_trace` 是**面向 API** 的读取口,
+        直接透传会让前端拿到"JSON 里套一个 JSON 字符串",迫使每个消费方各自
+        再 parse 一次——第一个忘记 parse 的地方就会静默拿不到字段
+        (`span.meta?.error` 在字符串上恒为 undefined,不报错)。
+
+        **只在这一个方法里解析,不动 `all_spans()`**:`compute_metrics` 用的是
+        `all_spans()`,而它是按**字符串包含**判断护栏动作的
+        (`'"action": "block"' in s["meta"]`)。在那边解析会当场改坏指标口径。
+        两处口径不同是既有事实,这里把它写下来,而不是顺手"统一"掉。
+        """
+        item = dict(row)
+        raw = item.get("meta")
+        if isinstance(raw, str) and raw:
+            try:
+                item["meta"] = json.loads(raw)
+            except (ValueError, TypeError):
+                item["meta"] = None      # 存坏了就当没有,不把原始串塞给前端
+        return item
 
     def get_trace(self, trace_id: str) -> Optional[dict]:
         conn = self.connect()
@@ -138,7 +187,7 @@ class TraceStore:
             spans = conn.execute(
                 "SELECT * FROM spans WHERE trace_id = ? ORDER BY started_at", (trace_id,)
             ).fetchall()
-            trace["spans"] = [dict(s) for s in spans]
+            trace["spans"] = [self._decode_meta(s) for s in spans]
             return trace
         finally:
             conn.close()
