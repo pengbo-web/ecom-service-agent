@@ -254,6 +254,24 @@ class Tracer:
                 meta={"time_to_first_chunk_ms": (now - trace.started_at) * 1000.0},
                 parent_span_id=self._parent(trace),
             ))
+        elif etype == "reply_visible" and event.get("first"):
+            # 买家真正看到第一个字的时刻。**和上面那条不是一回事**,两条都要记:
+            #   reply_delta:first   引擎吐出第一个 token(上面那条)
+            #   reply_visible:first 第一个字**通过增量脱敏缓冲、进了 SSE 队列**
+            # 中间那段差值就是 holdback 的代价。曾经这个代价大到离谱:扣留量
+            # 按最宽模式取 114 字符时,75 字的回复一条 delta 都发不出去——引擎侧
+            # 首字 1 秒多,买家侧却是"等到最后一次性看到全文"。看板上只报引擎侧
+            # 那个数,等于**报了一个买家从来没体验过的时间**。
+            # 现在屏障收窄后差值只剩几个字符,但口径必须是买家侧的,不能因为
+            # "现在差不多了"就继续用引擎侧的数字冒充体感指标。
+            now = self._now()
+            trace.spans.append(Span(
+                span_id=self._id(), trace_id=trace.trace_id,
+                name="reply_visible:first", kind="reply_visible",
+                started_at=now, ended_at=now, latency_ms=0.0,
+                meta={"time_to_first_visible_ms": (now - trace.started_at) * 1000.0},
+                parent_span_id=self._parent(trace),
+            ))
         elif etype == "kb_latency":
             # ApeRAG 调用耗时/结果观测(见 app/agent/chat.py `_build_messages`):
             # 与 reply_delta:first 同姿态,有明确的耗时数字但没有配对的

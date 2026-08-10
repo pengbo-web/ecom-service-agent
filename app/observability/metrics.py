@@ -69,13 +69,37 @@ def compute_metrics(store, window_hours: Optional[float] = None) -> dict:
     # 但首字 1.5s 是可接受的,首字 12s 则是灾难。**在线客服的核心 KPI 是前者。**
     #
     # 按 trace 关联:一条 trace 至多一个 first span(tracer 只记第一块)。
+    #
+    # **两个口径都算,报出去的主指标是买家侧那个。** 引擎吐出第一个 token 的时刻
+    # (reply_delta)和买家真正看到第一个字的时刻(reply_visible)之间隔着增量脱敏
+    # 的 holdback 缓冲。这个差曾经大到让引擎侧的数字失去意义:扣留量按最宽模式
+    # 取 114 字符时,75 字的回复一条 delta 都发不出去,引擎侧首字 1 秒多而买家是
+    # 等到最后才一次性看到全文。拿引擎侧的数当体感指标,等于报一个买家从来没体
+    # 验过的时间。屏障收窄后差值只剩几个字符,但口径不能因为"现在差不多了"就含糊。
     _trace_start = {t["trace_id"]: t["started_at"] for t in traces}
-    ttfts = [
-        (s["started_at"] - _trace_start[s["trace_id"]]) * 1000.0
-        for s in spans
-        if s["kind"] == "reply_delta" and s["trace_id"] in _trace_start
+
+    def _ttft(kind: str) -> list[float]:
+        xs = [(s["started_at"] - _trace_start[s["trace_id"]]) * 1000.0
+              for s in spans if s["kind"] == kind and s["trace_id"] in _trace_start]
+        return [x for x in xs if x >= 0]      # 时钟异常的负值丢掉,不参与分位
+
+    engine_ttfts = _ttft("reply_delta")
+    ttfts = _ttft("reply_visible")
+
+    # holdback 代价必须**按 trace 配对**再取分位,不能拿两个 P50 相减:两组样本的
+    # 总体不同(reply_visible 上线前的历史 trace 只有引擎侧那条 span),相减出来的
+    # 数字没有任何含义——实测就出现过"买家侧只有 5 条样本、引擎侧 30 条"的窗口。
+    _engine_at = {s["trace_id"]: s["started_at"] for s in spans if s["kind"] == "reply_delta"}
+    _visible_at = {s["trace_id"]: s["started_at"] for s in spans if s["kind"] == "reply_visible"}
+    holdback_costs = [
+        (_visible_at[tid] - _engine_at[tid]) * 1000.0
+        for tid in _visible_at if tid in _engine_at
     ]
-    ttfts = [x for x in ttfts if x >= 0]      # 时钟异常的负值丢掉,不参与分位
+    holdback_costs = [x for x in holdback_costs if x >= 0]
+    # 兼容 reply_visible 上线之前落库的历史 trace:那时只有引擎侧 span。回退到
+    # 引擎侧而不是报 0,否则切到长窗口时看板会凭空多出一段"首字 0 毫秒"的假历史。
+    if not ttfts:
+        ttfts = engine_ttfts
 
     recall_spans = [s for s in spans if s["kind"] == "recall"]
     kb_spans = [s for s in recall_spans if "kb" in (s.get("name") or "")]
@@ -120,6 +144,13 @@ def compute_metrics(store, window_hours: Optional[float] = None) -> dict:
         "ttft_p50_ms": _percentile(ttfts, 50),
         "ttft_p95_ms": _percentile(ttfts, 95),
         "streamed_traces": len(ttfts),
+        # 引擎侧首字,单独报一份作对照:它与上面那个的差值 = 增量脱敏 holdback
+        # 的体感代价。差值突然变大意味着有人加了一条更宽的护栏正则,而那件事
+        # 在别处没有任何信号。
+        "ttft_engine_p50_ms": _percentile(engine_ttfts, 50),
+        "ttft_holdback_cost_p50_ms": _percentile(holdback_costs, 50),
+        # 配对样本数一并报出:这个代价是基于多少条 trace 算的,看的人有权知道。
+        "ttft_holdback_paired": len(holdback_costs),
         "intent_distribution": intent_dist,
         # 口径必须跟着数字一起下发。一个百分比脱离了统计窗口就没有意义,而这
         # 几个数字正是运维判断"要不要去看一眼"的依据——看板不能让人自己猜

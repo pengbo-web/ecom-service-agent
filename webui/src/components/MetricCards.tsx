@@ -9,10 +9,16 @@ export type Metrics = {
   // 完全不同:degraded 去修依赖 / miss 可能要补文档 / skipped 是正常。
   kb_recall_attempts?: number; kb_recall_degraded?: number;
   kb_degraded_rate?: number; kb_recall_skipped?: number;
-  // 首字时间:采集早就有(reply_delta:first span),但从没进过看板。总延迟是
-  // "整段回复生成完",首字是"买家多久看到第一个字"——流式下总时长 12s 但首字
-  // 1.5s 可接受,首字 12s 是灾难。在线客服的核心 KPI 是后者。
+  // 首字时间:总延迟是"整段回复生成完",首字是"买家多久看到第一个字"——流式下
+  // 总时长 12s 但首字 1.5s 可接受,首字 12s 是灾难。在线客服的核心 KPI 是后者。
+  //
+  // ttft_p50_ms 是**买家侧**(第一个字真的进了 SSE 队列)。引擎侧单独报一份:两者
+  // 之差是增量脱敏 holdback 的体感代价。这个差曾经大到让引擎侧的数失去意义——
+  // 扣留量按最宽护栏正则取 114 字符时,75 字的回复一条 delta 都发不出去,引擎侧
+  // 首字一秒多而买家是等到最后一次性看到全文。差值变大 = 有人加了更宽的护栏。
   ttft_p50_ms?: number; ttft_p95_ms?: number; streamed_traces?: number;
+  ttft_engine_p50_ms?: number; ttft_holdback_cost_p50_ms?: number;
+  ttft_holdback_paired?: number;   // 代价是按 trace 配对算的,这是配对样本数
   total_prompt_tokens: number; total_completion_tokens: number; est_cost_usd: number;
   intent_distribution: Record<string, number>;
   // 统计窗口(小时)。null/缺失 = 全部历史。口径必须跟着数字一起显示:
@@ -49,8 +55,13 @@ const LINES: Record<string, Line> = {
   escalation_rate: { warn: 0.15, bad: 0.3, lowerIsBetter: true,
     note: "转人工率是 AI 顶不顶得住的直接体现;偏高说明知识或能力有缺口" },
   ttft_p50: { warn: 1500, bad: 3000, lowerIsBetter: true,
-    note: "买家从发送到看到第一个字的时间。这是在线客服真正的体感指标——"
-        + "总延迟 12s 但首字 1.5s 是可接受的,首字 12s 则等同于没有回应" },
+    note: "买家从发送到看到第一个字的时间(买家侧口径,已计入增量脱敏缓冲)。"
+        + "这是在线客服真正的体感指标——总延迟 12s 但首字 1.5s 是可接受的,"
+        + "首字 12s 则等同于没有回应" },
+  ttft_holdback_cost: { warn: 300, bad: 1000, lowerIsBetter: true,
+    note: "买家首字与引擎首字之差 = 流式脱敏为了保证「不泄漏」而扣住尾部不发的代价。"
+        + "护栏正则越宽扣得越久;这个数变大通常意味着有人加了一条更宽的模式,"
+        + "而那件事在别处没有任何信号" },
   kb_degraded_rate: { warn: 0.02, bad: 0.1, lowerIsBetter: true,
     note: "知识库连不上时客服会照常回答、但答案里没有任何政策依据(退货运费之类答的是模型常识)。"
         + "买家侧完全无症状,所以这个数是唯一的信号——线划得很低是刻意的" },
@@ -70,7 +81,7 @@ function toneOf(key: string, value: number): { dot: string; text: string } | nul
 function lineLabel(key: string): string {
   const l = LINES[key];
   if (!l) return "";
-  const fmt = key.startsWith("latency") ? ms : pct;
+  const fmt = (key.startsWith("latency") || key.startsWith("ttft")) ? ms : pct;
   return l.lowerIsBetter ? `参考 < ${fmt(l.warn)}` : `参考 > ${fmt(l.warn)}`;
 }
 
@@ -90,7 +101,9 @@ function windowLabel(hours?: number | null): string {
  * 决策(要不要加预算 / AI 顶不顶得住),混在一列会让看板变成一张数字清单。
  */
 const GROUPS: { title: string; hint: string; keys: string[] }[] = [
-  { title: "服务质量", hint: "买家这一侧的体感", keys: ["total_traces", "ttft_p50", "ttft_p95", "latency_p50", "latency_p95", "error_rate"] },
+  { title: "服务质量", hint: "买家这一侧的体感",
+    keys: ["total_traces", "ttft_p50", "ttft_p95", "ttft_holdback_cost",
+           "latency_p50", "latency_p95", "error_rate"] },
   { title: "AI 能力", hint: "AI 自己顶住了多少", keys: ["tool_success_rate", "tool_calls", "handoffs", "escalation_rate"] },
   { title: "知识库", hint: "客服回答政策问题时有没有依据",
     keys: ["kb_degraded_rate", "kb_recall_degraded", "kb_recall_attempts"] },
@@ -107,6 +120,11 @@ export function MetricCards({ m }: { m: Metrics }) {
       raw: m.streamed_traces ? (m.ttft_p50_ms ?? 0) : undefined },
     ttft_p95: { key: "ttft_p95", label: "首字 P95",
       display: m.streamed_traces ? ms(m.ttft_p95_ms ?? 0) : "—" },
+    // 分母用配对样本数,不是 streamed_traces:代价只有两条 span 都在的 trace 才算
+    // 得出来(reply_visible 上线前落库的历史 trace 只有引擎侧那条)。
+    ttft_holdback_cost: { key: "ttft_holdback_cost", label: "脱敏缓冲代价",
+      display: m.ttft_holdback_paired ? ms(m.ttft_holdback_cost_p50_ms ?? 0) : "—",
+      raw: m.ttft_holdback_paired ? (m.ttft_holdback_cost_p50_ms ?? 0) : undefined },
     latency_p50: { key: "latency_p50", label: "延迟 P50", display: ms(m.latency_p50_ms), raw: m.latency_p50_ms },
     latency_p95: { key: "latency_p95", label: "延迟 P95", display: ms(m.latency_p95_ms), raw: m.latency_p95_ms },
     tool_success_rate: { key: "tool_success_rate", label: "工具成功率", display: pct(m.tool_success_rate), raw: m.tool_success_rate },

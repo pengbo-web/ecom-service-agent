@@ -101,6 +101,10 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
             guard_pipeline.sanitize_fragment,
         )
 
+    # 单元素列表而不是布尔:sink 是闭包,需要就地改写("本轮是否已经有内容
+    # 真的送到买家眼前")。
+    _visible = [False]
+
     def sink(ev: dict) -> None:
         # tracer/Langfuse 是运营侧观测,不是买家——始终喂原始事件(未经增量
         # 脱敏缓冲),保留真实的"首字时间"等信号不失真;真正决定买家能看到
@@ -110,12 +114,24 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         if lf_turn is not None:
             lf_turn.on_event(ev)
         out_ev = ev
-        if _redactor is not None and ev.get("type") == "reply_delta":
-            safe_text = _redactor.feed(ev.get("content", ""))
-            if safe_text is None:
-                return   # 还在 holdback 区间内,这次没有新的、确认安全的内容可以发给买家
-            out_ev = dict(ev)
-            out_ev["content"] = safe_text
+        if ev.get("type") == "reply_delta":
+            if _redactor is not None:
+                safe_text = _redactor.feed(ev.get("content", ""))
+                if safe_text is None:
+                    return   # 还在 holdback 区间内,这次没有新的、确认安全的内容可以发给买家
+                out_ev = dict(ev)
+                out_ev["content"] = safe_text
+            # 走到这里 = 这一块**真的会进 SSE 队列、买家真的会看到**。第一次走到
+            # 这里的时刻才是买家侧的首字时间;上面喂给 tracer 的原始事件记的是引擎
+            # 侧的。两个数都要有——差值就是增量脱敏 holdback 的体感代价,而看板该
+            # 报的是买家侧那个(见 tracer.py 对 reply_visible 的注释)。
+            if not _visible[0]:
+                _visible[0] = True
+                marker = {"type": "reply_visible", "first": True}
+                if tracer is not None:
+                    tracer.on_event(marker)
+                if lf_turn is not None:
+                    lf_turn.on_event(marker)
         q.put(out_ev)
 
     # ── 观察/变换阶段(observe):不能否决已发生的动作,只做变换与埋点 ──
