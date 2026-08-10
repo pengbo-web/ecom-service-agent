@@ -24,7 +24,14 @@ def list_user_orders() -> dict:
             "items_summary": "、".join(item["name"] for item in o["items"]),
             "total": o["total"],
             "created_at": o["created_at"],
+            # 与 MCP 版同一口径:让"这单没有物流单号"和"这份清单不带物流字段"
+            # 成为两件可分辨的事。清单静默丢字段等于邀请模型把"我没查"说成
+            # "查不到"——实测 Agent 就是这样对买家说出"多次查询均未匹配到物流
+            # 单号"的,而它一次都没查过。见 mcp_server/hmdp_server.py 同名函数。
+            "has_tracking": bool(o.get("tracking_number")),
         }
         for o in raw
     ]
-    return {"success": True, "count": len(orders), "orders": orders}
+    return {"success": True, "count": len(orders), "orders": orders,
+            "note": "概要清单，不含物流轨迹与商品明细；"
+                    "has_tracking 为 true 的订单可用 query_logistics 查轨迹"}

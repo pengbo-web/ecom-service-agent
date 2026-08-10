@@ -60,10 +60,30 @@ def _list_user_orders_impl(ctx_user_id: str = "", ctx_token: str = "") -> str:
     if not ctx_user_id:
         return _dump({"success": False, "error": "未识别当前用户"})
     res = _client.get_json("/order/of/me", token=_tok(ctx_token))
-    orders = [map_order(o) for o in (res.get("data") or [])] if res.get("success") else []
+    # 上游失败必须如实报错,**不能返回 success:True + 空列表**。
+    #
+    # 改造前正是那样写的,后果是最危险的一种:Agent 被告知"这位买家一笔订单
+    # 都没有",于是自信地对买家说"您名下没有订单"——而真相是订单服务没连上。
+    # 旁边的 `_query_order_impl` / `_list_products_impl` 都是先判 success 再走,
+    # 只有这一个漏了。
+    if not res.get("success"):
+        return _dump({"success": False,
+                      "error": res.get("errorMsg") or "订单服务暂时不可用，请稍后再试"})
+    orders = [map_order(o) for o in (res.get("data") or [])]
+    # `has_tracking` 让"这单没有物流单号"与"这份清单不带物流字段"成为两件可分辨的事。
+    #
+    # 实测踩过:买家问某单物流,Agent 只调了本工具(清单里没有 tracking 字段),
+    # 就对买家说"系统在**多次查询**中均未匹配到对应物流单号"——它既没做过那些
+    # 查询,该单在 hmdp 里也确实有单号(SF1234567890/顺丰)。清单静默丢字段,
+    # 等于邀请模型把"我没查"说成"查不到"。
     brief = [{"order_id": o["order_id"], "status": o["status"],
-              "status_text": o["status_text"], "total": o["total"]} for o in orders]
-    return _dump({"success": True, "count": len(brief), "orders": brief})
+              "status_text": o["status_text"], "total": o["total"],
+              "has_tracking": bool(o.get("tracking_number"))} for o in orders]
+    return _dump({"success": True, "count": len(brief), "orders": brief,
+                  # 明确声明这是概要:物流轨迹、商品明细、收货地址都不在这里,
+                  # 要用 query_logistics / query_order 单独取。
+                  "note": "概要清单，不含物流轨迹与商品明细；"
+                          "has_tracking 为 true 的订单可用 query_logistics 查轨迹"})
 
 
 def _query_logistics_impl(order_id: str, ctx_user_id: str = "", ctx_token: str = "") -> str:
