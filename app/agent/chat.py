@@ -388,6 +388,7 @@ class EcomAgent:
         )
 
         self._check_internal_leak(final_text)
+        self._check_unbacked_commitment(final_text)
 
         result = self._extract_structured_response(final_text)
 
@@ -447,6 +448,39 @@ class EcomAgent:
             hits = detect_internal_leak(text, names)
             if hits:
                 self._emit({"type": "guard", "kind": "internal_leak", "hits": hits})
+        except Exception:  # noqa: BLE001 埋点失败绝不影响本轮回复
+            pass
+
+    def _kb_grounded_this_turn(self) -> bool:
+        """本轮是否真的拿到了平台知识(KB 预召回有命中)。
+
+        用它当"回复里的费用说法有没有依据"的判据。检索到政策后如实转述运费规则是
+        **正确行为**,不该被标成风险——那是噪音,而噪音会让检测很快被忽略。
+        """
+        try:
+            cached = self._turn_recall
+            return bool(cached and cached[1] and cached[1].kb_hits)
+        except Exception:  # noqa: BLE001 判据取不到就按"无依据"处理:宁可多报一条
+            return False
+
+    def _check_unbacked_commitment(self, text: str) -> None:
+        """L5:出话检查——回复里许了钱、而这一轮没有政策依据,发一条观测事件。
+
+        **实测缺陷**:买家问的是尺码,客服顺口答"如不合适可免费换货(支持7天无理由,
+        平台承担换货运费)",而平台真实政策是"七天无理由退货运费由买家承担(约12元起)"
+        ——方向相反的对客金钱承诺。既有三道防线都没挡住,原因见
+        `app/agent/commitment_guard.py` 的模块 docstring。
+
+        只做"看见",不阻断、不改写(与 `_check_internal_leak` 同姿态):改写一句已经
+        生成好的回复很容易把它弄坏,拦掉整条则意味着买家什么都收不到。旁路埋点,
+        任何异常都吞掉,绝不能因为检测器自己出错而影响本轮回复。
+        """
+        try:
+            from app.agent.commitment_guard import detect_unbacked_commitment
+            hits = detect_unbacked_commitment(text, self._kb_grounded_this_turn())
+            if hits:
+                self._emit({"type": "guard", "kind": "unbacked_commitment",
+                            "hits": hits})
         except Exception:  # noqa: BLE001 埋点失败绝不影响本轮回复
             pass
 
