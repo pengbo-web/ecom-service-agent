@@ -209,12 +209,28 @@ class Tracer:
             trace.spans.append(sp)
         elif etype == "guard":
             now = self._now()
+            # 名字取 `guard` 或 `kind`:护栏流水线发的是 {"guard": "contact_info",
+            # "stage","action","reason"},而出话黑话检测(L4,见 chat.py 的
+            # `_check_internal_leak`)发的是 {"kind": "internal_leak", "hits": [...]}。
+            #
+            # **实测过只认一种键的后果**:买家收到过一条把内部 JSON 信封整段吐出来
+            # 的回复(带 requires_human/confidence 字段)。检测器**正常命中了**,但
+            # 这里只读 `guard` 键 → 落成一条 `guard:None`、meta 三个 null 的空 span,
+            # "漏了哪些词"整个被丢掉。于是排查时在 trace 里搜不到任何线索,看起来
+            # 像"检测器没工作"——而它工作了,是观测边界把结论扔了。
+            #
+            # 与 /api/seller/overview 曾经只取 ["anomalies"] 是同一类错:**信号在
+            # 边界上被丢掉,等于它从没产生过**。
+            meta = {"stage": event.get("stage"), "action": event.get("action"),
+                    "reason": event.get("reason")}
+            if event.get("hits"):
+                meta["hits"] = list(event["hits"])
             trace.spans.append(Span(
                 span_id=self._id(), trace_id=trace.trace_id,
-                name=f"guard:{event.get('guard')}", kind="guard",
+                name=f"guard:{event.get('guard') or event.get('kind') or 'unknown'}",
+                kind="guard",
                 started_at=now, ended_at=now, latency_ms=0.0,
-                meta={"stage": event.get("stage"), "action": event.get("action"),
-                      "reason": event.get("reason")},
+                meta=meta,
                 parent_span_id=self._parent(trace),
             ))
         elif etype == "recall":
