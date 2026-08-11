@@ -9,7 +9,8 @@ from app.config.settings import settings
 from app.prompts.customer_service import SYSTEM_PROMPT
 from app.schemas.response import CustomerServiceResponse, IntentType
 from app.agent.tools.manager import ToolManager
-from app.agent.history_utils import estimate_tokens, sanitize_tool_pairs
+from app.agent.history_utils import (
+    estimate_tokens, sanitize_tool_pairs, unwrap_assistant_envelope)
 from app.agent.tools.bargain import set_current_session
 from app.agent.reply_pipeline import ReplyPipeline
 
@@ -1150,7 +1151,11 @@ class EcomAgent:
                     messages.append({"role": "system", "content": block})
         else:
             messages.extend(raw)
-        return sanitize_tool_pairs(messages)   # 送模型前自愈 tool_calls/tool 结果配对
+        # 送模型前:①把 assistant 的结构化信封还原成买家看到的那句话——落库的
+        # 仍是信封(有四个消费方在读,见 unwrap_assistant_envelope 的说明),但历史
+        # 里每轮都是 JSON 会让模型照着模仿,实测把 `{"intent":...,"confidence":...}`
+        # 整段吐给了买家;②自愈 tool_calls/tool 结果配对。
+        return sanitize_tool_pairs(unwrap_assistant_envelope(messages))
 
     def _compress_history(self) -> None:
         keep = self.history_keep_recent

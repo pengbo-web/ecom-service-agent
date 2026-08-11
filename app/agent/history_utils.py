@@ -39,6 +39,64 @@ def _valid_tool_call(tc: dict) -> bool:
     return isinstance(name, str) and bool(name.strip())
 
 
+def unwrap_assistant_envelope(messages: list[dict]) -> list[dict]:
+    """把历史里 assistant 消息的结构化信封还原成"买家实际看到的那句话"。
+
+    **这是一个实测到的缺陷的修复。** 买家发「知道了」,收到的回复是:
+
+        好的，感谢您的理解与支持。如有其他问题，随时欢迎联系我。
+
+        {"intent": "acknowledgement", "confidence": 1.0, "reply": "好的，感谢…",
+         "requires_human": false, "follow_up_question": null}
+
+    内部字段(置信度、是否转人工)直接摆到了买家眼前,正文还重复了两遍。
+
+    根因不在护栏,也不在解析——`chat.py` 那句
+    `raw_messages.append({"role": "assistant", "content": result.model_dump_json()})`
+    把**整个结构化响应的 JSON dump** 写进了对话历史。于是历史里每一轮 assistant
+    都长成 JSON,模型下一轮**照着历史的格式模仿**。实测口径:全部会话 221 条
+    assistant 消息里 100 条(45%)是 JSON 信封——而且是**混着**纯文本的,这恰恰
+    是格式模仿最容易出错的情形(模型两种都见过,于是有时挑错那一种)。
+
+    **为什么修在这里,而不是改持久化格式**:那个 JSON 是**承重**的,有四个消费方
+    在读它并 `json.loads`——`app/api/history.py`(前端历史回显)、
+    `skills/golden_corpus.py`、`skills/user_modeling.py`、`evaluation/trace_to_case.py`。
+    把持久化改成纯文本会同时打断这四处。而本模块的既定职责正好是"作用在送模型的
+    消息副本上,不改持久化的 raw_messages"(见模块 docstring),所以在这条边界上
+    解包:落库的还是信封,**模型只看得到买家看到的那句话**。
+
+    保守到什么程度:只在 content 能解析成 dict、且 `reply` 是字符串时替换。带
+    tool_calls 的 assistant 消息(content 为空)、纯文本回复、解析不出来的畸形
+    内容一律原样保留——宁可漏解包一条(退回改造前的行为),也不能把一条正常
+    消息弄坏。
+    """
+    import json as _json
+
+    out: list[dict] = []
+    for m in messages:
+        content = m.get("content")
+        if m.get("role") != "assistant" or not isinstance(content, str):
+            out.append(m)
+            continue
+        s = content.lstrip()
+        if not s.startswith("{"):
+            out.append(m)          # 绝大多数消息走这条:一次字符判断,不做 JSON 解析
+            continue
+        try:
+            data = _json.loads(s)
+        except Exception:          # noqa: BLE001 畸形内容原样保留,不是这里该管的事
+            out.append(m)
+            continue
+        reply = data.get("reply") if isinstance(data, dict) else None
+        if not isinstance(reply, str):
+            out.append(m)
+            continue
+        m2 = dict(m)               # 副本:绝不就地改调用方的 raw_messages
+        m2["content"] = reply
+        out.append(m2)
+    return out
+
+
 def sanitize_tool_pairs(messages: list[dict]) -> list[dict]:
     """保证 assistant.tool_calls 与 tool 结果成对合法。顺序:剥离畸形 → 丢弃悬空 → 回填缺失。"""
     msgs = _strip_malformed_tool_calls(messages)
