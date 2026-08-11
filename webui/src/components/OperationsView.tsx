@@ -428,6 +428,18 @@ export function OperationsView() {
               ))}
             </div>
           )}
+          {overview?.data_scope && (
+            // 数据源口径。**不是免责声明,是防一类具体的错误结论**:实测买家侧有
+            // 12 笔订单(经 hmdp 渠道),而这些数字只覆盖 agent 订单库里的 2 笔。
+            // 参谋据此得出过「仅 2 笔订单但 119 次客服对话,对话量远超订单量」这样
+            // 的"经营异常"——那是渠道口径差异,不是经营事实。店主看不到口径,
+            // 只会把 2 当成全店成交。
+            <div className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-2
+                            text-[11px] text-amber-700 dark:text-amber-400"
+                 data-testid="overview-data-scope">
+              {overview.data_scope}
+            </div>
+          )}
         </section>
 
         {/* 服务质量:按 skill 的成功率/工具失败率/转人工率。「跨线异常」区只列

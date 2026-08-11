@@ -33,8 +33,36 @@ def _rate(part: int, whole: int) -> float:
     return part / whole if whole else 0.0
 
 
+# 经营统计的事实源,以及它已知不覆盖的部分。
+#
+# **这不是免责声明,是防止一类具体的错误结论。** 实测撞到过:买家侧实际有 12 笔
+# 订单(经 `POST /api/order` 路由到 hmdp),而本模块读的 agent 订单库里只有 2 笔;
+# 参谋据此得出过一条诊断——「近 7 天仅 2 笔订单但产生 119 次客服对话,对话量远超
+# 订单量」。那个结论是**数据源分裂的产物**,不是经营事实,但它以正常诊断的形式
+# 进了协作链、也会进店主的看板。
+#
+# 两个库的分工见 `app/api/app.py::create_order`:买家有 hmdp token 时订单建到
+# hmdp,没有才落本地库;而本模块所有 SQL 都只查本地库,两边没有任何同步。
+# 真正的修法(镜像写入 / 改读 hmdp)是一次数据架构决策,单独跟进;在那之前,
+# 至少要让**读到这些数字的人和模型知道分母是什么**——把口径塞进返回值里,
+# 参谋就不会再把渠道差异当成经营异常。
+# 不带 markdown:这一句同时给模型和界面用。加 `**` 强调对模型没有帮助(它不靠
+# 星号理解轻重),在控制台上却会原样显示成星号——同一个串两个消费方,就按最朴素的
+# 纯文本写。
+_DATA_SCOPE = (
+    "统计口径:仅覆盖 agent 订单库。买家经 hmdp 渠道下的单不在其中,"
+    "两库当前没有同步——因此订单量/GMV 可能显著低于店铺真实成交。"
+    "请勿把「对话量远超订单量」这类比例失衡当成经营异常,它更可能是渠道口径差异。"
+)
+
+
 def shop_overview(window_days: int = 7) -> dict:
-    """店铺经营总览:订单量 / GMV / 客单价 / 退款率 / 取消率 / 咨询会话数。"""
+    """店铺经营总览:订单量 / GMV / 客单价 / 退款率 / 取消率 / 咨询会话数。
+
+    返回值带 `data_scope`(见 `_DATA_SCOPE`):这些数字只覆盖 agent 订单库,
+    不含 hmdp 渠道的成交。这一句是给**读结果的模型和人**看的,不是文档注释——
+    参谋 Agent 只能看到工具返回的 JSON,口径不在里面它就无从得知。
+    """
     conn = get_db().connect()
     try:
         w = _window_clause(window_days)
@@ -61,6 +89,7 @@ def shop_overview(window_days: int = 7) -> dict:
             "cancel_rate": _rate(int(row["cancels"] or 0), orders),
             "conversations": int(convs or 0),
             "orders_per_conversation": _rate(orders, int(convs or 0)),
+            "data_scope": _DATA_SCOPE,
         }
     finally:
         conn.close()

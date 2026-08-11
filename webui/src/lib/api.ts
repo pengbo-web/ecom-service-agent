@@ -406,6 +406,9 @@ export type SellerOverview = {
     avg_order_value: number; refunds: number; refund_rate: number;
     cancels: number; cancel_rate: number; conversations: number;
     orders_per_conversation: number;
+    // 数据源口径:这些数字只覆盖 agent 订单库,不含 hmdp 渠道的成交(两库无同步)。
+    // 后端刚补上,老响应体没有这个键时不显示这一条,不崩。
+    data_scope?: string;
   };
   products: { success: boolean; window_days: number; products: Array<{
     sku: string; name: string; orders: number; revenue: number;
