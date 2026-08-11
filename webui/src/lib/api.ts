@@ -413,8 +413,34 @@ export type SellerOverview = {
     refund_reasons: Array<{ reason: string; count: number }>;
   }> };
   anomalies: SellerAnomaly[];
-  quality?: { success: boolean; window_days: number; emotion: EmotionDistribution };
+  // 扫描的口径与盲区。两个窗口都在:`quality` 是按经营窗(默认 7 天)算的服务
+  // 质量,告警按 service_window_days(默认 1 天)判——两个数会不一样,而且应该
+  // 不一样(7 天里坏过、今天已经好了)。控制台必须标出哪个是哪个,否则会被读成
+  // 「看板自相矛盾」。service_insufficient 则让"没报警"和"没数据所以报不了警"
+  // 成为两件可分辨的事。
+  anomaly_scope?: {
+    window_days: number; service_window_days: number;
+    service_insufficient: Array<{ skill_name: string; total: number; min_samples: number }>;
+    products_examined: number; products_truncated: boolean;
+    reviews_examined: number; reviews_truncated: boolean;
+  };
+  // `skills` 一直在响应里,但前端此前只取了 `emotion`,把每个 skill 的成功率/
+  // 工具失败率/转人工率丢掉了——那是这一页最该显示的东西。缺了它,告警窗缩到
+  // 近 1 天之后,"某个 skill 前几天坏过"在界面上就彻底无处可见了。
+  quality?: {
+    success: boolean; window_days: number; emotion: EmotionDistribution;
+    skills?: SkillQuality[];
+  };
   reviews?: ReviewInsights;
+};
+
+/** 单个 skill 的服务质量。`other` 是 outcome 不属于成功/工具失败/转人工三类的
+ * 行数——仍计入 total 但不进任何比率,所以三个 rate 不保证求和为 1。后端刻意
+ * 把它显式给出来,不然未来新增或拼错的 outcome 会悄悄从比率里消失,长得和
+ * 「这个 skill 一直很健康」一模一样。 */
+export type SkillQuality = {
+  skill_name: string; total: number; success_rate: number;
+  tool_error_rate: number; human_rate: number; other: number;
 };
 
 export type SellerChatReply = {

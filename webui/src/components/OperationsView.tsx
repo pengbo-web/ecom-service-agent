@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getSellerOverview, sellerChat,
   type SellerOverview, type SellerChatReply, type EmotionDistribution,
-  type ReviewInsights } from "@/lib/api";
+  type ReviewInsights, type SkillQuality } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { RotateCcw, Send } from "lucide-react";
@@ -53,6 +53,52 @@ function anomalyTone(value: number, threshold: number): string {
   return "text-muted-foreground";
 }
 
+/** 异常扫描的口径与盲区。
+ *
+ * 为什么必须显示:这一区的告警按**近况**判(服务健康默认近 1 天),而上面的
+ * 「服务质量」「评价」几张卡是按经营窗(默认 7 天)算的。两个数会不一样,而且
+ * 应该不一样——"7 天里坏过、今天已经好了"是正常状态,不是看板自相矛盾。不把
+ * 两个窗口标出来,店主看到「工具失败率 78%」却「当前无跨线异常」只会得出
+ * 「这看板不准」这一个结论。
+ *
+ * 实测教训见 settings.anomaly_service_window_days:曾经两边共用 7 天窗,于是
+ * 一个已经修好的工具连续报警 7 天、每轮扫描一条,协作链页面被同一条假警报
+ * 刷满,而当天 9/9 健康完全被淹掉。
+ */
+export function AnomalyScopeNote({ scope }: { scope?: SellerOverview["anomaly_scope"] }) {
+  if (!scope) return null;
+  const insufficient = scope.service_insufficient || [];
+  return (
+    <div className="mt-1 flex flex-col gap-0.5 text-[11px] text-muted-foreground"
+         data-testid="anomaly-scope">
+      <div>
+        统计口径：服务健康（工具失败率／转人工率／情绪）按<b>近 {scope.service_window_days} 天</b>判；
+        退款率与差评率按<b>近 {scope.window_days} 天</b>判
+        <span className="ml-1">
+          （退款、评价有天然滞后，缩窗会把它们压成 0；而一个工具是不是坏的只有"现在"这一个时态）
+        </span>
+      </div>
+      {insufficient.length > 0 && (
+        // 「没报警」和「没数据所以报不了警」是两件事。近窗样本不足的 skill 在
+        // 这里如实列出,而不是消失成一句"当前无跨线异常"。
+        <div>
+          近窗样本不足、<b>本轮无法判定</b>的 skill：
+          {insufficient.map((s) => `${s.skill_name}（${s.total}/${s.min_samples}）`).join("、")}
+        </div>
+      )}
+      {(scope.products_truncated || scope.reviews_truncated) && (
+        <div>
+          扫描有截断：
+          {scope.products_truncated && `商品只看了前 ${scope.products_examined} 名`}
+          {scope.products_truncated && scope.reviews_truncated && "；"}
+          {scope.reviews_truncated && `评价只看了 ${scope.reviews_examined} 条`}
+          —— 长尾未进入阈值判断
+        </div>
+      )}
+    </div>
+  );
+}
+
 // N2:情绪分布卡——三档计数 + 激烈(angry)占比。是否"有情绪问题"由 anomaly.py
 // 按阈值判定(见上面「跨线异常」区),这里只如实摆出统计口径,不下结论。
 export function EmotionDistributionCard({ emotion, windowDays }:
@@ -85,6 +131,75 @@ export function EmotionDistributionCard({ emotion, windowDays }:
       </div>
       <div className="mt-2 text-xs text-muted-foreground">
         激烈占比 {pct(emotion.angry_rate)} · 统计窗口 {windowDays} 天
+      </div>
+    </Card>
+  );
+}
+
+/** 按 skill 的服务质量表(成功率 / 工具失败率 / 转人工率)。
+ *
+ * 这份数据后端一直在返回(`quality.skills`),但前端此前只用了同一响应里的
+ * `emotion`,把它整段丢掉了——而它恰恰是这一页最该显示的东西:「跨线异常」区
+ * 只列**跨了线**的,不跨线的分布一个都看不到。
+ *
+ * 补它还有一个更硬的理由:告警的判定窗已经收到近 1 天(见 AnomalyScopeNote),
+ * 那么"某个 skill 前几天坏过、今天已经好了"就只能靠这张按经营窗(默认 7 天)
+ * 统计的表来看。没有它,缩窗就等于用"少报假警"换"看不见历史",那不算修好。
+ *
+ * 只摆口径,不下结论:是否算异常由 anomaly.py 按阈值判(见「跨线异常」区),
+ * 这里的着色只是让偏高的数字更容易被眼睛抓到,不代表告警。
+ */
+export function ServiceQualityTable({ skills, windowDays }:
+  { skills?: SkillQuality[]; windowDays: number }) {
+  const rows = skills || [];
+  if (rows.length === 0) {
+    return (
+      <Card className="p-3 text-sm text-muted-foreground" data-testid="service-quality-empty">
+        过去 {windowDays} 天没有 skill 执行记录
+      </Card>
+    );
+  }
+  return (
+    <Card className="p-3 text-sm" data-testid="service-quality-table">
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[420px] text-left">
+          <thead>
+            <tr className="text-xs text-muted-foreground">
+              <th className="pb-1 font-normal">Skill</th>
+              <th className="pb-1 text-right font-normal">执行次数</th>
+              <th className="pb-1 text-right font-normal">成功率</th>
+              <th className="pb-1 text-right font-normal">工具失败率</th>
+              <th className="pb-1 text-right font-normal">转人工率</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((s) => (
+              <tr key={s.skill_name} className="border-t" data-testid="service-quality-row">
+                <td className="py-1 font-medium">{s.skill_name}</td>
+                <td className="py-1 text-right tabular-nums">{s.total}</td>
+                <td className="py-1 text-right tabular-nums">{pct(s.success_rate)}</td>
+                {/* 着色只是为了让偏高的数字更容易被抓到,判异常仍归确定性阈值 */}
+                <td className={`py-1 text-right tabular-nums ${
+                  s.tool_error_rate >= 0.3 ? "text-destructive"
+                    : s.tool_error_rate > 0 ? "text-amber-600 dark:text-amber-400" : ""}`}>
+                  {pct(s.tool_error_rate)}
+                </td>
+                <td className="py-1 text-right tabular-nums">{pct(s.human_rate)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-2 text-[11px] text-muted-foreground">
+        统计窗口 {windowDays} 天。<b>这里的数字是历史分布，不是告警</b>——
+        是否跨线由下面「跨线异常」区按确定性阈值判定，且服务健康只看近况
+        （所以一个前几天坏过、今天已恢复的 skill 会在这张表里偏高、却不该报警）。
+        {rows.some((s) => s.other > 0) && (
+          <span className="ml-1">
+            另有 {rows.reduce((n, s) => n + s.other, 0)} 次执行的 outcome
+            不属于成功／工具失败／转人工三类，已计入执行次数但不进任何比率。
+          </span>
+        )}
       </div>
     </Card>
   );
@@ -315,6 +430,19 @@ export function OperationsView() {
           )}
         </section>
 
+        {/* 服务质量:按 skill 的成功率/工具失败率/转人工率。「跨线异常」区只列
+            跨了线的,这张表是不跨线也看得见的分布——而且告警的判定窗已收到近况,
+            "前几天坏过、今天已恢复"只能靠这张表看到。 */}
+        <section>
+          <h3 className="mb-2 text-sm font-semibold">服务质量（按 Skill）</h3>
+          <div className={stale ? "opacity-60" : ""}>
+            {!data && busy && <div className="text-sm text-muted-foreground">加载中…</div>}
+            {data && (
+              <ServiceQualityTable skills={data.quality?.skills} windowDays={windowDays} />
+            )}
+          </div>
+        </section>
+
         {/* 情绪分布:三档计数 + 激烈占比,如实摆出统计口径,是否告警看下面的跨线异常区 */}
         <section>
           <h3 className="mb-2 text-sm font-semibold">情绪分布</h3>
@@ -367,6 +495,7 @@ export function OperationsView() {
             {data && data.anomalies.length === 0 && (
               <div className="text-sm text-muted-foreground">当前无跨线异常</div>
             )}
+            {data && <AnomalyScopeNote scope={data.anomaly_scope} />}
           </div>
         </section>
 

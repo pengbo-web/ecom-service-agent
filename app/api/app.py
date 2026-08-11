@@ -1410,10 +1410,29 @@ def create_app(session_manager: Optional[SessionManager] = None,
         from app.agent.tools.reviews import review_insights
         from app.agent.tools.shop_analytics import (
             product_diagnostics, service_quality, shop_overview)
+        scan = anomaly_scan(window_days=window_days)
         return {
             "overview": shop_overview(window_days=window_days),
             "products": product_diagnostics(window_days=window_days, top_n=5),
-            "anomalies": anomaly_scan(window_days=window_days)["anomalies"],
+            "anomalies": scan["anomalies"],
+            # 扫描自带的口径与盲区一并下发。改造前这里只取 `["anomalies"]`,把
+            # products_truncated / reviews_truncated / service_insufficient 全
+            # 丢在 API 边界上——那几个键存在的唯一目的就是"让盲区可见",在这里
+            # 被丢掉等于它们从没被写出来过。
+            #
+            # 两个窗口都要给:`quality` 是按经营窗(默认 7 天)算的服务质量,而
+            # 告警按 service_window_days(默认 1 天)判。两个数会不一样,而且
+            # **应该**不一样——控制台上必须看得出哪个是哪个,否则"7 天里坏过
+            # 但今天已经好了"会被读成"看板自相矛盾"。
+            "anomaly_scope": {
+                "window_days": scan["window_days"],
+                "service_window_days": scan["service_window_days"],
+                "service_insufficient": scan["service_insufficient"],
+                "products_examined": scan["products_examined"],
+                "products_truncated": scan["products_truncated"],
+                "reviews_examined": scan["reviews_examined"],
+                "reviews_truncated": scan["reviews_truncated"],
+            },
             "quality": service_quality(window_days=window_days),
             "reviews": review_insights(window_days=window_days),
         }
