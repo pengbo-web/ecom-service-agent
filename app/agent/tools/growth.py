@@ -44,6 +44,25 @@ _STALE_PENDING_STATUS = "pending"
 _STALE_PENDING_HOURS = 48
 
 
+
+def _split_skus(raw) -> list[str]:
+    """把 GROUP_CONCAT 出来的 sku 串(或单个 sku)切成去重列表,保持出现顺序。
+
+    下游用它判断"这条商机涉不涉及某个 SKU"——一条关于商品 A 的诊断不该被拿去
+    给商品 B 的买家起草(见 app/multi_agent/collab.py 的 `_diagnosis_applies_to`)。
+    LEFT JOIN 拿不到行时是 None,返回空列表:**空 = 不知道涉及哪些 SKU**,
+    与"确定不涉及"是两件事,由调用方决定怎么处置。
+    """
+    if not raw:
+        return []
+    seen: dict[str, None] = {}
+    for part in str(raw).split(","):
+        sku = part.strip()
+        if sku:
+            seen.setdefault(sku, None)
+    return list(seen)
+
+
 def _stale_hours(col: str) -> str:
     """算"这条商机已经滞留了多少小时"的 SQL 片段。
 
@@ -135,7 +154,12 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
             rows = conn.execute(
                 f"SELECT o.order_id, o.user AS user_id, o.status, o.total, o.created_at, "
                 f"       {_stale_hours('o.created_at')} AS stale_hours, "
-                f"       GROUP_CONCAT(oi.name, '、') AS items "
+                f"       GROUP_CONCAT(oi.name, '、') AS items, "
+                # skus:下游要判断"这条商机涉不涉及某个 SKU"。SQL 本来就 join 了
+                # order_items,只是没把 sku 带出来——与 stale_hours 当初漏掉是
+                # 同一类"算了但没传下去"。没有它,一条关于商品 A 的诊断会被拿去
+                # 给商品 B 的买家起草,并把 A 的结论当成 B 的事实说出去。
+                f"       GROUP_CONCAT(oi.sku, ',') AS skus "
                 f"FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.order_id "
                 f"WHERE o.status = ? "
                 f"  AND o.created_at <= {dialect.now_minus(_STALE_PENDING_HOURS, 'hours')} "
@@ -161,6 +185,7 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
                       # 真实的 ~216h 应该是 0.85。七个分支里只有这一个漏了,而它
                       # 恰好是默认 kind、也是唯一有真实数据的那个。
                       "stale_hours": r["stale_hours"],
+                      "skus": _split_skus(r["skus"]),
                       "items": r["items"] or ""} for r in rows]
 
         elif kind == "stalled_bargain":
@@ -196,7 +221,8 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
             rows = conn.execute(
                 f"SELECT o.order_id, o.user AS user_id, o.status, o.total, o.created_at, "
                 f"       {_stale_hours('o.created_at')} AS stale_hours, "
-                f"       GROUP_CONCAT(oi.name, '、') AS items "
+                f"       GROUP_CONCAT(oi.name, '、') AS items, "
+                f"       GROUP_CONCAT(oi.sku, ',') AS skus "
                 f"FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.order_id "
                 f"WHERE o.status = 'unpaid' "
                 f"  AND o.created_at <= {dialect.now_minus(max(1, int(settings.unpaid_stale_hours)), 'hours')} "
@@ -208,6 +234,7 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
                       "order_status_label": STATUS_LABELS.get(r["status"], r["status"]),
                       "amount": float(r["total"] or 0.0), "created_at": r["created_at"],
                       "stale_hours": r["stale_hours"],
+                      "skus": _split_skus(r["skus"]),
                       "items": r["items"] or ""} for r in rows]
 
         elif kind == "abandoned_cart":
@@ -233,6 +260,8 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
                       "order_id": "", "user_id": r["user_id"], "sku": r["sku"],
                       "quantity": int(r["quantity"] or 0), "created_at": r["added_at"],
                       "amount": float(r["cart_amount"] or 0.0),
+                      # skus 与上面两类同名:下游判相关性只认一个键,不必按 kind 分叉
+                      "skus": _split_skus(r["sku"]),
                       "stale_hours": r["stale_hours"]}
                      for r in rows]
 

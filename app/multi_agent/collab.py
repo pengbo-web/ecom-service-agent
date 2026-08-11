@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Optional
 
 from app.db import get_db
 from app.multi_agent import bus
@@ -276,8 +277,75 @@ def _buyer_profile_block(user_id: str) -> str:
         return ""
 
 
-def _llm_draft(diagnosis: dict, opportunity: dict) -> str:
+# 能走到营销侧的诊断只有 refund_rate_high 这一种(见 routing.py 的
+# `_MARKETING_WORTHY_KINDS`),而它的 `subject` 恒为**一个具体 SKU**。
+_SKU_SCOPED_DIAGNOSIS_KINDS = frozenset({"refund_rate_high", "bad_review_rate_high"})
+
+
+def _diagnosis_applies_to(diagnosis: Optional[dict], opportunity: dict) -> bool:
+    """这条诊断能不能用来给**这条商机**起草。
+
+    **这是一个实测到的缺陷的修复。** 一条关于 `HMDP-1`(Nike Air Max 270,退款率
+    20% 跨线,主因"尺码不准偏大")的诊断,产出的草稿是发给另一个买家、讲另一个
+    商品的:
+
+      #43 → acc_buyer / ACC-P1:「它**实际尺码偏大**,不少买家反馈建议选小一码哦」
+      #44 → acc_buyer / ACC-UNPAID:正文是催发货,而「依据」栏写的是尺码偏大的诊断
+
+    #43 把 A 商品的结论**当成 B 商品的事实说给买家听了**;#44 让人工审批看到一条
+    与草稿内容无关的依据——而店主正是靠那一栏决定批不批。
+
+    根因在 `handle_insight`:它"每次都重新查同一份全局商机集合"(那段注释自己写
+    着),然后把诊断**无条件**喂给 `_llm_draft`、无条件当成 `reason`。去重闸管住了
+    数量,没有任何东西管相关性。
+
+    判定规则:诊断是 SKU 级的(唯一能到营销的 refund_rate_high 恒是)→ 只有商机
+    确实涉及那个 SKU 才算适用。**商机的 skus 为空时判不适用**——空表示"不知道
+    涉及哪些 SKU",而"不知道"不能当"是"用:宁可少引用一条诊断(草稿退化成只按
+    商机情境写,仍然正确),也不能对买家说一件关于别的商品的事。
+
+    非 SKU 级的诊断(如店铺级情绪异常)按适用处理:它确实对所有买家成立。
+    """
+    kind = (diagnosis or {}).get("kind") or ""
+    if kind not in _SKU_SCOPED_DIAGNOSIS_KINDS:
+        return True
+    subject = str((diagnosis or {}).get("subject") or "").strip()
+    if not subject:
+        return False          # SKU 级却没有 subject:判不出来就不用
+    return subject in set(opportunity.get("skus") or [])
+
+
+def _opportunity_reason(opportunity: dict) -> str:
+    """商机自身的依据,用于诊断不适用时的 `reason`。
+
+    `reason` 是**人工审批的判断依据**,必须如实描述"为什么有这条草稿"。诊断不适用
+    时照抄诊断结论,等于给审批人一条误导性依据(实测见 `_diagnosis_applies_to`)。
+    优先用打分器已经算好的可读理由(`priority_reason`,形如"滞留 212h · ¥899 ·
+    历史转化样本不足"),没有就退回商机类型的中文说明。
+    """
+    reason = str(opportunity.get("priority_reason") or "").strip()
+    label = str(opportunity.get("situation_label") or opportunity.get("kind") or "").strip()
+    if reason and label:
+        return f"{label} · {reason}"
+    return reason or label or ""
+
+
+def _diagnosis_line(diagnosis: Optional[dict]) -> str:
+    """起草 prompt 里的「店铺诊断」那一行;不适用时返回空串。
+
+    整行**不出现**,而不是给一句"店铺诊断: None"——后者会让模型以为有过诊断,
+    然后去猜它的内容。
+    """
+    if not diagnosis:
+        return ""
+    return f"店铺诊断: {diagnosis.get('conclusion')}\n"
+
+
+def _llm_draft(diagnosis: Optional[dict], opportunity: dict) -> str:
     """基于诊断与单个商机起草一条触达话术。
+
+    `diagnosis` 为 None = 本条诊断与这条商机无关(见 `_diagnosis_applies_to`),
+    此时只按商机情境起草——少一层上下文,但不会说错商品。
 
     商机 dict 现在带 situation_label(该商机类型的中文说明)、以及订单类商机
     的 order_status/order_status_label(真实状态与其中文展示,参见
@@ -299,7 +367,7 @@ def _llm_draft(diagnosis: dict, opportunity: dict) -> str:
         "（付款状态、发货状态、订单所处的其它阶段等）一概不许提及或假设；"
         "**不要承诺任何金钱条款**（免运费/包退/全额退/返现/补券等一律不许写）。\n\n"
         "【数据开始】\n"
-        f"店铺诊断: {diagnosis.get('conclusion')}\n"
+        f"{_diagnosis_line(diagnosis)}"
         f"买家情境: {_serialize_opportunity(opportunity)}\n"
         # 买家档案(基础信息/行为标签/最近工单)。有档案时话术才点得到"这个人"
         # 而不只是"这一单";没有则整段为空串,行为与接入前逐字节一致。
@@ -485,8 +553,12 @@ def handle_insight(event: dict) -> dict:
             `logger.exception` 带全 traceback——这里可能是模型抖动,也可能是
             形参对不上之类的真 bug,不留栈就分不清楚。
             """
+            # 相关性闸:诊断与这条商机无关时,起草**不带**诊断上下文,reason 也换成
+            # 商机自身的依据。少了这一步,一条关于商品 A 的诊断会让草稿对 B 商品的
+            # 买家说出 A 的结论(实测见 `_diagnosis_applies_to`)。
+            applies = _diagnosis_applies_to(diagnosis, opp)
             try:
-                content = _llm_draft(diagnosis, opp)
+                content = _llm_draft(diagnosis if applies else None, opp)
             except Exception:  # noqa: BLE001
                 logger.exception("起草失败,跳过该商机(order_id=%s user_id=%s)",
                                  opp.get("order_id"), opp.get("user_id"))
@@ -500,7 +572,8 @@ def handle_insight(event: dict) -> dict:
             res = draft_outreach(user_id=opp.get("user_id", ""), content=content,
                                  kind=opp.get("kind") or "stale_pending_order",
                                  order_id=opp.get("order_id", ""),
-                                 reason=diagnosis.get("conclusion", ""))
+                                 reason=(diagnosis.get("conclusion", "") if applies
+                                         else _opportunity_reason(opp)))
             if not res.get("success"):
                 return False       # 含 P2 唯一约束拒绝(已有待审草稿)这一支
             # 把草稿挂到本条协作链上,时间线才串得起来;挂链失败/被状态守卫
