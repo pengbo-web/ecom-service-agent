@@ -17,6 +17,34 @@ from app.net.internal_http import internal_client
 
 logger = logging.getLogger(__name__)
 
+_breaker = None
+
+
+def _kb_breaker():
+    """ApeRAG 不可用后的退避冷却。
+
+    实测(2026-08-11):ApeRAG 容器随 Docker 引擎一起挂掉,一次需要知识库的问句
+    (「退货运费谁承担」)在 `recall` 事件上花了 **14.7 秒**——而 `aperag_timeout_s`
+    配的是 6 秒。差在 httpx 的 `Timeout(6.0)` 是**每个阶段各 6 秒**
+    (connect/read/write/pool),不是总额。
+
+    没有冷却时,每一个需要知识库的轮次都要重付一次这十几秒。这与会话存储/会话锁/
+    hmdp 身份解析是**同一个病**:fail-soft 只保证不崩,不保证不慢——降级路径在
+    正确性上是软的,在延迟上是硬的。所以复用同一个 Breaker,不另写一套。
+
+    冷却期内直接返回 None,与"服务不可用"完全同一个出口和同一个语义(见本模块
+    开头的约定:None=服务不可用 → kb.py 降级本地索引)。所以这不是拿正确性换
+    延迟:该降级的照样降级,而且 kb.py 会照常打上 `degraded` 标记、进看板的
+    知识库降级率——只是不再为每个轮次重付一次超时。
+    """
+    global _breaker
+    if _breaker is None:
+        from app.session.redis_health import Breaker
+        _breaker = Breaker(
+            float(getattr(settings, "kb_unavailable_cooldown_s", 30.0)),
+            name="ApeRAG 检索", dependency="ApeRAG")
+    return _breaker
+
 
 def aperag_search(query: str, top_k: int | None = None) -> list[dict] | None:
     """调用 ApeRAG collection-search API,返回归一化行或 None(服务不可用)。
@@ -27,6 +55,10 @@ def aperag_search(query: str, top_k: int | None = None) -> list[dict] | None:
     """
     if not settings.aperag_api_key or not settings.aperag_collection_id:
         logger.warning("kb_backend=aperag 但缺少 api_key/collection_id,降级本地")
+        return None
+    # 冷却期内不再发起调用:上一次已经证明服务不可用,再试一次只是把十几秒的
+    # 超时又摞到这一轮买家对话上。返回值与真实故障时一致(None),下游行为不变。
+    if _kb_breaker().open:
         return None
     topk = top_k if isinstance(top_k, int) and top_k > 0 else settings.recall_kb_top_k
     url = (f"{settings.aperag_base_url.rstrip('/')}/api/v1/collections/"
@@ -56,8 +88,12 @@ def aperag_search(query: str, top_k: int | None = None) -> list[dict] | None:
             resp = c.post(url, json=payload,
                           headers={"Authorization": f"Bearer {settings.aperag_api_key}"})
         if resp.status_code != 200:
+            # 非 200 **不**开冷却:这次调用是"很快就回来了、只是回了个错",代价是
+            # 一次往返而不是一次超时,没必要为它压掉 30 秒的恢复探测。开冷却只针对
+            # 真正贵的那一类失败(连接拒/超时),见下面的 except。
             logger.warning("aperag search http %s: %s", resp.status_code, resp.text[:200])
             return None
+        _kb_breaker().record_success()
         items = resp.json().get("items") or []
         rows = []
         for it in items:
@@ -70,6 +106,8 @@ def aperag_search(query: str, top_k: int | None = None) -> list[dict] | None:
                 "text": str(it.get("content") or ""),
             })
         return rows
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 容错红线:任何失败都只 warning + None
         logger.warning("aperag search failed", exc_info=True)
+        # 这一类才是贵的(连接拒/超时/代理隧道卡死):实测一次 14.7 秒。开冷却。
+        _kb_breaker().record_failure("search", exc)
         return None

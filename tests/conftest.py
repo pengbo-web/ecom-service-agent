@@ -37,6 +37,28 @@ def _isolate_trace_db(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _reset_failure_breakers():
+    """清掉模块级的退避冷却状态。
+
+    这些 Breaker(见 app/session/redis_health.py)是**进程级**的,故意如此——它们
+    要在请求之间记住"这个依赖刚才挂了"。代价是状态会跨测试泄漏:一个模拟故障的
+    测试会把冷却打开,紧随其后的测试就被**短路**,连调用都不发生。
+
+    实际撞到过:加完 ApeRAG 冷却后,test_external_kb.py 里三条本来无关的用例
+    集体报 `KeyError: 'json'`——不是断言错,是那次 HTTP 调用压根没发出去。这种
+    失败长得像"测试写错了",很容易被误诊。既然全局状态是我引入的,复位也归这里,
+    而不是让每个相关测试各自记得清一遍。
+    """
+    import app.agent.recall.external_kb as _ek
+    import app.api.hmdp_identity as _hi
+    _ek._breaker = None
+    _hi._breaker = None
+    yield
+    _ek._breaker = None
+    _hi._breaker = None
+
+
+@pytest.fixture(autouse=True)
 def _force_local_session_backends():
     set_session_store(FileSessionStore())        # 存储用 file
     set_session_lock(LocalSessionLock())         # 锁用进程内(不依赖 redis/env)
