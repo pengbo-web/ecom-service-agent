@@ -312,7 +312,12 @@ def _diagnosis_applies_to(diagnosis: Optional[dict], opportunity: dict) -> bool:
     subject = str((diagnosis or {}).get("subject") or "").strip()
     if not subject:
         return False          # SKU 级却没有 subject:判不出来就不用
-    return subject in set(opportunity.get("skus") or [])
+    # 归一后比较,不能用裸 `in`:同一件商品在库里有两种写法——order_items.sku 写
+    # `HMDP-1`(诊断 subject 的来源),carts.sku 写裸 `1`(弃单商机 sku 的来源)。
+    # 裸比较会让这道闸对弃单商机**永远判不适用**:闸看起来在,实际把所有诊断都
+    # 挡掉了,而且是静默的。见 app/agent/tools/product_ref.py。
+    from app.agent.tools.product_ref import matches_any_item
+    return matches_any_item(subject, opportunity.get("skus"))
 
 
 def _opportunity_reason(opportunity: dict) -> str:

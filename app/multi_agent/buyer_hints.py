@@ -62,13 +62,75 @@ _HINTS: dict[str, str] = {
 }
 
 
-def hint_for(kind: str) -> str:
-    """按异常类型取买家侧提示;未登记的类型返回空串。
+# 退换原因 → 类别。**固定关键词表,不问模型。**
+#
+# 加这一层是因为只按 kind 给提示太笼统,而笼统的提示挡不住编造。实测:诊断说这款
+# 鞋"尺码偏大,买家因『尺码不准,偏大一码』退货",注入的提示只有"退换反馈偏多…
+# 不要夸大",客服的回答是——
+#
+#   「该款为**标准版型**,多数顾客反馈『尺码标准,按日常脚长选即可』;
+#     您平时穿42,建议继续选择 42码,无需刻意选大或选小。」
+#
+# 三句话全是编的:商品描述里没有任何版型信息,评价表里这款一条都没有,而真实退款
+# 原因写的正是"偏大一码"。**方向是反的**,买家照这个建议下单就会收到偏大的鞋、
+# 再退回来——正是这条诊断在说的那种退货。
+#
+# 给一个真实的类别,模型就不需要自己造一个。类别本身仍是从固定词表里选出来的,
+# 不含数字、不含指标名、不含 LLM 生成的内容,与本模块的设计前提一致。
+_REASON_CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("size", ("尺码", "尺寸", "偏大", "偏小", "码数", "版型", "大了", "小了")),
+    ("quality", ("质量", "做工", "破损", "损坏", "开胶", "掉色", "瑕疵", "坏了")),
+    ("mismatch", ("不符", "不一致", "色差", "与描述", "图片不", "货不对板")),
+    ("logistics", ("物流", "快递", "发货", "太慢", "延迟", "破包")),
+)
+
+
+def reason_category(top_reason: str) -> str:
+    """把退换原因归到一个类别;认不出来返回空串。
+
+    认不出就返回空(退回按 kind 给的笼统提示),不硬塞一个类别——猜错类别会让客服
+    带着错误的注意事项去回答,比只给笼统提示更糟。
+    """
+    text = str(top_reason or "")
+    if not text:
+        return ""
+    for name, words in _REASON_CATEGORIES:
+        if any(w in text for w in words):
+            return name
+    return ""
+
+
+# (kind, category) 级的提示。比只按 kind 的版本**具体到能挡住编造**,但仍然
+# 不含任何数字、指标名或 LLM 生成内容。
+_HINTS_BY_CATEGORY: dict[tuple[str, str], str] = {
+    ("refund_rate_high", "size"):
+        "该商品近期退换反馈集中在尺码。回答尺码问题时**不得断言版型标准、也不得编造"
+        "顾客反馈**;如实说明存在尺码偏差反馈,建议买家核对脚长/尺码表或参考同款经验,"
+        "并主动告知可换货。",
+    ("refund_rate_high", "quality"):
+        "该商品近期退换反馈集中在质量问题。**不要为商品品质做担保性陈述**;买家问到时"
+        "如实回应、优先给出检验与售后路径。",
+    ("refund_rate_high", "mismatch"):
+        "该商品近期退换反馈集中在“与描述不符”。描述商品时严格按详情页字段陈述,"
+        "**不要补充详情页里没有的细节**;买家有疑虑时建议先核对参数再下单。",
+    ("refund_rate_high", "logistics"):
+        "该商品近期退换反馈集中在物流环节。**不要承诺具体送达时间**;如实说明当前物流"
+        "状态并给出可查询的下一步。",
+}
+
+
+def hint_for(kind: str, category: str = "") -> str:
+    """按异常类型(可选:退换原因类别)取买家侧提示;未登记的组合退回按 kind 的版本。
 
     未登记返回空而不是给个泛化提示:一条"注意点什么"的假提示会让客服的语气
     莫名其妙地变谨慎,而没有任何真实依据——宁可不给。
     """
-    return _HINTS.get(str(kind or ""), "")
+    k = str(kind or "")
+    if category:
+        specific = _HINTS_BY_CATEGORY.get((k, str(category)))
+        if specific:
+            return specific
+    return _HINTS.get(k, "")
 
 
 def render_buyer_hints(entries: list[dict], current_item_id: str | None) -> str:
@@ -94,10 +156,19 @@ def render_buyer_hints(entries: list[dict], current_item_id: str | None) -> str:
             if not isinstance(value, dict):
                 continue
             subject = str(value.get("subject") or "")
-            if subject != SHOP_SUBJECT and (
-                    not current_item_id or subject != str(current_item_id)):
+            # 归一后比较。**裸字符串相等在这里是永远不成立的**:诊断的 subject 来自
+            # order_items.sku(hmdp 渠道商品被写成 `HMDP-1`),而 current_item_id 是
+            # 前端传的 hmdp product.id(`1`)。实测 render_buyer_hints(entries, "1")
+            # 返回空串——整个商品级经验回流通路是断的,而且不报错、不留日志,只是
+            # 永远没有提示。见 app/agent/tools/product_ref.py 的完整证据。
+            from app.agent.tools.product_ref import same_item
+            if subject != SHOP_SUBJECT and not same_item(subject, current_item_id):
                 continue
-            hint = hint_for(value.get("kind"))
+            # 类别来自诊断 facts 里的 top_reason(买家自己填的退换原因),经固定
+            # 词表归到一个类别 —— 不是把原文注进去,也不问模型。见 reason_category。
+            facts = value.get("facts")
+            top_reason = (facts or {}).get("top_reason") if isinstance(facts, dict) else ""
+            hint = hint_for(value.get("kind"), reason_category(top_reason))
             if hint:
                 lines.append(f"- {hint}")
         except Exception:  # noqa: BLE001 单条坏数据不该拖垮整段
