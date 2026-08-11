@@ -152,6 +152,15 @@ def find_opportunities(kind: str = "stale_pending_order", window_days: int = 14,
                       "order_status": r["status"],
                       "order_status_label": STATUS_LABELS.get(r["status"], r["status"]),
                       "amount": float(r["total"] or 0.0), "created_at": r["created_at"],
+                      # SQL 算了 stale_hours,这里必须带过去。漏掉不会报错,只会让
+                      # priority.score_opportunity 取不到值、静默 fallback 到 0.0
+                      # ——滞留时长占权重 0.4,归零后这一类商机等于**只按金额排序**,
+                      # 而"把拖了一周的大额单排到前面"正是这个模块存在的全部理由。
+                      # 实测症状:一笔 08-02 下的 pending 单,理由栏写着"滞留 0h",
+                      # 分数 0.45(= 0.4×0 + 0.3×金额封顶 + 0.3×转化先验),而带上
+                      # 真实的 ~216h 应该是 0.85。七个分支里只有这一个漏了,而它
+                      # 恰好是默认 kind、也是唯一有真实数据的那个。
+                      "stale_hours": r["stale_hours"],
                       "items": r["items"] or ""} for r in rows]
 
         elif kind == "stalled_bargain":
