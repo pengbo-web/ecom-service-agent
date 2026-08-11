@@ -67,7 +67,8 @@ def _build_from_settings():
     from app.config.settings import settings
     if (getattr(settings, "idempotency_enabled", True)
             and getattr(settings, "session_store_backend", "file") == "redis"):
-        import redis
-        return RedisIdempotencyStore(redis.from_url(settings.redis_url),
+        # 强制超时,见 redis_health.py:直接 redis.from_url 不传超时等于无限阻塞。
+        from app.session.redis_health import make_client
+        return RedisIdempotencyStore(make_client(settings.redis_url),
                                      ttl=settings.idempotency_ttl)
     return NullIdempotencyStore()

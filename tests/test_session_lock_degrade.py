@@ -15,6 +15,20 @@ import threading
 import pytest
 
 from app.session.lock import LocalSessionLock, RedisSessionLock
+from app.session.redis_health import Breaker
+
+
+class _FakeClock:
+    """可推进的假时钟:验证冷却窗口不必真的 sleep。"""
+
+    def __init__(self, t: float = 1000.0):
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
 
 
 class _DeadRedis:
@@ -109,22 +123,46 @@ def test_different_sessions_are_not_blocked_while_degraded():
 
 
 def test_recovery_is_automatic_without_restart():
-    """降级只作用于本次调用:Redis 恢复后下一次自动走回分布式锁。
+    """降级**有界**:Redis 恢复后最多一个冷却窗口就自动走回分布式锁。
 
-    如果降级写进了实例状态,Redis 恢复后仍会一直用进程内锁,多实例部署下
-    会长期处于"看起来正常、实际没有全局互斥"的状态——比直接报错更难发现。
+    如果降级写进了实例状态且**永不**复位,Redis 恢复后会一直用进程内锁,多实例
+    部署下长期处于"看起来正常、实际没有全局互斥"的状态——比直接报错更难发现。
+    这条断言就是为了挡住那种永久 latch。
+
+    **这个测试原来断言的是"下一次调用立刻重试",现在改成"最多一个冷却窗口"。**
+    这不是把断言放宽去迁就实现,是一个明确的取舍,理由在实测数据里:
+
+      6379 上留着一个已删容器的 Docker 端口转发,接受 TCP 连接但永不应答。
+      没有冷却时,故障期间**每个买家请求**都要重连一次、再付一次 socket 超时;
+      一句走规则快路径、零 LLM 调用的「你好」因此要 12.2 秒。加冷却后同一句
+      在稳定态是 40 毫秒。
+
+    代价说清楚:冷却期内这把锁确实只有进程内互斥。但要看边际——**故障期间本来
+    就没有全局互斥**(两个实例都在回落进程内锁),冷却只是把这个状态从故障结束
+    那一刻**向后延长最多 cooldown 秒**。用"恢复后最多 5 秒仍是弱互斥"换"故障期间
+    每轮对话不再多付一次超时",在一个在线客服里是划得来的;而且窗口长度是配置项
+    (`session_store_redis_retry_cooldown_s`),对全局互斥更敏感的部署可以调小。
+
+    换不掉的是那条底线:**不能永久停在降级态**——所以下面仍然验证它会自己回来。
     """
+    clk = _FakeClock()
     r = _FlakyRedis(fail_times=1)
-    lock = RedisSessionLock(r)
+    lock = RedisSessionLock(r, now=clk, sleep=lambda s: None,
+                            breaker=Breaker(5.0, clock=clk))
 
     with lock.guard("s") as got:          # 第 1 次:Redis 挂,走进程内锁
         assert got is True
     assert r.calls == 1
 
-    with lock.guard("s") as got:          # 第 2 次:Redis 好了,应重新尝试
+    with lock.guard("s") as got:          # 冷却期内:不该再碰 Redis
         assert got is True
-    assert r.calls == 2, "恢复后必须重新走 Redis,而不是永久停在降级态"
-    assert r.store, "第 2 次应真的把锁写进了 Redis"
+    assert r.calls == 1, "冷却期内每个请求都重连一次,等于把 socket 超时摞在买家身上"
+
+    clk.advance(5.1)
+    with lock.guard("s") as got:          # 冷却到期:Redis 好了,自动走回
+        assert got is True
+    assert r.calls == 2, "冷却到期后必须重新走 Redis,而不是永久停在降级态"
+    assert r.store, "这一次应真的把锁写进了 Redis"
 
 
 def test_release_failure_is_still_swallowed():

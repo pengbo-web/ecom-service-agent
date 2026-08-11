@@ -271,6 +271,18 @@ class Settings(BaseSettings):
     # 下次调用自动重新尝试连 Redis(不是永久开关)。见 app/session/store.py
     # RedisSessionStore。几秒即可:既躲开单次故障被反复摞超时,又不拖慢恢复后的切回。
     session_store_redis_retry_cooldown_s: float = 5.0
+    # Redis 客户端的**强制**超时。redis-py 的默认值是 None = 无限阻塞,而这四个
+    # 消费方(会话存储/会话锁/幂等/hmdp 身份解析)全在买家回复的热路径上——
+    # "最坏情况无界"在一个有 SLA 的在线客服里等于没有 SLA。
+    #
+    # 实测过它的代价:6379 上留着一个已删容器的 Docker 端口转发,接受 TCP 连接
+    # 但永不应答(比 ConnectionRefused 恶劣得多,后者毫秒级返回)。一句走规则
+    # 快路径、零 LLM 调用的「你好」因此要 12.2 秒,而 12 秒全是 Redis。
+    #
+    # 健康的本机 Redis 单次操作是亚毫秒级,1 秒已经非常宽松;远端 Redis 若确实
+    # 需要更长,调这两个值,但不要调回 None。
+    redis_connect_timeout_s: float = 0.5
+    redis_socket_timeout_s: float = 1.0
     checkpoint_enabled: bool = True   # R2 步级 checkpoint:每工具步落盘,回合中途崩溃可恢复
     session_lock_ms: int = 30000      # R4 分布式会话锁超时(毫秒),防持有者崩溃后死锁
     archive_enabled: bool = True      # R5 会话结束/回收时冷归档到 SQLite(审计/离线分析)
@@ -347,6 +359,13 @@ class Settings(BaseSettings):
     # "该失败就快失败"仍然成立,只是失败线要划在真实分布之外而不是之内。
     # 后续按 kb_latency 观测事件里 outcome=timeout 的真实占比再调。
     aperag_timeout_s: float = 6.0
+    # ApeRAG 不可用后的退避冷却秒数。**注意 aperag_timeout_s 不是总额**:httpx 的
+    # Timeout(6.0) 是 connect/read/write/pool **各** 6 秒,实测一次不可用的调用花了
+    # 14.7 秒。没有冷却时,每个需要知识库的轮次都要重付一次——所以这个窗口比会话侧
+    # 的 5 秒长:知识库降级期间买家仍能得到回答(只是没有政策依据),用 30 秒的
+    # 恢复探测延迟换"每轮不再多等十几秒"是划得来的。
+    # 冷却期内的返回值与真实故障一致(None),kb.py 照常打 degraded 标记进看板。
+    kb_unavailable_cooldown_s: float = 30.0
     # ApeRAG **写入**超时。与检索超时分开:检索在买家热路径上、要求快速失败
     # (6s 是按实测分布定的,见上);写入在离线 worker 里,一次文档上传 + 确认
     # 本来就比一次向量检索重得多,拿 6s 去卡它只会让正常的写入被误杀。

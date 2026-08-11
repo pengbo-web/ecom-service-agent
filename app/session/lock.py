@@ -53,7 +53,7 @@ class RedisSessionLock:
 
     def __init__(self, client, ttl_ms: int = 30000, wait_timeout: float = 30.0,
                  retry_interval: float = 0.1, now=time.monotonic, sleep=time.sleep,
-                 fallback=None):
+                 fallback=None, breaker=None):
         self._r = client
         self._ttl_ms = ttl_ms            # 锁自动过期(防持有者崩溃后死锁)
         self._wait = wait_timeout        # 抢不到时最多等多久
@@ -62,6 +62,22 @@ class RedisSessionLock:
         self._sleep = sleep
         #: Redis 不可用时退到的进程内锁。见 `guard` 的降级说明。
         self._fallback = fallback if fallback is not None else LocalSessionLock()
+        #: 失败后退避。**这一处原先是漏的**:紧挨着的会话存储早就有退避
+        #: (store.py 的 `_down_until`),这里只有 fail-soft 没有冷却,于是故障
+        #: 期间每个请求都要重新连一次 Redis、再付一次 socket 超时。
+        #:
+        #: 本类的 `guard` docstring 里写着"同一次故障里,一半组件降级、另一半把
+        #: 服务打死,这不是设计取舍,是漏了一处"——同一句话对**冷却**也成立,
+        #: 而漏的正是这一处:降级路径在正确性上是软的,在延迟上是硬的。
+        #:
+        #: 实测代价见 redis_health.py 模块 docstring(一句零 LLM 的「你好」12.2 秒)。
+        if breaker is None:
+            from app.config.settings import settings
+            from app.session.redis_health import Breaker
+            breaker = Breaker(
+                float(getattr(settings, "session_store_redis_retry_cooldown_s", 5.0)),
+                name="会话锁", dependency="Redis", clock=now)
+        self._breaker = breaker
 
     @staticmethod
     def _lock_key(key: str) -> str:
@@ -89,13 +105,36 @@ class RedisSessionLock:
           互斥",弱于全局互斥但远好于前两者。这与会话存储降级后的语义
           (本地文件 = 每实例各存各的)是**同一档**,两者对齐才讲得通。
 
-        降级只在**本次调用**内生效,不改全局状态:Redis 恢复后下一次调用自动
-        走回分布式锁,不需要重启,也不会永久停在降级态。
+        **降级是有界的,但不再是"只作用于本次调用"。** 这里刻意做了一个取舍:
+        失败后开一个冷却窗口(`session_store_redis_retry_cooldown_s`,默认 5 秒),
+        窗口内直接走进程内锁、不再碰 Redis。
+
+        为什么要这么换:没有冷却时,一次**持续**故障会让每个买家请求都重连一次、
+        再付一次 socket 超时。实测过它的代价——6379 上留着一个已删容器的 Docker
+        端口转发,接受 TCP 连接但永不应答,于是一句走规则快路径、零 LLM 调用的
+        「你好」要 12.2 秒;加冷却后稳定态是 40 毫秒。
+
+        代价说清楚:冷却期内这把锁只有进程内互斥。但看边际——**故障期间本来就
+        没有全局互斥**(两个实例都在回落进程内锁),冷却只是把这个状态从故障结束
+        那一刻向后延长最多 cooldown 秒。对全局互斥更敏感的部署把窗口调小即可。
+
+        换不掉的底线仍然成立:**不会永久停在降级态**,冷却到期自动重试,Redis
+        恢复即自动切回,不需要重启(见 tests/test_session_lock_degrade.py)。
         """
         rk = self._lock_key(key)
         token = uuid.uuid4().hex
         deadline = self._now() + (self._wait if timeout is None else timeout)
         acquired = False
+
+        # 冷却期内直接走进程内锁,**不再碰 Redis**。少了这一步,一次持续故障
+        # 会让每个买家请求都重新连一次、再付一次 socket 超时——功能没坏,但每轮
+        # 对话凭空多出秒级延迟,而且日志里看不出这是同一次故障。
+        if self._breaker.open:
+            with self._fallback.guard(key, timeout=(
+                    self._wait if timeout is None else timeout)) as got:
+                yield got
+            return
+
         while True:
             try:
                 ok = self._r.set(rk, token, nx=True, px=self._ttl_ms)
@@ -107,10 +146,12 @@ class RedisSessionLock:
                     "与会话存储的降级同源,请尽快恢复 Redis;恢复后下一次调用自动"
                     "走回分布式锁,无需重启。session=%s",
                     type(exc).__name__, exc, key)
+                self._breaker.record_failure("acquire", exc)
                 with self._fallback.guard(key, timeout=(
                         self._wait if timeout is None else timeout)) as got:
                     yield got
                 return
+            self._breaker.record_success()
             if ok:
                 acquired = True
                 break
@@ -159,7 +200,8 @@ def set_session_lock(lock) -> None:
 def _build_from_settings():
     from app.config.settings import settings
     if getattr(settings, "session_store_backend", "file") == "redis":
-        import redis
-        return RedisSessionLock(redis.from_url(settings.redis_url),
+        # 强制超时,见 redis_health.py:直接 redis.from_url 不传超时等于无限阻塞。
+        from app.session.redis_health import make_client
+        return RedisSessionLock(make_client(settings.redis_url),
                                 ttl_ms=settings.session_lock_ms)
     return LocalSessionLock()

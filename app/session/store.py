@@ -194,13 +194,15 @@ def _build_from_settings() -> SessionStore:
     from app.config.settings import settings
     backend = getattr(settings, "session_store_backend", "file")
     if backend == "redis":
-        import redis  # 延迟导入,file 后端无需 redis 依赖
         cooldown = getattr(
             settings, "session_store_redis_retry_cooldown_s",
             RedisSessionStore.DEFAULT_RETRY_COOLDOWN_S,
         )
+        # 经 make_client 而不是直接 redis.from_url:后者不传超时时 redis-py 默认
+        # 是 None(无限阻塞),而这条路在买家回复的热路径上。见 redis_health.py。
+        from app.session.redis_health import make_client
         return RedisSessionStore(
-            redis.from_url(settings.redis_url), settings.session_ttl,
+            make_client(settings.redis_url), settings.session_ttl,
             retry_cooldown_s=cooldown,
         )
     return FileSessionStore()
