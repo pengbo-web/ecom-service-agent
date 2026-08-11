@@ -1501,7 +1501,21 @@ def create_app(session_manager: Optional[SessionManager] = None,
             user_id = draft.get("user_id", "")
             conv = db.latest_conversation(user_id)
             if not conv:
-                return {"delivered": False, "warning": ""}
+                # **永久性失败,不是抖动。** 这条通道是"把消息追加进买家自己的客服
+                # 会话",买家从来没开过会话就没有可追加的地方,再点一次批准结果
+                # 一样。此前它与"抢不到锁"、"落盘失败"塌成同一个 delivered=False,
+                # 于是操作者收到的是一句"投递失败,已退回待审,可重试"——重试永远
+                # 失败,而每一次都要花掉一次人工注意力。
+                #
+                # 实测撞到:走查时给 `walkthrough_buyer` 造了订单(直接写库,没聊过
+                # 天),商机发现器照常挑出他 → 营销花一次 LLM 起草 → 人工审 → 批准
+                # → 必然失败 → 提示可重试。整条链在一个**结构上不可达**的目标上
+                # 空转。`_revert_after_failure` 本来就有 `retryable` 参数、它的
+                # docstring 也写着"不能不管三七二十一都说可重试",只是投递这一路
+                # 被硬编码成 True,这一种情形从那条纪律里漏了出去。
+                return {"delivered": False, "warning": "",
+                        "reason": "该买家没有客服会话,无法通过会话通道投递",
+                        "retryable": False}
             sid = conv["conversation_id"]
             with session_lock.guard(sid) as got:
                 if not got:
@@ -1535,16 +1549,24 @@ def create_app(session_manager: Optional[SessionManager] = None,
                        "这只影响会话列表的排序,不影响买家已收到的消息,**请勿重试**")
         return {"delivered": True, "warning": warning}
 
-    def _delivery_result(raw) -> tuple[bool, str]:
-        """把投递函数的返回值归一成 (delivered, warning)。
+    def _delivery_result(raw) -> tuple[bool, str, str, bool]:
+        """把投递函数的返回值归一成 (delivered, warning, reason, retryable)。
 
         `app.state.deliver_outreach` 是一个可替换的注入点(测试打桩、未来别的
         投递通道),历史签名返回裸 bool。裸 bool 只表达"送没送到",没有"送到了但
         记账有问题"这一档,按 warning 为空处理即可,语义无损且不会误判成失败。
+
+        `reason` / `retryable` 是后加的:**失败原因不都是同一种性质**。"买家没有
+        客服会话"是永久性的(重试永远失败),而"抢不到锁"、"落盘失败"是暂时的。
+        塌成一个 bool 之后操作者一律被告知"可重试",于是在结构上不可达的目标上
+        反复消耗人工注意力。缺省 `retryable=True` 保持既有行为:老式裸 bool 和
+        没带这两个键的字典(包括测试里的桩)语义逐字节不变。
         """
         if isinstance(raw, dict):
-            return bool(raw.get("delivered")), str(raw.get("warning") or "")
-        return bool(raw), ""
+            return (bool(raw.get("delivered")), str(raw.get("warning") or ""),
+                    str(raw.get("reason") or ""),
+                    bool(raw.get("retryable", True)))
+        return bool(raw), "", "", True
 
     # 挂到 app.state,而不是靠 `global` 改写模块级名字:这里闭包住的是**这个**
     # app 实例的 manager/session_lock,与买家侧 session_manager 同样挂
@@ -1575,6 +1597,9 @@ def create_app(session_manager: Optional[SessionManager] = None,
         from app.agent.coupons.grants import COUPON_BY_CODE
 
         rows = get_db().list_outreach_drafts(status=status or None, limit=limit)
+        db = get_db()
+        # 可达性缓存:同一个买家可能有多条待审草稿,一次列表不必为他重复查会话。
+        reachable: dict[str, bool] = {}
         for r in rows:
             kind = r.get("opportunity_type") or ""
             r["opportunity_label"] = OPPORTUNITY_KINDS.get(kind, kind)
@@ -1582,6 +1607,28 @@ def create_app(session_manager: Optional[SessionManager] = None,
             if code:
                 info = COUPON_BY_CODE.get(code)
                 r["coupon_discount"] = info["discount"] if info else ""
+            # 可达性:与上面 coupon_discount **同一条原则**——把"批准之后会发生
+            # 什么"在按钮按下**之前**摆出来,而不是让店主事后才知道。
+            #
+            # 投递通道是"把消息追加进买家自己的客服会话"(见 _deliver_outreach),
+            # 买家从来没开过会话就没有可追加的地方,批准必定失败、且重试永远失败。
+            # 而商机发现器读的是 orders/carts,与 conversations 无关——所以待审队列
+            # 里本来就会混进结构上不可达的目标。实测走查时就撞到一条:营销花了一次
+            # LLM 起草、人工审完批准,才发现送不出去。
+            #
+            # 这里**只标注不过滤**:买家没有客服会话不等于这条商机不成立(店铺可能
+            # 有别的触达渠道,买家也可能明天就来咨询),悄悄丢掉是另一种错。
+            uid = str(r.get("user_id") or "")
+            if uid not in reachable:
+                try:
+                    reachable[uid] = bool(db.latest_conversation(uid))
+                except Exception:  # noqa: BLE001 查不到就不标注,绝不因此让整张列表 500
+                    logger.warning("查询买家会话失败,该条不标注可达性 user_id=%s",
+                                   uid, exc_info=True)
+                    reachable[uid] = True
+            r["deliverable"] = reachable[uid]
+            r["undeliverable_reason"] = (
+                "" if reachable[uid] else "该买家没有客服会话,批准后无法投递(重试也不会成功)")
         return {"success": True, "drafts": rows}
 
     @app.get("/api/admin/growth/opportunity-kinds", dependencies=[Depends(admin_auth)])
@@ -1740,9 +1787,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
         if not coupon_ok:
             return _revert_after_failure(f"发券失败:{coupon_reason}", retryable=False)
 
-        delivered, deliver_warning = _delivery_result(app.state.deliver_outreach(draft))
+        (delivered, deliver_warning, deliver_reason,
+         deliver_retryable) = _delivery_result(app.state.deliver_outreach(draft))
         if not delivered:
-            return _revert_after_failure("投递失败")
+            # 原因跟着投递函数走,不在这里猜:同样是 delivered=False,"买家没有客服
+            # 会话"重试永远失败,而抢锁/落盘失败重试是有意义的。文案与 retryable
+            # 都必须如实,这正是 _revert_after_failure 那段 docstring 的纪律。
+            return _revert_after_failure(
+                f"投递失败:{deliver_reason}" if deliver_reason else "投递失败",
+                retryable=deliver_retryable)
 
         # 消息已经真实投递给买家(不可撤销)。下游(如营销 Analyst)据此了解
         # 触达已发生,不因"标记已发送"这一步的成败而改变——那只是本地账本。

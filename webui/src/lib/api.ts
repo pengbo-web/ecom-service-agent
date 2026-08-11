@@ -478,6 +478,13 @@ export type OutreachDraft = {
   // order_ops._COUPONS)。券码不是店铺已知券(模型编的)时为空字符串——
   // 前端据此判断"这不是一张真实的券",而不是自己另存一份券码/文案表。
   coupon_discount?: string;
+  // 可达性:投递通道是"把消息追加进买家自己的客服会话",买家没有会话就送不出去,
+  // 而且重试永远失败。与 coupon_discount 同一条原则——把"批准之后会发生什么"在
+  // 按钮按下**之前**摆出来。商机发现器读 orders/carts,与 conversations 无关,
+  // 所以待审队列里本来就会混进结构上不可达的目标。后端刚补上,老响应没有这两个
+  // 键时按"可达"处理(不凭空标红)。
+  deliverable?: boolean;
+  undeliverable_reason?: string;
 };
 
 export async function getGrowthDrafts(status = "draft"): Promise<{ drafts: OutreachDraft[] }> {

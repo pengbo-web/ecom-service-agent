@@ -525,6 +525,19 @@ export function GrowthPanel() {
                   </div>
                 )}
 
+                {d.deliverable === false && (
+                  // 与上面那张券的提示同一条原则:把"批准之后会发生什么"在按钮
+                  // 按下**之前**摆出来。这一条批下去必定失败,而且重试永远失败
+                  // ——实测走查时就是批完才发现,营销那次 LLM 起草和一次人工审批
+                  // 都白花了。不隐藏批准按钮:店主可能有别的处置(比如先想办法
+                  // 让买家来咨询),该由人决定,界面只负责说清楚。
+                  <div data-testid={`undeliverable-${d.id}`}
+                       className="mt-2 rounded-md border border-amber-500/50 bg-amber-500/10
+                                  p-2 text-xs font-semibold text-amber-700 dark:text-amber-400">
+                    ⚠ {d.undeliverable_reason || "该买家当前无法投递"}
+                  </div>
+                )}
+
                 <div className="mt-2 whitespace-pre-wrap rounded-md bg-secondary/40 p-2 text-sm">
                   {d.content}
                 </div>
