@@ -28,6 +28,19 @@
 """
 
 import argparse
+import os
+import sys
+
+# 直接按路径跑(`python app/scripts/agent_collab.py --loop`)时,sys.path[0] 是
+# app/scripts/,仓库根不在里面,于是 `from app.agent...` 抛 ModuleNotFoundError。
+#
+# 这不是"用法不对"就能算了的:这个 worker 恰恰是运维在**前端看到「协作 worker
+# 已停摆」之后**要手动拉起来的东西,而那一刻最自然的手势就是按路径敲。让它在
+# 那一刻炸一个 ModuleNotFoundError,等于把一次本来两秒钟的恢复变成一次排障。
+# 三行兜底比一句"请用 -m"可靠。
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 import sys
 import time
 
@@ -125,7 +138,10 @@ def main(argv=None) -> int:
               f"corr={s['correlation_id']}", flush=True)
         a = attribute_once()
         print(f"[attribute] checked={a['checked']} converted={a['converted']} "
-              f"no_change={a['no_change']}", flush=True)
+              f"no_change={a['no_change']} "
+              # 判不出来的条数也要打出来:它不进转化率分母,不打就等于这些草稿
+              # 从统计里消失了(见 attribute_outreach._judge)。
+              f"unattributable={a.get('unattributable', 0)}", flush=True)
         f = run_due_followups(hitl=_build_worker_hitl())
         print(f"[followup] checked={f['checked']} drafted={f['drafted']} "
               f"stopped={f['stopped']} done={f['done']}", flush=True)
@@ -156,7 +172,8 @@ def main(argv=None) -> int:
         if args.attribute:
             a = attribute_once()
             print(f"[attribute] checked={a['checked']} converted={a['converted']} "
-                  f"no_change={a['no_change']}", flush=True)
+                  f"no_change={a['no_change']} "
+                  f"unattributable={a.get('unattributable', 0)}", flush=True)
         if args.followup:
             f = run_due_followups(hitl=_build_worker_hitl())
             print(f"[followup] checked={f['checked']} drafted={f['drafted']} "

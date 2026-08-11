@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 # 不需要为开关状态另起一份序。
 STATUS_ORDER = ["unpaid", "pending", "shipped", "delivered"]
 
+# "判不出来"这一档。与 converted / no_change 并列而不是折进后者——见 `_judge`
+# 的说明:no_change 会进 conversion_rates 的分母,把无法判断当成失败会永久
+# 拉低该商机类型的历史转化率。
+OUTCOME_UNATTRIBUTABLE = "unattributable"
+
 
 def _progressed(before: str, after: str) -> bool:
     """判定 after 相对 before 是否**向前推进**(而不仅仅是"不同")。
@@ -43,20 +48,40 @@ def _progressed(before: str, after: str) -> bool:
 
 
 def _judge(draft: dict, db: Database) -> str:
-    """对一条到期草稿判定 converted / no_change。
+    """对一条到期草稿判定 converted / no_change / unattributable。
 
-    有 order_id:目标订单状态从 status_at_send 是否向前推进;订单查不到了
-    (理论上不该发生,但不假装能确认推进)一律 no_change。
+    有 order_id:目标订单状态从 status_at_send 是否向前推进。
     无 order_id(弃单、咨询未下单这类商机):看该买家是否在发送后新建了订单——
     这类商机本来就没有"一单的状态"可比,唯一能确定性观测到的"往前走"就是
     "买家下单了"。
+
+    **`unattributable` 是"判不出来",不是"判出来是坏的"。** 改造前这两种情况都
+    返回 `no_change`,而 `no_change` 不是中性值——`priority.conversion_rates` 把
+    `outcome IN ('converted','no_change')` 当分母,于是一条**无法判断**的触达会被
+    当成一次**失败**的触达,永久拉低该商机类型的历史转化率,而那个转化率占商机
+    打分权重 0.3(`priority_weight_conversion`)。判不出来却被记成失败,是这个
+    代码库反复出现的同一类错(参见 anomaly 的 `service_insufficient`、
+    service_quality 的 `other` 桶)。
+
+    两种判不出来:
+      - 订单查不到了(被删/被归档):没有可比对的当前状态;
+      - `status_at_send` 为空:没有基线。`_progressed("", x)` 因为空串不在
+        STATUS_ORDER 里恒返回 False,于是这条草稿**无论买家做什么都会被判
+        no_change**——实测库里 4 条已发送草稿里有 3 条正是这种(它们关联的
+        DEMO-006/008/010 在 orders 表里不存在)。
+
+    `conversion_rates` 不需要任何改动:它的 WHERE 本来就是白名单,新增的取值
+    自动被排除在分母之外。
     """
     order_id = (draft.get("order_id") or "").strip()
     if order_id:
         order = db.get_order(order_id)
         if order is None:
-            return "no_change"
-        return "converted" if _progressed(draft.get("status_at_send") or "",
+            return OUTCOME_UNATTRIBUTABLE
+        baseline = (draft.get("status_at_send") or "").strip()
+        if not baseline:
+            return OUTCOME_UNATTRIBUTABLE
+        return "converted" if _progressed(baseline,
                                           order.get("status") or "") else "no_change"
 
     user_id = draft.get("user_id") or ""
@@ -90,7 +115,12 @@ def attribute_once(window_hours: Optional[int] = None, db: Optional[Database] = 
     d = db or get_db()
     hours = window_hours if window_hours is not None else settings.outreach_attribution_window_hours
 
-    stats = {"checked": 0, "converted": 0, "no_change": 0}
+    stats = {"checked": 0, "converted": 0, "no_change": 0,
+             # 判不出来的条数。**必须报出来**:它不进转化率分母(见 `_judge`),
+             # 所以不单独计数的话这些草稿就从所有统计里彻底消失了——那与把它们
+             # 记成失败是两种相反的错,都不可接受。这个数持续不为 0,就该去查
+             # 为什么草稿关联的订单查不到、或发送时没落上状态基线。
+             OUTCOME_UNATTRIBUTABLE: 0}
     pending = d.pending_attribution(older_than_hours=hours)
     for draft in pending:
         outcome = _judge(draft, d)
@@ -99,6 +129,16 @@ def attribute_once(window_hours: Optional[int] = None, db: Optional[Database] = 
             continue
         stats["checked"] += 1
         stats[outcome] += 1
+
+        if outcome == OUTCOME_UNATTRIBUTABLE:
+            # 不发总线事件:没有"结果"可回写给参谋——发一条 no_change 会让下游
+            # 统计到一次并不存在的失败,而总线上也没有为"判不出来"设计的收件人。
+            # 出口是上面那个计数 + 这条 warning,不是静默跳过。
+            logger.warning(
+                "触达归因判不出来(不计入转化率) draft=%s order=%s baseline=%r"
+                "——通常是关联订单已不存在,或发送时没落上状态基线",
+                draft.get("id"), draft.get("order_id"), draft.get("status_at_send"))
+            continue
 
         # 事件类型常量归 app/multi_agent/bus.py 唯一持有(与 EV_SIGNAL_ANOMALY
         # 等其它事件类型同放一处),这里只取用,不再另起一份。
