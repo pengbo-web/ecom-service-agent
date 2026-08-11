@@ -146,6 +146,19 @@ class Settings(BaseSettings):
     anomaly_min_samples: int = 5             # 低于此样本量不报
     anomaly_angry_rate: float = 0.20         # 激烈情绪(angry)占比告警线
     anomaly_bad_review_rate: float = 0.30    # 商品差评率(rating<=2)告警线
+    # 服务健康(工具失败率/转人工率/情绪)的判定窗口,**与经营窗口刻意分开**。
+    #
+    # 实测教训:track-order 在 08-04 那天 36 次调用全部 tool_error(当时确实有
+    # 缺陷),修好之后 08-11 当天 9 次全部成功。可服务健康也走 7 天经营窗时,
+    # 那 36 次仍留在分子里 → 报出 84% 失败率 → 一个**已经修好**的问题连续报警
+    # 7 天、每轮扫描一条,协作链页面被 30 条同样的假警报刷满,今天 9/9 健康被
+    # 完全淹掉。这条教训在看板改造时就写下过(见 observability/metrics.py 的
+    # window_hours 那段),当时只落到了看板,没有落到告警侧。
+    #
+    # 为什么经营指标不跟着缩窗:退款率/差评率有天然滞后(下单→收货→退款/评价
+    # 跨若干天),1 天窗会把它们统统压成 0;而一个工具是不是坏的,只有"现在"
+    # 这一个时态。_window_clause 下界是 1 天,所以 1 是能表达的最小值。
+    anomaly_service_window_days: int = 1
 
     # 情绪信号旁路埋点(N2):按每一轮写 turn_signals,与 skill_trace_enabled 同姿态
     # ——关闭时不写库,任何异常都 fail-soft,绝不影响回复主流程。

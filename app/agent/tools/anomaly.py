@@ -32,6 +32,11 @@ def _thresholds() -> dict:
         "min_samples": int(getattr(settings, "anomaly_min_samples", 5)),
         "angry_rate": float(getattr(settings, "anomaly_angry_rate", 0.20)),
         "bad_review_rate": float(getattr(settings, "anomaly_bad_review_rate", 0.30)),
+        # 服务健康专用的判定窗口(见 settings.anomaly_service_window_days 那段
+        # 注释里的实测教训)。放进 _thresholds 而不是单独取一次:它和上面几条
+        # 一样是"判异常的口径",应当跟着 thresholds 一起出现在返回值里,让看到
+        # 告警的人能知道这个比率是按多长的窗算的。
+        "service_window_days": int(getattr(settings, "anomaly_service_window_days", 1)),
     }
 
 
@@ -86,6 +91,13 @@ def anomaly_scan(window_days: int = 7) -> dict:
     每条异常带 kind / subject / value / threshold / detail,后两者让人和模型都
     能判断"离线多远",而不是只看到一个"异常"标签。
 
+    **两个窗口,不是一个**:`window_days`(入参,默认 7)只管经营侧——退款率、
+    差评率有天然滞后(下单→收货→退款/评价跨若干天),缩窗会把它们压成 0;
+    服务健康(工具失败率/转人工率/情绪)走 `anomaly_service_window_days`
+    (默认 1 天),因为一个工具是不是坏的只有"现在"这一个时态。把两者混成一个
+    7 天窗的后果是实测过的:一个已经修好的工具会被连续报警 7 天,见
+    settings.anomaly_service_window_days 那段注释。
+
     **盲区提示(重要)**:商品侧只看 product_diagnostics 给的前
     PRODUCT_SCAN_LIMIT 名,而它按"退款单数 DESC、下单量 DESC"排序——排的是
     **绝对退款单数**,不是退款率。一旦店里 SKU 数超过这个切片大小,一个绝对
@@ -111,21 +123,50 @@ def anomaly_scan(window_days: int = 7) -> dict:
 
     products_total = _scanned_sku_total(window_days)
 
-    svc = service_quality(window_days=window_days)
+    # 服务健康走**近窗**,不跟经营窗:工具坏没坏只有"现在"这一个时态,而退款率
+    # /差评率有天然滞后。两个窗都在返回值里报出来,不让人以为只有一个口径。
+    svc_window = t["service_window_days"]
+    svc = service_quality(window_days=svc_window)
+    near = {s["skill_name"]: s["total"] for s in svc.get("skills", [])}
+
+    # 近窗样本不足 ≠ 健康,所以要如实列出,让"没报警"和"没数据所以报不了警"
+    # 成为两件看得见的事(与 products_truncated / reviews_truncated 同姿态)。
+    # 这是缩窗的**代价**,摆在返回值里而不是藏起来:一个坏掉之后再没人调用的
+    # skill 不会再被报出来。旧的 7 天窗会一直报它——那看起来像"检测更灵敏",
+    # 实际是分不清"仍然坏着"和"当时坏过",而这两者的处置完全不同。
+    #
+    # 关键:**不能只遍历近窗**。service_quality 是 GROUP BY 聚合,窗内没有行的
+    # skill 压根不出现,而"坏掉之后零调用"恰恰是近窗 0 行——只遍历 svc 会让最
+    # 需要说明的那一种恰好隐身。所以拿经营窗(更宽)的名册当全集。名册仍以
+    # window_days 为界:比经营窗还老、且之后零调用的 skill 连名字都取不到,
+    # 这是这份列表已知的边界,不是漏报。
+    wide = svc if int(window_days) == int(svc_window) else \
+        service_quality(window_days=window_days)
+    roster = sorted({s["skill_name"] for s in wide.get("skills", [])} | set(near))
+    service_insufficient = [
+        {"skill_name": n, "total": near.get(n, 0), "min_samples": t["min_samples"]}
+        for n in roster if near.get(n, 0) < t["min_samples"]
+    ]
+
     for s in svc.get("skills", []):
         if s["total"] < t["min_samples"]:
-            continue
+            continue                      # 已在 service_insufficient 里报过
         if s["tool_error_rate"] >= t["tool_error_rate"]:
             anomalies.append(_finding(
                 "tool_error_rate_high", s["skill_name"], s["skill_name"],
                 s["tool_error_rate"], t["tool_error_rate"],
-                {"total": s["total"], "success_rate": s["success_rate"]},
+                # window_days 跟着 detail 走:这条告警下游要进参谋的归因 prompt、
+                # 要写进共享上下文、还要显示在协作链页面上。一个失败率脱离了
+                # 统计窗口就没有意义——同样的 0.84,近 1 天和近 7 天是两件事,
+                # 而看到它的人(和模型)没有别的途径知道是哪一个。
+                {"total": s["total"], "success_rate": s["success_rate"],
+                 "window_days": svc_window},
             ))
         if s["human_rate"] >= t["human_rate"]:
             anomalies.append(_finding(
                 "human_rate_high", s["skill_name"], s["skill_name"],
                 s["human_rate"], t["human_rate"],
-                {"total": s["total"]},
+                {"total": s["total"], "window_days": svc_window},
             ))
 
     # 情绪信号:是否"有情绪问题"由阈值判定,不问模型——判定权归确定性规则,
@@ -135,7 +176,8 @@ def anomaly_scan(window_days: int = 7) -> dict:
         anomalies.append(_finding(
             "angry_rate_high", "shop", "全店",
             emo["angry_rate"], t["angry_rate"],
-            {"total": emo["total"], "counts": emo.get("counts", {})},
+            {"total": emo["total"], "counts": emo.get("counts", {}),
+             "window_days": svc_window},
         ))
 
     # 差评率:按商品聚合窗口内评价(rating<=2 为差评),同一套跨线才报 +
@@ -156,6 +198,11 @@ def anomaly_scan(window_days: int = 7) -> dict:
     reviews_total = _scanned_review_total(window_days)
 
     return {"success": True, "window_days": int(window_days),
+            # 两个窗都报出来。`window_days` 现在只管经营侧(退款率/差评率),
+            # 服务健康那三条走 service_window_days——不报第二个数,调用方会
+            # 拿 window_days 去解释一个不是按它算出来的失败率。
+            "service_window_days": int(svc_window),
+            "service_insufficient": service_insufficient,
             "thresholds": t, "anomalies": anomalies,
             "products_examined": len(products),
             "products_truncated": products_total > len(products),
