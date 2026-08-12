@@ -608,7 +608,28 @@ def create_app(session_manager: Optional[SessionManager] = None,
         (AI 读本地库、页面读 hmdp)完全相同的形态。
         """
         user = _resolve_user(request, None)
-        token = _hmdp_token_for_user(user)
+
+        # **按"这笔订单在哪"路由,不按"这个用户有没有 token"。**
+        #
+        # 上面那段说明记录了修过的一个反向问题:支付只改本地库、而订单建在 hmdp,
+        # 买家点「去支付」得到"订单不存在"。当时的修法是"支付跟着下单的路由规则走"
+        # ——但那条规则是按**用户**判的,它隐含假设"有 token 的买家的订单一定在
+        # hmdp"。这个假设不成立:本地库里确实存着 user='1' 的订单(实测三笔),而
+        # `unpaid_flow_enabled=True` 时本地单起始状态就是 unpaid。于是同一个 bug 被
+        # 镜像了一次——**hmdp 支付 + 本地订单**,买家同样永远付不了款,拿到的是
+        # "订单不存在、不属于当前用户,或已完成支付"(hmdp 活着)或"支付服务暂时
+        # 不可用"(hmdp 挂了)。实测走过这两种。
+        #
+        # 按订单位置判从根上避免这一类:本地有这一行就本地付(归属与幂等仍由
+        # `pay_order` 的条件更新兜住),本地没有才去 hmdp 找。这条规则不依赖
+        # "谁有 token",所以不会因为路由规则再改一次而重新失配。
+        local_order = None
+        try:
+            local_order = get_db().get_order(order_id)
+        except Exception:  # noqa: BLE001 读不到就按"不在本地"处理,交给 hmdp 那条路
+            local_order = None
+
+        token = "" if local_order is not None else _hmdp_token_for_user(user)
         if token:
             from app.net.internal_http import internal_client
 
