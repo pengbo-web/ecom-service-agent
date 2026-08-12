@@ -105,6 +105,49 @@ def filter_owned(contents, user_id: str) -> tuple[list, list]:
     return kept, dropped
 
 
+#: 句子切分点。会话摘要是中文散文,按句号/分号/换行切足够可预测——刻意不做更"聪明"的
+#: 断句:这条路径要么可预测,要么不如不做。
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[。；;!！?？\n])")
+
+
+def redact_unowned_sentences(text: str, user_id: str) -> tuple[str, int]:
+    """从一段自由文本里**按句**剔除提到他人订单的句子;返回 (剩余文本, 被剔句数)。
+
+    **为什么这条路径按句剔除,而 fact 是整条丢**(见 `filter_owned`):
+    会话摘要是一整段上下文,整份丢掉等于让客服忘掉这次会话说过的一切——那是功能性
+    的严重回退。而一条 fact 是自包含的短句,丢掉它的代价小得多。所以两条通道的取舍
+    不同,不是口径不一致。
+
+    **实测泄漏**(走查长会话压缩时抓到)。用户 `1` 的会话摘要里有:
+
+        已发货订单ORD-20240115-001（Nike Air Max 270，¥899.00）物流单号SF1234567890，
+        当前"正在派送中"，已抵达上海浦东区。
+
+    而该订单属于 `小明`。这份摘要由 `_compress_history` 生成、由 `_build_messages`
+    **每一轮都注入**。`app/agent/memory/long_term.py` 上那道过滤盖的是长期记忆的
+    facts 与 interaction_summaries,**盖不到会话级的 summary**——这是第三条通道。
+
+    句子边界不完美时的偏向:切得太粗会多丢一句上下文,切得太细会漏掉半句隐私。
+    这里用"句末标点后切"这种保守切法,宁可多丢。
+    """
+    if not text:
+        return text, 0
+    from app.config.settings import settings
+
+    if not getattr(settings, "auth_enabled", False) or not user_id:
+        return text, 0
+
+    kept, dropped = [], 0
+    for sentence in _SENTENCE_SPLIT_RE.split(text):
+        if not sentence:
+            continue
+        if fact_belongs_to(sentence, user_id):
+            kept.append(sentence)
+        else:
+            dropped += 1
+    return "".join(kept), dropped
+
+
 def _text_of(item) -> str:
     """既接受 `MemoryFact`,也接受纯字符串(两个调用方给的形状不同)。"""
     return item if isinstance(item, str) else str(getattr(item, "content", "") or "")

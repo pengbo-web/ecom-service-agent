@@ -1167,10 +1167,7 @@ class EcomAgent:
         messages.extend(self._turn_recall[1].sections)
         if self.summary:
             messages.append(
-                {
-                    "role": "system",
-                    "content": f"以下是此前对话的摘要，用于延续上下文记忆：\n{self.summary}",
-                }
+                {"role": "system", "content": self._summary_section()}
             )
         # 本轮预加载的技能流程,与商品块一样插在最后一条用户消息之前(紧邻本轮问题)。
         skill_block = None
@@ -1199,6 +1196,45 @@ class EcomAgent:
         # 整段吐给了买家;②自愈 tool_calls/tool 结果配对。
         return sanitize_tool_pairs(unwrap_assistant_envelope(messages))
 
+    def _summary_section(self) -> str:
+        """会话摘要的注入段:先按句剔掉提到**他人订单**的部分,再补上身份框定。
+
+        **实测泄漏**(走查长会话压缩时抓到)。用户 `1` 的会话摘要里有:
+
+            已发货订单ORD-20240115-001（…）物流单号SF1234567890，当前"正在派送中"，
+            已抵达上海浦东区。
+
+        而该订单属于 `小明`。这份摘要每一轮都被注入,而
+        `app/agent/memory/long_term.py` 上那道归属过滤盖的是**长期记忆**的 facts 与
+        interaction_summaries——**盖不到会话级的 summary**,这是第三条通道。
+
+        按句剔除而不是整份丢:整份丢掉等于让客服忘掉这次会话说过的一切。
+        取舍理由见 `redact_unowned_sentences`。
+
+        过滤自身出错时**丢掉整份摘要**(fail-closed):少一段上下文只是这一轮答得笼统,
+        念错人的订单是数据泄漏,两者不对等——与 `owned_facts` 同一条。
+        """
+        from app.agent.data_framing import frame
+
+        text = self.summary or ""
+        try:
+            from app.agent.memory.ownership_filter import redact_unowned_sentences
+
+            text, dropped = redact_unowned_sentences(text, self.user_id)
+            if dropped:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "会话摘要剔除 %d 句提到他人订单的内容(user=%s)", dropped, self.user_id)
+        except Exception:  # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).warning(
+                "会话摘要归属过滤失败,本轮不注入摘要(user=%s)", self.user_id, exc_info=True)
+            text = ""
+
+        # 摘要是模型对**买家发言**的转述,和其它注入块一样要说清身份(见 data_framing)。
+        return (f"以下是此前对话的摘要，用于延续上下文记忆"
+                f"{frame('由本次会话的对话内容压缩而来')}：\n{text}")
+
     def _compress_history(self) -> None:
         keep = self.history_keep_recent
         split = len(self.raw_messages) - keep
@@ -1209,17 +1245,51 @@ class EcomAgent:
         old_messages = self.raw_messages[:split]
         recent = self.raw_messages[split:]
 
-        new_summary = summarize(
-            client=self.client,
-            model=self.model,
-            old_messages=old_messages,
-            prev_summary=self.summary,
-        )
+        # **压缩是回合的收尾动作,不该有权毁掉一个已经完成的回合。**
+        #
+        # 实测缺陷(走查长会话压缩时抓到):`summarize` 是一个裸 LLM 调用,没有任何
+        # 错误处理。而本函数在 `chat()` 里的调用点是:
+        #
+        #     _compress_history()      ← 抛异常就到此为止
+        #     _status = "complete"
+        #     store.save(...)          ← 这一轮根本没落盘
+        #     _write_snapshot()
+        #     return result            ← 买家丢掉已经生成好的回复
+        #
+        # 一次超时/限流就会毁掉一个完整回合;模型返回 `content=None` 时
+        # `.strip()` 还会抛 AttributeError(两种都实测复现过)。
+        #
+        # 失败时不能"什么都不做":历史会继续涨,下一轮更可能撞上真正的上下文上限。
+        # 所以退到 `fallback_summary`——不调模型的确定性节录,保留尾部内容
+        # (订单号、金额这类短字符串能活下来),上下文照样缩下去。
+        degraded = False
+        try:
+            new_summary = summarize(
+                client=self.client,
+                model=self.model,
+                old_messages=old_messages,
+                prev_summary=self.summary,
+            )
+        except Exception as exc:  # noqa: BLE001 收尾动作失败绝不能带走整个回合
+            import logging
+
+            from app.agent.summarizer import fallback_summary
+
+            # 局部取 logger:本模块没有模块级 logger,而这一行在**异常处理路径**上——
+            # 写一个不存在的名字会让兜底自己抛 NameError,等于兜底没写。
+            logging.getLogger(__name__).warning(
+                "历史压缩的摘要调用失败,退到本地节录: %s", exc, exc_info=True)
+            new_summary = fallback_summary(old_messages, self.summary)
+            degraded = True
+            # 让"降级过"这件事可观测,而不是只留在日志里(与本项目其它降级同姿态)。
+            self._emit({"type": "guard", "kind": "summary_degraded",
+                        "hits": [type(exc).__name__]})
+
         self.summary = new_summary
         self.raw_messages = recent
         print(
-            f"\n💾 [已压缩 {len(old_messages)} 条老消息 → summary "
-            f"({len(new_summary)} 字)]\n"
+            f"\n💾 [已压缩 {len(old_messages)} 条老消息 → "
+            f"{'本地节录' if degraded else 'summary'}({len(new_summary)} 字)]\n"
         )
 
     def _emit(self, event: dict) -> None:

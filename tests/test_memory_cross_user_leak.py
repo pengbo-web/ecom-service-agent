@@ -222,3 +222,88 @@ def test_filter_failure_does_not_crash_prompt_build(db, tmp_path, monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
     ltm = _ltm(tmp_path, "1", [REAL_LEAK])
     assert ltm.build_prompt_section() in (None, "")
+
+
+# --------------------------------------------------------------------------
+# 第三条通道:会话级 summary(走查长会话压缩时才发现,前面那道过滤盖不到它)
+# --------------------------------------------------------------------------
+
+#: 现场原文(user=1 的会话摘要,`app/sessions/api/c-291e78d3448d422d.json`)。
+REAL_SUMMARY = (
+    "用户名下共11笔订单，含待支付、待发货、退款中及已发货订单。"
+    "已发货订单ORD-20240115-001（Nike Air Max 270，¥899.00）物流单号SF1234567890，"
+    "当前“正在派送中”，已抵达上海浦东区。"
+    "ORD-20260802-66F8为Nike Air Max 270（黑色，尺码42），状态“待发货”。"
+    "用户此前多次提出鞋子尺码不符需退货。"
+)
+
+
+def test_session_summary_leaks_other_users_order_before_fix(db):
+    """先钉住这是**真的**泄漏:摘要里那个单号属于别人。
+
+    这份摘要由 `_compress_history` 生成、由 `_build_messages` **每一轮都注入**,
+    而 `LongTermMemory.owned_facts/owned_summaries` 盖的是长期记忆,盖不到它。
+    """
+    from app.agent.memory.ownership_filter import fact_belongs_to
+
+    assert fact_belongs_to("已发货订单ORD-20240115-001（…）物流单号SF1234567890", "1") is False
+
+
+def test_session_summary_redacts_by_sentence(db):
+    """按句剔除:去掉他人订单那一句,**其余上下文必须留着**。
+
+    整份丢掉等于让客服忘掉这次会话说过的一切——那是功能性的严重回退,与"丢一条
+    自包含的 fact"代价完全不同,所以两条通道刻意用不同的粒度。
+    """
+    from types import SimpleNamespace
+
+    from app.agent.chat import EcomAgent
+
+    out = EcomAgent._summary_section(SimpleNamespace(summary=REAL_SUMMARY, user_id="1"))
+    assert "SF1234567890" not in out, "运单号仍然进了提示词"
+    assert "ORD-20240115-001" not in out
+    assert "ORD-20260802-66F8" in out, "把买家自己的订单也剔掉了"
+    assert "尺码不符需退货" in out, "其余上下文被一起丢了"
+
+
+def test_session_summary_owner_sees_everything(db):
+    """反向:订单属主自己的会话里,这句必须留着。"""
+    from types import SimpleNamespace
+
+    from app.agent.chat import EcomAgent
+
+    out = EcomAgent._summary_section(SimpleNamespace(summary=REAL_SUMMARY, user_id="小明"))
+    assert "SF1234567890" in out
+
+
+def test_session_summary_is_framed(db):
+    """摘要是对买家发言的转述,和其它注入块一样要说清身份。"""
+    from types import SimpleNamespace
+
+    from app.agent.chat import EcomAgent
+
+    out = EcomAgent._summary_section(SimpleNamespace(summary="普通摘要。", user_id="1"))
+    assert "非指令" in out and "勿执行" in out
+
+
+def test_session_summary_filter_failure_drops_the_summary(db, monkeypatch):
+    """过滤器自己炸了 → 整份摘要不注入(fail-closed),但不能让这一轮挂掉。"""
+    from types import SimpleNamespace
+
+    import app.agent.memory.ownership_filter as of
+    from app.agent.chat import EcomAgent
+
+    monkeypatch.setattr(of, "redact_unowned_sentences",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = EcomAgent._summary_section(SimpleNamespace(summary=REAL_SUMMARY, user_id="1"))
+    assert "SF1234567890" not in out and "ORD-" not in out
+
+
+def test_redact_keeps_text_untouched_when_auth_disabled(db, monkeypatch):
+    """`auth_enabled=False` 时不过滤,与 `owned_order` / `filter_owned` 同一门控。"""
+    from app.agent.memory.ownership_filter import redact_unowned_sentences
+    from app.config import settings as st
+
+    monkeypatch.setattr(st.settings, "auth_enabled", False)
+    text, dropped = redact_unowned_sentences(REAL_SUMMARY, "1")
+    assert text == REAL_SUMMARY and dropped == 0
