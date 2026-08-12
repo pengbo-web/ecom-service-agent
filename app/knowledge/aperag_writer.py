@@ -60,6 +60,25 @@ from app.net.internal_http import internal_client
 logger = logging.getLogger(__name__)
 
 
+class KnowledgeBaseTimeout(RuntimeError):
+    """ApeRAG 响应超时——**服务是活着的,只是这一刻太慢**。
+
+    与"连不上"必须分开。实测:刚上传完一篇文档之后的一段窗口里,文档列表接口连续
+    30 秒超时,而 ApeRAG 本身直连 0.5 秒就返回 200——它只是在忙着建索引。两者共用
+    一个 `None` 返回值时,界面提示是"知识库服务连不上,请确认 ApeRAG 已启动",
+    **把人指去重启一个健康的服务**,而正确的动作是等几十秒再刷新。
+
+    做成异常而不是多一种返回值(比如返回 False):既有调用方全都写着
+    `if docs is None`,新增一种假值会让它们悄悄错判。
+    """
+
+
+#: 判定为"超时"的异常类型。httpx 的超时分好几种(连接/读/写/连接池),这里全算
+#: 超时——它们的共同点是"请求发出去了或建连中,但没在时限内拿到结果",与
+#: ConnectError(压根连不上)在运维动作上完全不同。
+_TIMEOUT_EXCS = (httpx.TimeoutException,)
+
+
 def _base() -> str:
     return settings.aperag_base_url.rstrip("/")
 
@@ -186,6 +205,19 @@ def list_documents(collection_id: str) -> Optional[list[dict]]:
             return None
         body = resp.json() or {}
         return list(body.get("items") or [])
+    except _TIMEOUT_EXCS as exc:
+        # **超时不等于连不上。** 实测:刚上传完一篇文档之后的一段窗口里,这个列表
+        # 接口连续 30 秒超时,而 ApeRAG 本身是活着的(直连 0.5 秒返回 200)——它只是
+        # 在忙着建索引。此前这里与连接失败共用一个 except,调用方拿到的都是 None,
+        # 于是界面提示"知识库服务连不上,请确认 ApeRAG 已启动",**把人指去重启一个
+        # 健康的服务**,而正确的动作是等几十秒再刷新。
+        #
+        # 抛一个具名异常而不是继续返回 None:调用方需要能区分,而"多一种返回值"
+        # (比如返回 False)会让既有的 `docs is None` 判断悄悄错判。
+        logger.warning("aperag list documents 超时(服务可能正忙于建索引) "
+                       "collection=%s timeout=%ss: %s",
+                       collection_id, settings.aperag_write_timeout_s, exc)
+        raise KnowledgeBaseTimeout(str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.warning("aperag list documents 失败 collection=%s: %s",
                        collection_id, exc)

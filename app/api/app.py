@@ -2279,7 +2279,18 @@ def create_app(session_manager: Optional[SessionManager] = None,
         from app.knowledge import aperag_writer as w
 
         cid = _kb_collection()
-        docs = await run_in_threadpool(w.list_documents, cid)
+        try:
+            docs = await run_in_threadpool(w.list_documents, cid)
+        except w.KnowledgeBaseTimeout:
+            # **超时不等于连不上,提示必须指向不同的动作。** 实测:刚上传完一篇文档
+            # 之后的一段窗口里这里连续 30 秒超时,而 ApeRAG 直连 0.5 秒就返回 200
+            # ——它只是在忙着建索引。原来两者共用一句"请确认 ApeRAG 已启动",会把人
+            # 指去重启一个健康的服务,而正确的动作是等几十秒再刷新。
+            #
+            # 用 503 而不是 502:这是"暂时不可用、稍后重试",不是"上游坏了"。
+            raise HTTPException(
+                503, "知识库服务响应超时（通常是刚上传的文档正在建索引），"
+                     "请稍等几十秒后刷新；若持续如此再检查 ApeRAG 负载")
         if docs is None:
             # 读不到与"知识库是空的"是两件事,不能都返回空列表(全项目同一条口径)
             raise HTTPException(502, "知识库服务连不上，请确认 ApeRAG 已启动")
