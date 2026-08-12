@@ -91,13 +91,47 @@ def evaluate_ab(traces: list[dict], min_samples: int = 10, max_drop: float = 0.1
 
 
 def evaluate_absolute(traces: list[dict], min_samples: int = 30,
-                      min_rate: float = 0.6) -> dict:
-    """绝对值判定:没有对照组时看该 skill 自身成功率是否守住下限。"""
+                      min_rate: float = 0.6,
+                      sanity_floor: float | None = None) -> dict:
+    """绝对值判定:没有对照组时看该 skill 自身成功率是否守住下限。
+
+    **`sanity_floor` 补的是与 `evaluate_ab` 之间的一处不对称**(走查时抓到)。
+    `evaluate_ab` 已经拒绝在"两臂都极低"的基线上做判定,理由它自己写着:
+    "多半是依赖或数据源出了问题…回滚会把锅扣给一份可能没问题的候选,还会掩盖
+    真正的故障"。而这条绝对值路径原来直接 `rate < min_rate → ROLLBACK`,
+    同一个依赖故障在这里会把一份正常的 skill 回滚掉,理由写成"成功率 0.27 低于
+    下限 0.6"——读起来是 skill 质量问题。
+
+    实测那 0.27 是怎么来的(track-order,51 条轨迹):
+
+    - 36 条来自合成用户(`ab*` 压测 / `ev*` 评测 / `trk*`),只有 15 条来自真实买家;
+    - 36/37 条失败是同一个订单号 `ORD-20240115-001` ——**评测数据集里那个**;
+    - 37 条 `tool_error` 里有 11 条其实兜底成功了(失败后的调用成功),而
+      track-order 的描述里明写着"支持订单号不存在时的友好兜底"——**它正因为有
+      兜底而被扣分**。
+
+    也就是说这个 0.27 压根不是关于这份 skill 的陈述。低于 `sanity_floor` 时判
+    `wait` 而不是 `rollback`,与 `evaluate_ab` 同一条取舍:**停下来去查,而不是
+    先把候选毁掉**。回滚不可白做——它会把线上换成上一版并结束灰度。
+
+    `min_rate` 与 `sanity_floor` 之间那一段(0.3 ≤ rate < 0.6)仍然回滚:那是
+    "确实不达标但数字还讲得通"的区间,自动化该收口。
+    """
+    if sanity_floor is None:
+        from app.agent.skills.risk import AB_SANITY_FLOOR
+        sanity_floor = AB_SANITY_FLOOR
     rows = list(traces)
     if len(rows) < min_samples:
         return _result(DECISION_WAIT, f"样本不足({len(rows)}/{min_samples})", [], rows)
 
     rate = success_rate(rows)
+    if rate < sanity_floor:
+        return _result(
+            DECISION_WAIT,
+            f"成功率 {rate:.2f} 低于可信下限 {sanity_floor}——这么低多半是依赖、"
+            f"数据源或轨迹口径出了问题,而不是这份 skill 写坏了;先去查,"
+            f"不在这种基线上做回滚判定",
+            [], rows)
     if rate < min_rate:
         return _result(DECISION_ROLLBACK,
                        f"成功率 {rate:.2f} 低于下限 {min_rate}", [], rows)

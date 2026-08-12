@@ -132,7 +132,16 @@ def test_absolute_rollback_without_backup_keeps_canary_active(tmp_path):
     # 模拟"新建 skill 已转正、进入绝对值监控"的状态:percent=0 + 无任何备份
     db.start_canary("process-return", cand_path, 0, "medium", "gate_then_watch")
 
-    for _ in range(30):      # 样本足够且成功率远低于下限
+    # 样本足够、成功率落在**回滚区间**(0.3 ≤ rate < 0.6):12/30 = 0.40。
+    #
+    # 原来这里是 30 条全 handoff(rate=0.0)。`evaluate_absolute` 加了可信下限之后,
+    # 0.0 会判 wait 而不是 rollback —— 那么低多半是依赖或轨迹口径坏了,回滚会把锅
+    # 扣给一份可能没问题的 skill(见 test_absolute_watchdog_sanity_floor.py)。
+    # 本测试要验的是"回滚时没有备份可用怎么办",0.0 只是当时用来触发回滚的便宜手段;
+    # 换成 0.40 后测的仍然是同一件事,而且是在一个真的会走到回滚的基线上。
+    for _ in range(12):
+        db.record_skill_trace("s", "u", "process-return", [], "success", variant="live")
+    for _ in range(18):
         db.record_skill_trace("s", "u", "process-return", [], "handoff", variant="live")
 
     results = check_canaries(definitions, candidates, archive, db)
