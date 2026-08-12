@@ -44,13 +44,35 @@ def _query_product_impl(keyword: str, ctx_user_id: str = "", ctx_token: str = ""
     return _dump({"success": True, "products": prods})
 
 
+#: 拿不到当前用户时的统一说法。与 `_list_user_orders_impl` 共用同一句。
+_NO_IDENTITY = "未识别当前用户"
+
+
 def _query_order_impl(order_id: str, ctx_user_id: str = "", ctx_token: str = "") -> str:
+    # 必须无条件先设一次:除了把身份传下去,它还负责**清掉上一次请求残留的身份**
+    # ——这是个长驻进程,少设一次就可能让下一个工具继承别人的身份。
     set_current_user(ctx_user_id or None)
+    # **拿不到身份 = 拒**,不是"跳过归属检查"(走查时实测出的越权口径不一致)。
+    #
+    # 改造前这里写的是 `if ctx_user_id and o.get("user") != ...`——`ctx_user_id` 为空时
+    # 整个归属检查被跳过,于是**任何订单都能查出来**。同一个文件里的
+    # `_list_user_orders_impl` 对空身份是 `return 未识别当前用户`,本地那一侧的
+    # `app/agent/tools/ownership.py:owned_order` 也是拿不到身份即拒——**只有这两个读
+    # 工具是反的,而它们恰好是会吐运单号和派送轨迹的那两个**(见 `_query_logistics_impl`)。
+    #
+    # 空 ctx_user_id 是真会发生的:`manager.py` 传的是 `get_current_user() or ""`,
+    # 而 `app/api/streaming.py` 里那句 "P0-1:重放在新线程,须设身份否则 owned_order 判空"
+    # 就是一次漏设身份的记录;卖家侧/协作 Agent 本来就没有买家身份。
+    #
+    # 上游的 token 校验(`_tok`)是另一层防线,但它是 hmdp 的门控、有自己的开关与
+    # demo token,不能拿它替代本层的判定——两层都该是关着的。
+    if not ctx_user_id:
+        return _dump({"success": False, "error": _NO_IDENTITY})
     res = _client.get_json(f"/order/{order_id}", token=_tok(ctx_token))   # 登录保护
     if not res.get("success") or not res.get("data"):
         return _dump({"success": False, "error": f"未找到订单 {order_id}，请核实订单号"})
     o = map_order(res["data"])
-    if ctx_user_id and o.get("user") != str(ctx_user_id):
+    if o.get("user") != str(ctx_user_id):
         return _dump({"success": False, "error": f"未找到订单 {order_id}，请核实订单号"})
     return _dump({"success": True, "order": o})
 
@@ -58,7 +80,7 @@ def _query_order_impl(order_id: str, ctx_user_id: str = "", ctx_token: str = "")
 def _list_user_orders_impl(ctx_user_id: str = "", ctx_token: str = "") -> str:
     set_current_user(ctx_user_id or None)
     if not ctx_user_id:
-        return _dump({"success": False, "error": "未识别当前用户"})
+        return _dump({"success": False, "error": _NO_IDENTITY})
     res = _client.get_json("/order/of/me", token=_tok(ctx_token))
     # 上游失败必须如实报错,**不能返回 success:True + 空列表**。
     #
@@ -88,11 +110,15 @@ def _list_user_orders_impl(ctx_user_id: str = "", ctx_token: str = "") -> str:
 
 def _query_logistics_impl(order_id: str, ctx_user_id: str = "", ctx_token: str = "") -> str:
     set_current_user(ctx_user_id or None)
+    # 同 `_query_order_impl`:拿不到身份即拒。这一个尤其要紧——它返回**运单号 + 完整
+    # 派送轨迹(含途经位置)**,是本文件里泄漏面最大的一个。
+    if not ctx_user_id:
+        return _dump({"success": False, "error": _NO_IDENTITY})
     od = _client.get_json(f"/order/{order_id}", token=_tok(ctx_token))
     if not od.get("success") or not od.get("data"):
         return _dump({"success": False, "error": "未找到订单"})
     o = map_order(od["data"])
-    if ctx_user_id and o.get("user") != str(ctx_user_id):
+    if o.get("user") != str(ctx_user_id):
         return _dump({"success": False, "error": "未找到订单"})
     tn = o.get("tracking_number")
     if not tn:
@@ -112,18 +138,30 @@ def _hmdp_write(res: dict) -> dict:
 
 def _apply_refund_impl(order_id: str, reason: str, ctx_user_id: str = "", ctx_token: str = "") -> str:
     set_current_user(ctx_user_id or None)
+    # 无身份的**写**操作根本不该发出去:上游 token 校验会拒,但那时错误已经
+    # 变成一句含糊的"操作失败"。与 `_place_order_impl` 显式挡空 token 同一条取舍。
+    if not ctx_user_id:
+        return _dump({"success": False, "message": _NO_IDENTITY})
     res = _client.post_json(f"/order/{order_id}/refund", {"reason": reason}, token=_tok(ctx_token))
     return _dump(_hmdp_write(res))
 
 
 def _cancel_order_impl(order_id: str, ctx_user_id: str = "", ctx_token: str = "") -> str:
     set_current_user(ctx_user_id or None)
+    # 无身份的**写**操作根本不该发出去:上游 token 校验会拒,但那时错误已经
+    # 变成一句含糊的"操作失败"。与 `_place_order_impl` 显式挡空 token 同一条取舍。
+    if not ctx_user_id:
+        return _dump({"success": False, "message": _NO_IDENTITY})
     res = _client.post_json(f"/order/{order_id}/cancel", {}, token=_tok(ctx_token))
     return _dump(_hmdp_write(res))
 
 
 def _change_address_impl(order_id: str, new_address: str, ctx_user_id: str = "", ctx_token: str = "") -> str:
     set_current_user(ctx_user_id or None)
+    # 无身份的**写**操作根本不该发出去:上游 token 校验会拒,但那时错误已经
+    # 变成一句含糊的"操作失败"。与 `_place_order_impl` 显式挡空 token 同一条取舍。
+    if not ctx_user_id:
+        return _dump({"success": False, "message": _NO_IDENTITY})
     res = _client.put_json(f"/order/{order_id}/address", {"address": new_address}, token=_tok(ctx_token))
     return _dump(_hmdp_write(res))
 
