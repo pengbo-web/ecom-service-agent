@@ -5,9 +5,12 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ProductThumb } from "@/components/ProductThumb";
 
-export function ShopView({ onConsult, onBuy, showCart = false, onCartChanged }: {
+export function ShopView({ onConsult, onBuy, showCart = false, onCartChanged, buying = false }: {
   onConsult: (itemId: string) => void;
   onBuy: (itemId: string) => void;
+  // 下单在途:按钮变灰是给买家的反馈,真正拦住第二次请求的是 App.onBuy 里的 ref
+  // (双击下两笔单是走查时实测到的缺陷)。
+  buying?: boolean;
   // N5:购物车开关关闭时,商品卡退回改造前的样子(只有「咨询」「立即购买」),
   // 不出现「加入购物车」——这是买家可见语义的一部分,不能只靠后端隐式兜底。
   showCart?: boolean;
@@ -95,7 +98,8 @@ export function ShopView({ onConsult, onBuy, showCart = false, onCartChanged }: 
                         {cartBusy[p.id] ? "加购中…" : "加入购物车"}
                       </Button>
                     )}
-                    <Button size="sm" className="flex-1 bg-red-500 hover:bg-red-600" onClick={() => onBuy(p.id)}>立即购买</Button>
+                    <Button size="sm" className="flex-1 bg-red-500 hover:bg-red-600" disabled={buying}
+                            onClick={() => onBuy(p.id)}>{buying ? "处理中…" : "立即购买"}</Button>
                   </div>
                   {cartErr[p.id] && (
                     <div role="alert" className="pt-1 text-[11px] text-destructive">⚠️ {cartErr[p.id]}</div>

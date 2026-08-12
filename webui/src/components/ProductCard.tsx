@@ -3,8 +3,11 @@ import { ProductThumb } from "@/components/ProductThumb";
 
 // 会话内商品卡片(对齐千牛/闲鱼:顾客带商品进客服时,对话顶部展示当前咨询商品)。
 // onAsk 把快捷问句作为一条用户消息发出去(AI 已绑定当前商品,会接地回答)。
-export function ProductCard({ product, onAsk, onBuy }: {
+export function ProductCard({ product, onAsk, onBuy, buying = false }: {
   product: Product; onAsk: (text: string) => void; onBuy?: (itemId: string) => void;
+  // 下单在途:双击下两笔单是走查实测到的缺陷,真正的拦截在 App.onBuy 的 ref 上,
+  // 这里只负责把"正在处理"显示出来。
+  buying?: boolean;
 }) {
   const chips = [
     { label: "规格属性", msg: "这个商品有哪些规格和属性？" },
@@ -42,9 +45,10 @@ export function ProductCard({ product, onAsk, onBuy }: {
           </button>
         ))}
         {onBuy && (
-          <button onClick={() => onBuy(String(product.id))}
-            className="ml-auto rounded-md bg-red-500 px-3.5 py-1.5 text-xs font-medium text-white transition hover:bg-red-600">
-            立即购买
+          <button onClick={() => onBuy(String(product.id))} disabled={buying}
+            className="ml-auto rounded-md bg-red-500 px-3.5 py-1.5 text-xs font-medium text-white
+                       transition hover:bg-red-600 disabled:opacity-60">
+            {buying ? "处理中…" : "立即购买"}
           </button>
         )}
       </div>

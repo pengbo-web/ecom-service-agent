@@ -23,7 +23,7 @@ const CASE = {
 };
 
 function stub(reflowBody: any) {
-  vi.stubGlobal("fetch", vi.fn(async (url: any, init?: any) => {
+  vi.stubGlobal("fetch", vi.fn(async (url: any) => {
     const u = String(url);
     if (u.includes("/api/reflow")) return { ok: true, json: async () => reflowBody };
     if (u.includes("/api/eval/status")) return { ok: true, json: async () => ({ status: "idle" }) };

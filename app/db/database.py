@@ -560,15 +560,30 @@ class Database:
         finally:
             conn.close()
 
+    #: 允许发起退款的状态。未支付(`unpaid`)**不在其中**——没收到的钱不存在"退回",
+    #: 那种情况正确的动作是取消订单。已取消/已在退款中同样不在其中(重复申请)。
+    REFUNDABLE_STATUSES = ("pending", "shipped", "delivered")
+
     def set_refund(self, order_id: str, reason: str) -> bool:
+        """发起退款;**只对当前处于可退状态的行生效**,否则返回 False。
+
+        改造前这条 UPDATE 只有 `WHERE order_id = ?`,状态机的守卫全在
+        `app/agent/tools/refund.py` 的"先读 status 再写"里——那是个竞态。实测 16 个
+        并发申请,**12 个都返回了成功**并各自对买家说了一句"退款申请已提交"。
+
+        把状态条件下沉到这条 UPDATE 上,与 `pay_order` / `review_outreach_draft` /
+        `mark_outreach_sent` 同一套幂等纪律:并发只有一个能赢,输的那些拿到 False,
+        由调用方如实告诉买家"已有申请在处理中"。
+        """
+        placeholders = ",".join("?" * len(self.REFUNDABLE_STATUSES))
         conn = self.connect()
         try:
             cur = conn.execute(
-                """UPDATE orders
+                f"""UPDATE orders
                    SET status = 'refund_processing', refund_status = '审核中',
                        refund_reason = ?, refund_requested_at = ?
-                   WHERE order_id = ?""",
-                (reason, self._now(), order_id),
+                   WHERE order_id = ? AND status IN ({placeholders})""",
+                (reason, self._now(), order_id, *self.REFUNDABLE_STATUSES),
             )
             conn.commit()
             return cur.rowcount > 0

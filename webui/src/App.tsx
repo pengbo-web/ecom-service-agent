@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppShell, type View } from "@/components/AppShell";
 import { ChatView } from "@/components/ChatView";
 import { DashboardView } from "@/components/DashboardView";
@@ -85,7 +85,23 @@ export default function App() {
   }
 
   const [ordersNonce, setOrdersNonce] = useState(0);   // 下单成功后自增,强制"我的订单"重挂载刷新
+  // 「立即购买」的在途保护。**实测缺陷**(走查并发与幂等时抓到):这个函数原来没有
+  // 任何在途判断,而 `ShopView` 与 `ProductCard` 里的「立即购买」都是裸
+  // `<button onClick>`——**双击就是两笔订单**。而购物车那条路的「去下单」一直有
+  // `disabled={busy}`:同一件事,一条路上有、另一条没有。
+  //
+  // 守在这里(而不是只把按钮变灰)是因为它是三个调用点的唯一收口:商城列表、
+  // 聊天里的商品卡、以及未来任何新的入口都走它。按钮变灰是给人看的反馈,
+  // 这个 ref 才是真正拦住第二次请求的东西。
+  //
+  // 用 ref 而不是 state:setState 是异步的,两次快速点击可能在同一帧里都读到旧值。
+  const buyingRef = useRef(false);
+  const [buying, setBuying] = useState(false);
+
   async function onBuy(id: string) {
+    if (buyingRef.current) return;      // 第二次点击直接丢掉,不发第二个请求
+    buyingRef.current = true;
+    setBuying(true);
     try {
       const r = await createOrder(id, 1);
       setOrdersNonce((n) => n + 1);
@@ -94,6 +110,9 @@ export default function App() {
       alert(`下单成功！订单号 ${r.order_id}（${r.status_label}），实付 ¥${r.total}`);
     } catch {
       alert("下单失败，请确认已登录、商品仍在售");
+    } finally {
+      buyingRef.current = false;
+      setBuying(false);
     }
   }
 
@@ -125,9 +144,9 @@ export default function App() {
 
   return (
     <AppShell view={view} onView={setView} onReset={onReset} showCart={showCart} cartCount={cartCount}>
-      {view === "shop" && <ShopView onConsult={(id) => { setItemId(id); setView("chat"); }} onBuy={onBuy}
+      {view === "shop" && <ShopView onConsult={(id) => { setItemId(id); setView("chat"); }} onBuy={onBuy} buying={buying}
         showCart={showCart} onCartChanged={refreshCartCount} />}
-      {view === "chat" && <ChatView key={`${sessionId}:${resetNonce}`} sessionId={sessionId} userId={userId} itemId={itemId} onUserId={onUserId} onConversation={setSessionId} onBuy={onBuy} />}
+      {view === "chat" && <ChatView key={`${sessionId}:${resetNonce}`} sessionId={sessionId} userId={userId} itemId={itemId} onUserId={onUserId} onConversation={setSessionId} onBuy={onBuy} buying={buying} />}
       {view === "cart" && showCart && <CartView onShop={() => setView("shop")} onCartChanged={refreshCartCount} />}
       {view === "orders" && <OrdersView key={ordersNonce} onShop={() => setView("shop")} />}
       {view === "dash" && <DashboardView sessionId={sessionId} />}

@@ -28,10 +28,11 @@ type Turn = {
   progress?: { stage: string; message: string };
 };
 
-export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversation, onBuy }: {
+export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversation, onBuy, buying = false }: {
   sessionId: string; userId: string; itemId?: string; onUserId: (uid: string) => void;
   onConversation: (conversationId: string) => void;
   onBuy?: (itemId: string) => void;
+  buying?: boolean;
 }) {
   const [turns, setTurns] = useState<Turn[]>([]);
   const [mem, setMem] = useState<ConsolidateResult | null>(null);
@@ -325,7 +326,7 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
           {turns.map((t, i) => (
             <Fragment key={t.id}>
               {/* 商品卡插在"咨询发生时"的会话位置(进入咨询时历史之后),随后续对话自然上滑,而非钉在最顶 */}
-              {cardIndex === i && product && <ProductCard product={product} onAsk={onSend} onBuy={onBuy} />}
+              {cardIndex === i && product && <ProductCard product={product} onAsk={onSend} onBuy={onBuy} buying={buying} />}
               <div className="flex flex-col gap-1">
                 {t.userText && <MessageBubble role="user">{t.userText}</MessageBubble>}
                 {/* L3③:生成前进度——没有回复也没有转人工横幅时,如实告诉买家现在在做什么,
@@ -343,7 +344,7 @@ export function ChatView({ sessionId, userId, itemId = "", onUserId, onConversat
               </div>
             </Fragment>
           ))}
-          {cardIndex !== null && cardIndex >= turns.length && product && <ProductCard product={product} onAsk={onSend} onBuy={onBuy} />}
+          {cardIndex !== null && cardIndex >= turns.length && product && <ProductCard product={product} onAsk={onSend} onBuy={onBuy} buying={buying} />}
         </div>
       </ScrollArea>
       <div className="mx-auto w-full max-w-3xl">
