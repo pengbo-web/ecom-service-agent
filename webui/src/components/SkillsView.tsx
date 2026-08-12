@@ -16,6 +16,44 @@ const RISK_LABEL: Record<string, { text: string; cls: string }> = {
 };
 const RISK_UNKNOWN = { text: "未判定 · 需人工复核", cls: "bg-secondary text-muted-foreground" };
 
+/** 门禁就绪度:这个候选交给**无人值守的看门狗**会怎样。
+ *
+ * 为什么必须显示:实测 7 个候选里 6 个的评测集用例数是 0。它们不是"排队等看门狗
+ * 处理",而是**每一轮 `--start-all` 都会打同一行 gate_unavailable、永远如此**——
+ * 新建 skill 走 gate_then_watch,那条路要求先过离线门禁,而没有任何机制会为新
+ * skill 产用例。运维看着这个待审列表,会以为自动化在推进;实际只有人在这里点
+ * force 才动得了。这句话不显示出来,那个误解就没有出口。
+ *
+ * 措辞刻意把"门禁评不了"和"候选不达标"分开:后者该改候选或驳回,前者候选可能
+ * 一点问题都没有(实测 invoice-issuance 校验全过、引用的工具真实存在)。
+ */
+function GateReadiness({ c }: { c: SkillCandidate }) {
+  if (c.gate_evaluable === null || c.gate_cases === null) return null;
+  if (c.gate_evaluable === false) {
+    return (
+      <div className="mt-1 text-[11px] text-amber-700 dark:text-amber-400"
+           data-testid={`gate-unavailable-${c.name}`}>
+        ⚠️ 离线门禁评不了这个候选（评测集 0 条用例点名它）——候选本身未被否证，
+        但自动化不会上线它，只能在此人工放行
+      </div>
+    );
+  }
+  if (c.gate_underpowered) {
+    return (
+      <div className="mt-1 text-[11px] text-amber-700 dark:text-amber-400"
+           data-testid={`gate-underpowered-${c.name}`}>
+        ⚠️ 门禁仅 {c.gate_cases} 条用例，结论以运行噪声为主，证据强度不足
+      </div>
+    );
+  }
+  return (
+    <div className="mt-1 text-[11px] text-muted-foreground"
+         data-testid={`gate-ready-${c.name}`}>
+      门禁用例 {c.gate_cases} 条
+    </div>
+  );
+}
+
 function RiskBadge({ risk }: { risk: string | null }) {
   const r = (risk && RISK_LABEL[risk]) || RISK_UNKNOWN;
   return <span className={`rounded px-1.5 py-0.5 text-[11px] ${r.cls}`}>{r.text}</span>;
@@ -134,9 +172,16 @@ export function SkillsView() {
       : `${c.name}\n\n`;
     // 门禁默认不跑(会真跑两轮评测、一两分钟且花钱),所以必须把"未经门禁"这件事
     // 摆在人点下去之前,而不是让后端拒绝之后再解释。
+    // 门禁"评不了"和"图快不跑"是两回事,确认框里必须分开说:前者人工放行是**唯一**
+    // 通路(补用例之前,自动化永远不会上线它),后者只是本次为了不让人干等。
+    // 把两种情形说成同一句"本次不跑门禁",会让人以为等看门狗跑就行——而它不会。
+    const gateNote = c.gate_evaluable === false
+      ? "该候选的离线门禁**评不了**（评测集里 0 条用例点名它）：候选本身未被否证，"
+        + "但在补上用例之前，无人值守的自动化永远不会上线它——人工放行是唯一通路。\n"
+      : "注意：为避免长时间等待，本次**不跑评测门禁**（门禁会真跑两轮评测、耗时数分钟并消耗 token）。\n";
     if (!window.confirm(
       tip + "转正将立即上线这份技能正文。\n"
-      + "注意：为避免长时间等待，本次**不跑评测门禁**（门禁会真跑两轮评测、耗时数分钟并消耗 token）。\n"
+      + gateNote
       + "确认在未经门禁的前提下放行？"
     )) return;
     await runAct(c.name, async () => {
@@ -275,6 +320,7 @@ export function SkillsView() {
                 {!c.valid && (
                   <div className="mt-1 text-xs text-destructive">{c.errors.join("；")}</div>
                 )}
+                <GateReadiness c={c} />
                 <div className="mt-1 font-mono text-[11px] text-muted-foreground">{c.path}</div>
 
                 {/* 转正/驳回:改造前这两个动作只能登进服务器敲 CLI,7 步自进化闭环

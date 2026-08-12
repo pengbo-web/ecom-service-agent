@@ -75,8 +75,13 @@ def _promote_outcome_action(promoted: dict, success_action: str) -> str:
 # 落在这里面,说明本轮没能全自动收尾,main() 必须以非零码退出让 cron 能告警——
 # 不能只有 --check 会退出非零,--start-all 同样可能因为 block_on_high 被拦而
 # 需要人工,退出码却一直是 0 会让这类情况被 cron 当成普通成功。
+#
+# `gate_unavailable` 在列而 `gate_failed` 不在,这个不对称是刻意的:门禁**评了**
+# 并判候选不达标,属于自动化正常收尾(候选该弃用,没人需要做什么);门禁**评不了**
+# 则是卡死状态——不补用例、不人工放行,它下一轮、下一百轮都是同一行,而退出码
+# 一直是 0 会让 cron 把"这个 skill 永远无法转正"当成普通成功。
 NEEDS_HUMAN_ACTIONS = ("rollback_failed_manual_required", "promote_blocked_risk_changed",
-                      "promote_blocked", "promote_failed")
+                      "promote_blocked", "promote_failed", "gate_unavailable")
 
 
 def _exit_if_needs_human(actions: list[str]) -> None:
@@ -145,8 +150,26 @@ def start_for_candidate(skill_name: str, definitions_dir: str, candidates_dir: s
         tolerance=settings.skill_gate_tolerance,
     )
     if not gate_result["promote"]:
-        return {"risk": risk, "policy": policy, "action": "gate_failed",
-                "detail": gate_result["reason"]}
+        # **"评不了" ≠ "评了没过"。** 这两种都会走到这里、都不放行,但要人做的事
+        # 完全相反:后者是候选不达标,该改候选或弃用;前者是门禁自己不具备评估
+        # 条件(没有用例 / 评测跑崩 / 没产出可比指标),候选可能一点问题都没有。
+        #
+        # 实测:蒸馏出来的**新建** skill 必然落在 `no_gate_cases` 这一支——新建
+        # skill 无对照组所以走 gate_then_watch,而 gate_then_watch 要求过离线门禁,
+        # 离线门禁要求评测集里有用例点名它(related_skills),而没有任何机制会为
+        # 新 skill 产用例。于是 `--start-all` 每一轮都打同一行,永远如此。混成
+        # `gate_failed` 时这一行读起来是"候选质量不行",没人会去想到要写用例。
+        unavailable = gate_result.get("evaluable") is False
+        detail = gate_result["reason"]
+        if unavailable:
+            if detail == "no_gate_cases":
+                detail = "评测集里没有用例点名覆盖本 skill"
+            detail = (f"门禁无法评估({detail}):候选未被否证,需先补该 skill 的门禁用例"
+                      f"(评测集 related_skills 点名 {skill_name}),"
+                      f"或人工放行 python -m app.scripts.promote_skill {skill_name} --force")
+        return {"risk": risk, "policy": policy,
+                "action": "gate_unavailable" if unavailable else "gate_failed",
+                "detail": detail}
 
     # block_on_high=True:门禁用的是上面 gate_candidate 那次判档时读到的候选,
     # 而 promote() 真正装机前会对**自己重新快照的那份字节**再判一次档——

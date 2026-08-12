@@ -69,13 +69,27 @@ def gate_candidate(skill_name: str, candidate_path: str, definitions_dir: str,
     - eval_fn 抛异常 → promote=False,reason 带异常信息(fail-closed);
     - 复用 `compare_to_baseline`:候选相对现行掉点超过 tolerance 即判劣化。
 
+    返回值除判定外还带三个**证据元数据**,供调用方如实转述(见 `gate_readiness`):
+
+    - `evaluable`:门禁到底评没评。`False` 覆盖"没有用例"/"评测跑崩"/"没产出
+      可比指标"三种——它们全都是 `promote=False`,但都**不代表候选不达标**。
+      调用方拿它区分"评不了"与"评了没过":混成一条,操作者会去修一个没问题的候选。
+    - `underpowered`:用例数少于 `MIN_TRUSTWORTHY_CASES`,结论是噪声级的。
+    - `case_count`:实际跑了几条。
+
     阶段一 gap⑤:本函数是 `promote_skill.py`/`skill_watchdog.py` 这两条离线 CLI
     调门禁的入口,整段判定过程(含两次真调 LLM 的 `eval_fn` 调用)包进一条
     命名 trace,门控关/未装/异常时 `background_trace` 静默让本函数行为不变。
     """
     if not case_ids:
+        # `evaluable=False` 是给调用方的:这一条**不是**"候选没通过评测",而是
+        # "根本没评"。看门狗/界面必须据此打出不同的标签与文案,否则操作者会去
+        # 修一个完全没有问题的候选(实测新蒸馏的 skill 全落在这一支)。
         return {"promote": False, "reason": "no_gate_cases", "baseline": None,
-                "candidate": None, "comparison": None, "shadow_dir": None}
+                "candidate": None, "comparison": None, "shadow_dir": None,
+                "evaluable": False, "underpowered": False, "case_count": 0}
+
+    underpowered = len(case_ids) < MIN_TRUSTWORTHY_CASES
 
     from app.observability.langfuse_bridge import background_trace
 
@@ -86,26 +100,39 @@ def gate_candidate(skill_name: str, candidate_path: str, definitions_dir: str,
             baseline = (eval_fn(definitions_dir, case_ids) or {}).get("summary") or {}
             candidate = (eval_fn(str(shadow), case_ids) or {}).get("summary") or {}
         except Exception as exc:  # noqa: BLE001 门禁 fail-closed:评测失败=不许上
+            # 评测**跑崩了**同样属于"评不了"(evaluable=False):候选本身没被否证。
             return {"promote": False, "reason": f"评测执行失败: {exc}", "baseline": None,
-                    "candidate": None, "comparison": None, "shadow_dir": None}
+                    "candidate": None, "comparison": None, "shadow_dir": None,
+                    "evaluable": False, "underpowered": underpowered,
+                    "case_count": len(case_ids)}
 
         comparison = compare_to_baseline(candidate, baseline, tolerance)
         # fail-closed:没有任何可比指标(评测返回空/缺 summary/指标全为 None)时,
         # compare_to_baseline 会给出 regressed=False —— 那是"没测出劣化",不是"证明了不劣化",
         # 绝不能据此放行。
         if not comparison["diffs"]:
+            # 同上:"没测出劣化"是评不动,不是候选不达标。
             return {"promote": False, "reason": "评测未产出可比指标,按 fail-closed 拒绝转正",
                     "baseline": baseline or None, "candidate": candidate or None,
-                    "comparison": comparison, "shadow_dir": str(shadow)}
+                    "comparison": comparison, "shadow_dir": str(shadow),
+                    "evaluable": False, "underpowered": underpowered,
+                    "case_count": len(case_ids)}
         regressed = comparison["regressed"]
         reason = "候选劣化超过容差,拒绝转正" if regressed else "候选未劣化,允许转正"
+        # 样本太少时把这句话**贴在结论上**。放行判定不变(仍按是否劣化),但
+        # `promote=True` 后面必须紧跟着证据强度,不能让 n=1 的对比在日志和界面上
+        # 长得跟一次真正的回归评测一模一样。
+        if underpowered:
+            reason += f"(注意:仅 {len(case_ids)} 条用例,证据强度不足以支撑自动上线)"
         if root is not None:
             try:
                 root.update(output={"promote": not regressed, "reason": reason})
             except Exception:  # noqa: BLE001 记录失败不影响门禁判定
                 pass
         return {"promote": not regressed, "reason": reason, "baseline": baseline,
-                "candidate": candidate, "comparison": comparison, "shadow_dir": str(shadow)}
+                "candidate": candidate, "comparison": comparison, "shadow_dir": str(shadow),
+                "evaluable": True, "underpowered": underpowered,
+                "case_count": len(case_ids)}
 
 
 def gate_case_ids(skill_name: str, dataset_path: str) -> list[str]:
@@ -113,6 +140,56 @@ def gate_case_ids(skill_name: str, dataset_path: str) -> list[str]:
     from app.evaluation.dataset import filter_by_skill, load_dataset
 
     return [c.id for c in filter_by_skill(load_dataset(dataset_path), skill_name)]
+
+
+# 门禁比的是 pass_rate / avg_process_score / avg_result_score 三个**均值**
+# (见 app/evaluation/regression.py `_METRICS`),两侧各真调一次 LLM 跑同一批用例。
+# n 很小时这个差值的主体是 LLM 的运行间噪声,不是候选与现行的真实差异:
+# tolerance=0.05 对 n=1 意味着"只要候选没把唯一那条用例从过弄成不过就算未劣化",
+# 而反过来一次随机波动也能凭空判出劣化。三条是能让"均值"这个词勉强站得住的下限。
+MIN_TRUSTWORTHY_CASES = 3
+
+
+def gate_readiness(skill_name: str, dataset_path: str) -> dict:
+    """门禁**跑得动吗、跑出来的结论可信吗** —— 在花钱跑两轮评测之前就能回答。
+
+    分三态,而不是"能/不能"两态。这个区分是本函数存在的全部理由:
+
+    - `evaluable=False`(一条用例都没有):门禁**评不了**。这不是"候选不达标",
+      调用方必须把它和真的评测未通过分开报——`gate_candidate` 对这种情况返回
+      `promote=False, reason="no_gate_cases"`,而下游一路折成 `gate_failed`,
+      操作者看到的是"门禁未通过",于是去改候选,而候选没有任何问题。
+    - `underpowered=True`(有,但少于 `MIN_TRUSTWORTHY_CASES`):门禁跑得动,
+      结论是噪声级的。它会输出 `promote=True` —— 读起来像"过了评测",
+      实际证据强度接近零,不该据此**自动**上线。
+    - 都为假:正常。
+
+    `dataset_path` 读不出来(文件缺失/格式坏)按 `evaluable=False` 处理并在 note 里
+    说明原因:读不出数据集时同样是"评不了",绝不能因为异常就当作"没有相关用例"
+    这种听起来很正常的结论。
+    """
+    try:
+        case_ids = gate_case_ids(skill_name, dataset_path)
+        error = ""
+    except Exception as exc:  # noqa: BLE001 读不出数据集 = 评不了,不是"没有用例"
+        case_ids, error = [], f"评测数据集读取失败: {exc}"
+
+    count = len(case_ids)
+    if error:
+        note = error + " —— 门禁无法评估"
+    elif count == 0:
+        note = (f"评测集里没有任何用例点名覆盖 {skill_name}(用例的 related_skills 字段),"
+                "门禁无法评估;这不是候选质量问题")
+    elif count < MIN_TRUSTWORTHY_CASES:
+        note = (f"仅 {count} 条门禁用例(建议至少 {MIN_TRUSTWORTHY_CASES} 条):"
+                "两轮评测各真调一次 LLM,这么少的样本上差值以运行噪声为主,"
+                "门禁结论不足以作为自动上线的依据")
+    else:
+        note = f"{count} 条门禁用例"
+
+    return {"case_ids": case_ids, "count": count,
+            "evaluable": count > 0, "underpowered": 0 < count < MIN_TRUSTWORTHY_CASES,
+            "note": note}
 
 
 def default_eval_fn(skills_dir: str, case_ids: list[str]) -> dict:

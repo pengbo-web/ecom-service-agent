@@ -337,6 +337,12 @@ export type SkillCandidate = {
   unknown_tools: string[]; errors: string[]; is_improvement: boolean;
   // risk/policy 为 null 表示"判不了"(候选文件读不出等),必须按"需人工复核"处理,不是低危
   risk: string | null; policy: string | null;
+  // 门禁就绪度:评测集里有几条用例点名覆盖这个 skill(related_skills)。
+  // gate_evaluable=false 表示离线门禁**评不了**这个候选——它不代表候选有问题,
+  // 但意味着无人值守的看门狗永远不会自动上线它(每轮都是 gate_unavailable),
+  // 只能靠人在这个界面上 force 放行。null = 数不出来(不显示)。
+  gate_cases: number | null; gate_evaluable: boolean | null;
+  gate_underpowered: boolean | null; gate_note: string | null;
 };
 
 export type SkillCanary = {

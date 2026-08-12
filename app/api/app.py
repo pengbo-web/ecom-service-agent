@@ -1312,6 +1312,26 @@ def create_app(session_manager: Optional[SessionManager] = None,
                     # 下游必须把它当成需要人工复核处理,绝不能当作可自动转正。
                     item["risk"] = None
                     item["policy"] = None
+
+                # 门禁就绪度:**在操作者点「转正」之前**就说清门禁评不评得了。
+                #
+                # 实测走完一遍才发现这件事有多绕:点「转正」→ 400「未跑评测门禁」→
+                # 勾上跑门禁再点 → 400「该技能没有门禁用例」。两次失败之后才知道
+                # 这个候选根本不可能通过这个按钮上线,而这个事实**在页面加载时就是
+                # 已知的**(只要数一下评测集)。数用例不花钱、不调 LLM,没有理由
+                # 让操作者用两次 400 去把它试出来。
+                try:
+                    from app.agent.skills.gate import gate_readiness
+                    r = gate_readiness(item["name"], settings.eval_dataset_path)
+                    item["gate_cases"] = r["count"]
+                    item["gate_evaluable"] = r["evaluable"]
+                    item["gate_underpowered"] = r["underpowered"]
+                    item["gate_note"] = r["note"]
+                except Exception:  # noqa: BLE001 数不出来就不显示,不拖累整份列表
+                    item["gate_cases"] = None
+                    item["gate_evaluable"] = None
+                    item["gate_underpowered"] = None
+                    item["gate_note"] = "门禁用例数未知"
         except Exception:  # noqa: BLE001 候选目录异常不该让总览 500
             candidates = []
 
@@ -2234,6 +2254,13 @@ def create_app(session_manager: Optional[SessionManager] = None,
         那种情况下门禁本身就会 fail-closed 拒绝。把这件事说清比让按钮看起来
         "有时能用有时不能"重要。
 
+        **"评不了"与"评了没过"在响应里是两个字段。** `gate_evaluable=False` 表示
+        门禁不具备评估条件(没有用例 / 评测崩了),候选**未被否证**;`gate=` 判定
+        为不放行才是候选不达标。混成一句"门禁未通过"会让操作者去改一个没有问题的
+        候选——而正确的动作是补用例或人工放行。候选列表(`GET /api/admin/skills`)
+        已经在**点这个按钮之前**就带上了 `gate_cases`/`gate_evaluable`,数用例不
+        花钱,没道理让人用两次 400 把它试出来。
+
         高危档(`risk=high`)在这里**不拦**:它的含义是"必须由人来放行",而人在
         界面上点这个按钮正是那个放行动作(与 CLI 人工路径一致,见 `promote()` 的
         `block_on_high` 注释)。前端负责二次确认并显示风险来源。
@@ -2244,14 +2271,26 @@ def create_app(session_manager: Optional[SessionManager] = None,
         def _do() -> dict:
             gate = None
             gate_note = "未跑评测门禁(run_gate=false)"
+            # None = 没跑过门禁所以无从谈起;True/False = 门禁评了 / 门禁评不了。
+            # 前端据此把"候选没通过"和"门禁没法评"渲染成两回事(后者不该让操作者
+            # 去改候选)。默认 None 而不是 False:run_gate=false 时确实不知道。
+            gate_evaluable: bool | None = None
             if run_gate:
                 try:
                     from app.agent.skills.gate import (default_eval_fn, gate_candidate,
-                                                       gate_case_ids)
+                                                       gate_readiness)
 
-                    case_ids = gate_case_ids(skill_name, settings.eval_dataset_path)
+                    # 先查就绪度再决定要不要花钱跑:没有用例时直接把**为什么评不了、
+                    # 以及人该做什么**说出来,不要跑一趟评测再回来说一句 no_gate_cases。
+                    ready = gate_readiness(skill_name, settings.eval_dataset_path)
+                    case_ids = ready["case_ids"]
                     if not case_ids:
-                        gate_note = "该技能没有门禁用例,门禁无法评估"
+                        gate_evaluable = False
+                        # note 自己已经把"为什么评不了"和"这不是候选质量问题"说全了,
+                        # 这里只补上"那人该做什么"——重复第二遍反而让人不读。
+                        gate_note = (
+                            f"{ready['note']};"
+                            f"要么给评测集补一条点名 {skill_name} 的用例,要么用 force 人工放行")
                     else:
                         gate = gate_candidate(
                             skill_name=skill_name,
@@ -2259,14 +2298,19 @@ def create_app(session_manager: Optional[SessionManager] = None,
                             definitions_dir=ps.DEFINITIONS_DIR,
                             dest_root=ps.DEFINITIONS_DIR,
                             eval_fn=default_eval_fn, case_ids=case_ids)
-                        gate_note = f"门禁: {gate.get('reason', '')}"
+                        gate_evaluable = gate.get("evaluable") is not False
+                        gate_note = f"门禁({gate.get('case_count', len(case_ids))} 条用例): " \
+                                    f"{gate.get('reason', '')}"
                 except Exception as exc:  # noqa: BLE001 门禁自身出错按未通过处理
                     logger.warning("转正门禁执行失败 skill=%s: %s", skill_name, exc)
-                    gate_note = f"门禁执行失败: {exc}"
+                    # 门禁自己崩了同样是"评不了",不是候选不达标。
+                    gate_evaluable = False
+                    gate_note = f"门禁执行失败(评不了,非候选质量问题): {exc}"
             r = ps.promote(skill_name, ps.DEFINITIONS_DIR, ps.CANDIDATES_DIR,
                            ps.ARCHIVE_DIR, gate, bool(force), ps._now_stamp())
             r["policy"] = promotion_policy(r.get("risk")) if r.get("risk") else None
             r["gate_note"] = gate_note
+            r["gate_evaluable"] = gate_evaluable
             if r.get("promoted"):
                 # 清待审队列。候选目录同时是界面上的"待审队列",已转正的候选留在
                 # 里面会让运营分不清哪些还要处理,重复点一次只会把版本号又推一格。
