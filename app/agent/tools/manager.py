@@ -80,6 +80,20 @@ class ToolManager:
     def tool_definitions(self) -> list[dict]:
         return self._tool_defs
 
+    @property
+    def tool_names(self) -> list[str]:
+        """本轮**实际装上**的工具名(已过 allowed 过滤)。
+
+        供出话泄漏检测(`app/agent/jargon_guard.py`)当词表用。与 `SkillManager.skill_names`
+        同一条纪律:检测器不自己维护一份工具清单,从这个真源取——手抄表跟真源 drift
+        是这个仓库反复出过的问题。
+
+        取过滤后的 `_tool_defs` 而不是全量注册表:没装上的工具模型不可能说出来,
+        把它们放进词表只会增加误报面。
+        """
+        return [d["function"]["name"] for d in self._tool_defs
+                if d.get("function", {}).get("name")]
+
     def execute_tool(self, name: str, arguments: dict) -> str:
         """分发调用;结果超长则落盘留指针(不丢信息),防单条结果撑爆上下文窗口。"""
         source = self._tool_source.get(name)

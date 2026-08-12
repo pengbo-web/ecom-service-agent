@@ -445,7 +445,15 @@ class EcomAgent:
         try:
             from app.agent.jargon_guard import detect_internal_leak
             names = self.skill_manager.skill_names if self.skill_manager else []
-            hits = detect_internal_leak(text, names)
+            # 工具名同样从真源取(见 jargon_guard.detect_internal_leak 的说明):
+            # 实测漏出去的正是工具真名("我将立即调用 list_user_orders …")。
+            #
+            # 用 getattr 而不是 self.tool_manager:本函数整个包在 `except: pass` 里,
+            # 少一个属性会让**整道检测**静默失效——skill 名与黑话也一起不查了。
+            # 拿不到工具名时只应退化成"这一项不查",不能把别的项一起带走。
+            tm = getattr(self, "tool_manager", None)
+            tools = tm.tool_names if tm is not None else []
+            hits = detect_internal_leak(text, names, tools)
             if hits:
                 self._emit({"type": "guard", "kind": "internal_leak", "hits": hits})
         except Exception:  # noqa: BLE001 埋点失败绝不影响本轮回复

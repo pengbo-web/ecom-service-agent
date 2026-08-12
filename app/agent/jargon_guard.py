@@ -32,17 +32,30 @@ INTERNAL_JARGON_TERMS: list[str] = [
 ]
 
 
-def detect_internal_leak(reply_text: str, skill_names) -> list[str]:
-    """扫描回复文本，返回命中的 skill 名 / 内部黑话列表（无命中则为空列表）。
+def detect_internal_leak(reply_text: str, skill_names, tool_names=None) -> list[str]:
+    """扫描回复文本，返回命中的 skill 名 / 工具名 / 内部黑话列表（无命中则为空列表）。
 
-    `skill_names` 由调用方传入（应取自 `SkillManager.skill_names`），本函数
-    只负责比对，不负责发现——避免检测器和调用方各自持有一份可能不同步的清单。
+    `skill_names` 与 `tool_names` 都由调用方传入（应分别取自
+    `SkillManager.skill_names` 与 `ToolManager.tool_names`），本函数只负责比对，
+    不负责发现——避免检测器和调用方各自持有一份可能不同步的清单。
+
+    **为什么补 `tool_names`**(走查记忆页时实测抓到)。买家问订单,回复里出现:
+
+        我将立即调用 list_user_orders 查看您全部在途订单,稍后为您确认匹配项。
+
+    整句一个词都没命中:`INTERNAL_JARGON_TERMS` 里有手写的 `"调用工具"`,而这里说的是
+    "调用 list_user_orders";工具真名一个都不在词表里。**这个模块的 docstring 自己写着
+    那条纪律**——"词表来源单一…这个仓库已经因为手抄表跟真源 drift 出过好几次问题"
+    ——它用在了 skill 名上,却没用在工具名上,而实际漏出去的恰恰是工具名。
+
+    `tool_names` 默认 None(不是必填):这个函数有别的调用方(测试、离线复算),
+    改成必填会把它们全部打断,而漏检工具名对它们来说本来就不是新增的风险。
     """
     text = reply_text or ""
     if not text:
         return []
     hits: list[str] = []
-    vocabulary = list(skill_names or []) + INTERNAL_JARGON_TERMS
+    vocabulary = list(skill_names or []) + list(tool_names or []) + INTERNAL_JARGON_TERMS
     for term in vocabulary:
         if term and term in text:
             hits.append(term)
