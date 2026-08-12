@@ -21,7 +21,20 @@ def _build_confirm_reply(action: str, result: dict) -> str:
     if action == "deal_close":
         price = result.get("suggested_price")
         name = result.get("product_name", "该商品")
-        return f"✅ 已为您锁定「{name}」的成交价 ¥{price},即将为您生成订单,请稍候完成支付～"
+        # **不能说"锁定"、也不能说"即将生成订单"。** 议价成交目前只做一件事:把价格
+        # 写进 `bargain_sessions.last_offer`(见 bargain.negotiate_price)。它**不创建
+        # 订单**,而下单路径 `POST /api/order` 对议价状态的引用次数是 **0**——它按
+        # `total = round(p["price"] * qty, 2)` 直接用商品标价结算。
+        #
+        # 实测:议价谈到 ¥750(标价 ¥899),而下单会按 ¥899 收钱。原文案承诺的
+        # "锁定成交价 + 即将生成订单"**系统结构上兑现不了**,这是一个对客的金钱承诺,
+        # 比之前抓到的"平台承担运费"更硬——那句还只是费用归属,这句是买家实际付多少。
+        #
+        # 在下单侧真正认这个价之前(需要打通本地 product_id 与 hmdp item_id 两套标识,
+        # 单独跟进),文案只能说到系统真正做到的那一步:价格已记下,由人工核价生效。
+        return (f"✅ 已记录「{name}」的议价结果 ¥{price}。"
+                "这个价格**需要客服为您核对后生效**,下单前请把它告诉客服;"
+                "如果直接下单,系统会按商品标价结算。")
     # 其它风险动作(取消订单/改地址等):直接用工具返回的真实消息
     return "✅ " + (result.get("message") or "操作已完成。")
 
