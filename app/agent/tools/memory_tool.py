@@ -38,16 +38,18 @@ def recall_user_memory(query: str = "") -> dict:
     result: dict = {
         "success": True,
         "short_term_facts": manager.stm.facts,
+        # 与自动注入走同一道归属过滤:这是长期记忆的第二条出口,模型可以直接调它,
+        # 漏在这里等于前一道白做(见 app/agent/memory/ownership_filter.py)。
         "long_term_facts": [
             {"content": f.content, "category": f.category}
-            for f in manager.ltm.facts
+            for f in manager.ltm.owned_facts()
         ],
     }
 
-    if manager.ltm.interaction_summaries:
-        result["recent_interactions"] = [
-            s["summary"] for s in manager.ltm.interaction_summaries[-3:]
-        ]
+    # 摘要与 facts 同样要过归属过滤:实测越权摘要(55 条)比越权 fact(1 条)多得多。
+    owned_summaries = manager.ltm.owned_summaries()
+    if owned_summaries:
+        result["recent_interactions"] = [s["summary"] for s in owned_summaries[-3:]]
 
     return result
 

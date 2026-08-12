@@ -36,7 +36,11 @@ class UserProfile:
         if not self.base and not self.tags and not self.tickets:
             return None
 
-        lines = ["该用户的结构化档案："]
+        # 档案里的字段(基础信息、工单原因)同样来自买家发言与历史会话,以 role=system
+        # 注入而不过输入护栏。框定身份,见 app/agent/data_framing.py。
+        from app.agent.data_framing import frame
+
+        lines = [f"该用户的结构化档案{frame('字段来自该买家的历史会话与工单记录')}："]
         if self.base:
             base_text = ", ".join(f"{k}={v}" for k, v in self.base.items())
             lines.append(f"- 基础信息：{base_text}")

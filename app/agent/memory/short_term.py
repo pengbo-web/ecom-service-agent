@@ -28,7 +28,12 @@ class ShortTermMemory:
         if not self.facts:
             return None
         facts_text = "\n".join(f"- {f}" for f in self.facts)
-        return f"以下是本次对话中提取的用户关键信息（短期记忆）：\n{facts_text}"
+        # 这些是从**买家自己说的话**里抽出来的,却以 role=system 注入;输入护栏拦不到
+        # (它只看这一轮用户打的字)。框定来源与身份,见 app/agent/data_framing.py。
+        from app.agent.data_framing import frame
+
+        return (f"以下是本次对话中提取的用户关键信息（短期记忆）"
+                f"{frame('内容摘自买家本人的发言')}：\n{facts_text}")
 
     def reset(self) -> None:
         self.facts = []
