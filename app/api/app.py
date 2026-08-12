@@ -397,12 +397,32 @@ def create_app(session_manager: Optional[SessionManager] = None,
         imgs = p.get("images")
         img = imgs.split(",")[0] if isinstance(imgs, str) and imgs else (
             imgs[0] if isinstance(imgs, list) and imgs else "")
-        return {
+        out = {
             "id": str(p.get("id")), "title": p.get("title"),
             "price": round((p.get("price") or 0) / 100, 2),
             "stock": p.get("stock"), "image": img,
             "description": p.get("description") or "",
         }
+        # sku:**两套商品标识之间的映射一直就在 hmdp 里,只是被这个映射函数丢在了
+        # 边界上。** hmdp 的商品记录同时带 `id`(ecom 下单用的 item_id)与 `sku`
+        # (本地 products.product_id,也是议价与经营分析用的那个),实测
+        # `{"id": 1, ..., "sku": "SHOE-270-BK-42"}`。
+        #
+        # 这一条影响两件已知的事:①议价谈成的价格作用不到订单,原因之一就是"议价用
+        # 本地 product_id、下单用 hmdp item_id,两者对不上"——而对照关系其实现成;
+        # ②`product_ref.py` 记的命名空间问题同源。所以带上它不是"顺手多给个字段",
+        # 是把一个被丢掉的既有映射接回来。
+        #
+        # 用 setdefault 语义(仅在 hmdp 真给了值时才带):hmdp 老版本可能没有这个字段,
+        # 缺失时不塞空串——空 sku 会被下游当成"有 sku 但是空的",比没有更糟。
+        if p.get("sku"):
+            out["sku"] = str(p["sku"])
+        # floorPrice 同理:议价底价在 hmdp 侧也存着(实测 floorPrice=75000 分),
+        # 而本地 products.floor_price 是另一份。带上来让"底价到底以谁为准"这个问题
+        # 至少变得可见——不带的话下游只能假设本地那份是唯一来源。
+        if p.get("floorPrice") is not None:
+            out["floor_price"] = round((p.get("floorPrice") or 0) / 100, 2)
+        return out
 
     @app.get("/api/products")
     def products(keyword: str = ""):

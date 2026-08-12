@@ -172,3 +172,67 @@ def test_cart_not_degraded_normally(client, monkeypatch):
     d = client.get("/api/cart").json()
     assert d["degraded"] is False
     assert d["items"][0]["product_missing"] is False
+
+
+# --------------------------------------------------------------------------
+# 映射一直就在 hmdp 里,不能在边界上丢掉
+# --------------------------------------------------------------------------
+
+def test_mapper_keeps_sku_and_floor_price(client, monkeypatch):
+    """hmdp 的商品记录同时带 `id`(ecom 下单用的 item_id)与 `sku`(本地
+    products.product_id,议价与经营分析用的那个)。**两套标识之间的映射一直就在,
+    只是被 `_map_hmdp_product` 丢在了边界上。**
+
+    实测 hmdp 返回:`{"id": 1, ..., "price": 89900, "floorPrice": 75000,
+    "sku": "SHOE-270-BK-42"}`,而映射函数只取 6 个字段,sku 与 floorPrice 都没带。
+
+    这一条影响两件已知的事:①议价谈成的价格作用不到订单,原因之一就是"议价用本地
+    product_id、下单用 hmdp item_id,两者对不上"——而对照关系其实现成;
+    ②product_ref.py 记的命名空间问题同源。
+    """
+    class C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, *a, **kw):
+            class R:
+                status_code = 200
+                @staticmethod
+                def json():
+                    return {"success": True, "data": {
+                        "id": 1, "title": "鞋", "price": 89900, "floorPrice": 75000,
+                        "stock": 152, "sku": "SHOE-270-BK-42", "images": "/a.jpg",
+                        "description": "d"}}
+            return R()
+
+    import app.net.internal_http as ih
+    monkeypatch.setattr(ih, "internal_client", lambda *a, **kw: C())
+
+    p = client.get("/api/product/1").json()["product"]
+    assert p["id"] == "1", "item_id 仍要是 hmdp 的 id(下单用它)"
+    assert p["sku"] == "SHOE-270-BK-42", "sku 被丢在边界上了——映射就在 hmdp 里"
+    assert p["price"] == 899.0, "分转元不能错"
+    assert p["floor_price"] == 750.0, "底价也是分转元"
+
+
+def test_mapper_omits_missing_optional_fields(client, monkeypatch):
+    """hmdp 老版本可能没有 sku/floorPrice。**缺失时不塞空值**——空 sku 会被下游当成
+    "有 sku 但是空的",比没有这个键更糟。"""
+    class C:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def get(self, *a, **kw):
+            class R:
+                status_code = 200
+                @staticmethod
+                def json():
+                    return {"success": True, "data": {
+                        "id": 2, "title": "旧商品", "price": 1000, "stock": 1,
+                        "images": "", "description": ""}}
+            return R()
+
+    import app.net.internal_http as ih
+    monkeypatch.setattr(ih, "internal_client", lambda *a, **kw: C())
+
+    p = client.get("/api/product/2").json()["product"]
+    assert "sku" not in p
+    assert "floor_price" not in p
