@@ -6,7 +6,31 @@ from app.config.settings import settings
 
 
 def _orch(tmp_path, monkeypatch):
+    """建一个编排器,**并隔离数据库**。
+
+    不隔离会读开发机上真实的 `app/sessions/ecom.db`,而那里可能存着一份自定义的
+    店铺语气(实测:`shop_name='并夕夕旗舰店'`、正式语气、禁语「亲亲」,由某次
+    `updated_by='cleanup'` 写入)。画像 prompt 在构造时经 `load_profile()` 把店铺
+    语气渲染进去,于是 `test_chat_switches_profile_and_delegates` 的逐字比较会因为
+    **开发机的数据库内容**而失败——排查时看到的是一段店名不同的 prompt diff,
+    完全指不到真正的原因。
+
+    `tests/test_growth_api.py` 早就为同一个问题写过隔离,注释也在那里:"get_db()
+    默认是进程内单例、指向真实的 app/sessions/ecom.db…不隔离的话精确断言会被
+    上一次运行/别的会话留下的行污染"。这里照同一份口径补上。
+    """
+    import app.db as db_mod
+    from app.db import Database
+
     monkeypatch.setattr(settings, "memory_dir", str(tmp_path))
+    path = str(tmp_path / "orchestrator_test.db")
+    db = Database(db_path=path)
+    db.init_schema()
+    # 用 monkeypatch 直接接管那个单例,而不是 set_db()——**复位才有保证**:
+    # set_db 改的是模块全局,测试结束后不会自己还原,会把污染带给同进程里后面跑的
+    # 测试文件(而那种污染表现为"另一个文件里的测试莫名其妙地失败")。
+    monkeypatch.setattr(db_mod, "_DB", db)
+    monkeypatch.setattr(settings, "db_path", path)
     return MultiAgentOrchestrator(session_path=str(tmp_path / "s.json"), user_id="u1")
 
 

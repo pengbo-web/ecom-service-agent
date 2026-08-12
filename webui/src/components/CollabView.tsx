@@ -456,6 +456,11 @@ function HealthStrip({ health, err, onRetry }:
           <span className="text-destructive">
             已停摆：上次跑完 {w.last_success_at}（超 {w.threshold_seconds}s 判异常）。
             买家链路不受影响，但异常扫描、归因、起草、跟进都不会发生。
+            {/* 恢复命令两支都要给。原来只有「从未运行」那支带命令,而「已停摆」
+                才是线上真正会遇到的那一支——那一刻运维需要的不是"知道坏了",
+                是"敲什么能救回来"。少这一行,告警就只完成了一半。 */}
+            重启：
+            <code className="mx-1 rounded bg-muted px-1">python -m app.scripts.agent_collab --loop</code>
           </span>
         ) : (
           <span className="text-destructive">
