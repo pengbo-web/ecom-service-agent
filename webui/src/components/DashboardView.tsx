@@ -19,7 +19,11 @@ export function DashboardView({ sessionId }: { sessionId: string }) {
     try {
       setErr(null);
       setM(await getJSON<Metrics>(`/api/metrics?window_hours=${windowHours}`));
-      const url = "/api/traces?limit=50" + (onlyMine ? "&session_id=" + encodeURIComponent(sessionId) : "");
+      // 表格必须跟卡片同一个窗口:上面那段注释讲的"全历史口径会让已经修好的问题
+      // 永远显示为红色",对这张表同样成立,而且更容易骗人——排查时选「近 1 小时」,
+      // 点开表格里某一行看调用链,拿到的却是 40 小时前的那次(走查实测)。
+      const url = `/api/traces?limit=50&window_hours=${windowHours}`
+        + (onlyMine ? "&session_id=" + encodeURIComponent(sessionId) : "");
       setTraces(await getJSON<Trace[]>(url));
     } catch (e: any) {
       const msg = String(e?.message || "");
@@ -71,7 +75,9 @@ export function DashboardView({ sessionId }: { sessionId: string }) {
           <div>
             <h3 className="mb-2 text-sm font-medium">意图分布</h3>
             <div className="flex flex-wrap gap-2">
-              {Object.entries(m.intent_distribution).map(([k, v]) => <Badge key={k} variant="outline">{k}: {v}</Badge>)}
+              {/* `|| {}`:字段缺失时 Object.entries(undefined) 会抛错,把整页打成白屏
+                  ——而看板正是排故障时要看的那一页(与 MetricCards 的格式化兜底同一条)。 */}
+              {Object.entries(m.intent_distribution || {}).map(([k, v]) => <Badge key={k} variant="outline">{k}: {v}</Badge>)}
             </div>
           </div>
         )}
@@ -81,6 +87,17 @@ export function DashboardView({ sessionId }: { sessionId: string }) {
             <label className="flex items-center gap-1 text-xs text-muted-foreground">
               <input type="checkbox" checked={onlyMine} onChange={(e) => setOnlyMine(e.target.checked)} /> 只看本会话
             </label>
+            {/* 截断要说出来。窗口对齐之后仍有一处对不上:选「近 7 天」时卡片 145 条、
+                表格 50 行——那是 limit=50 截的。表格封顶本身正常,但标题只写「最近请求」
+                时,运维照旧会觉得数字算错了。少给了东西就要说,与 anomaly_scope /
+                reflow 的丢弃披露同一条纪律。
+                只看本会话时卡片是全量口径、表格是单会话,两者本就不该相等,故不显示。 */}
+            {!onlyMine && m && traces.length >= 50 && traces.length < m.total_traces && (
+              <span className="text-xs text-amber-700 dark:text-amber-400"
+                    data-testid="traces-truncated">
+                仅显示最近 {traces.length} 条，窗口内共 {m.total_traces} 条
+              </span>
+            )}
           </div>
           <TracesTable traces={traces} />
         </div>

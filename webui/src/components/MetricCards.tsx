@@ -26,9 +26,26 @@ export type Metrics = {
   window_hours?: number | null;
 };
 
-const pct = (x: number) => (x * 100).toFixed(1) + "%";
-const ms = (x: number) => (x >= 1000 ? (x / 1000).toFixed(1) + " s" : x.toFixed(0) + " ms");
-const num = (x: number) => x.toLocaleString();
+/** 缺失的指标显示成「—」,不能把整块看板打成白屏。
+ *
+ * 走查时撞到:少给一个字段(旧版后端、某个指标算不出来)会让 `x.toFixed` 抛错,
+ * React 整棵子树渲染失败 —— **看板变白屏**。而看板正是运维在排故障时要看的那一页,
+ * 白屏的时候连"后端还活着吗"都看不出来。
+ *
+ * 与本项目一贯的取舍一致:降级要**可见**,不该是致命的。显示「—」是"这个数没有",
+ * 显示 0 会是"这个数是零"——两者绝不能混,所以不拿 `?? 0` 兜。
+ */
+const DASH = "—";
+const pct = (x?: number | null) =>
+  typeof x === "number" && isFinite(x) ? (x * 100).toFixed(1) + "%" : DASH;
+const ms = (x?: number | null) =>
+  typeof x === "number" && isFinite(x)
+    ? (x >= 1000 ? (x / 1000).toFixed(1) + " s" : x.toFixed(0) + " ms")
+    : DASH;
+const num = (x?: number | null) =>
+  typeof x === "number" && isFinite(x) ? x.toLocaleString() : DASH;
+const usd = (x?: number | null) =>
+  typeof x === "number" && isFinite(x) ? "$" + x.toFixed(4) : DASH;
 
 /** 一条参考线:超过 warn 变黄,超过 bad 变红(`lowerIsBetter=false` 时方向相反)。 */
 type Line = { warn: number; bad: number; lowerIsBetter?: boolean; note: string };
@@ -141,7 +158,9 @@ export function MetricCards({ m }: { m: Metrics }) {
       display: num(m.kb_recall_degraded ?? 0) },
     kb_recall_attempts: { key: "kb_recall_attempts", label: "尝试检索轮次",
       display: num(m.kb_recall_attempts ?? 0) },
-    est_cost: { key: "est_cost", label: "估算成本", display: "$" + m.est_cost_usd.toFixed(4) },
+    // 唯一一处绕过格式化函数直接 .toFixed 的地方——缺字段时它会把整页打成白屏,
+    // 而上面三个格式化函数都已兜住。走 usd() 让它和其他卡片一样退化成「—」。
+    est_cost: { key: "est_cost", label: "估算成本", display: usd(m.est_cost_usd) },
     total_prompt_tokens: { key: "total_prompt_tokens", label: "Prompt tokens", display: num(m.total_prompt_tokens) },
     total_completion_tokens: { key: "total_completion_tokens", label: "Completion tokens", display: num(m.total_completion_tokens) },
   };

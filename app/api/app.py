@@ -1164,8 +1164,18 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return compute_metrics(store, window_hours=window_hours or None)
 
     @app.get("/api/traces", dependencies=[Depends(admin_auth)])
-    def traces(limit: int = 20, session_id: Optional[str] = None):
-        return store.recent_traces(limit=limit, session_id=session_id)
+    def traces(limit: int = 20, session_id: Optional[str] = None,
+               window_hours: float = 0):
+        """最近的 trace 列表。
+
+        `window_hours` 与 `/api/metrics` 同名同义(0 = 全部历史,保持改造前的默认),
+        这样看板上的卡片与「最近请求」表格才是同一个口径——两者不一致时,页面会
+        一边写着"统计口径:近 1 小时 / 总请求数 1",一边列出 50 行跨 40 小时的记录
+        (走查实测,见 store.recent_traces 的说明)。
+        """
+        import time as _time
+        since = (_time.time() - window_hours * 3600) if window_hours else None
+        return store.recent_traces(limit=limit, session_id=session_id, since=since)
 
     @app.get("/api/traces/{trace_id}", dependencies=[Depends(admin_auth)])
     def trace_detail(trace_id: str):

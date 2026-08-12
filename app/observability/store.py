@@ -96,19 +96,36 @@ class TraceStore:
         finally:
             conn.close()
 
-    def recent_traces(self, limit: int = 20, session_id: Optional[str] = None) -> list[dict]:
+    def recent_traces(self, limit: int = 20, session_id: Optional[str] = None,
+                      since: Optional[float] = None) -> list[dict]:
+        """最近的 trace;给了 `since`(unix 秒)则只取该时刻之后开始的。
+
+        `since` 是后加的,补的是**看板上卡片与表格口径不一致**这个缺陷(走查时实测):
+        指标走 `/api/metrics?window_hours=N`,而「最近请求」表格走
+        `/api/traces?limit=50`——**不带窗口**。切到「近 1 小时」时,卡片显示"总请求数 1"、
+        页脚写"统计口径:近 1 小时",紧接着的表格仍然是 50 行、跨度 40.9 小时。
+
+        危害不只是数字对不上:排查时选「近 1 小时」看现状,点表格里某一行看调用链,
+        实际看到的是 40 小时前的事;或者卡片说"错误率 0%"而表格里有一条老的失败行,
+        读者会以为指标算错了。窗口选择器在表格上方,「最近请求」理所当然应当遵守它。
+
+        与 `all_traces(since=...)` 同一个参数形状和同一条理由(见那里的说明)。
+        """
         conn = self.connect()
         try:
+            where, params = [], []
             if session_id:
-                rows = conn.execute(
-                    "SELECT * FROM traces WHERE session_id = ? "
-                    "ORDER BY started_at DESC LIMIT ?", (session_id, limit)
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM traces ORDER BY started_at DESC LIMIT ?", (limit,)
-                ).fetchall()
-            return [dict(r) for r in rows]
+                where.append("session_id = ?")
+                params.append(session_id)
+            if since is not None:
+                where.append("started_at >= ?")
+                params.append(since)
+            sql = "SELECT * FROM traces"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " ORDER BY started_at DESC LIMIT ?"
+            params.append(limit)
+            return [dict(r) for r in conn.execute(sql, tuple(params)).fetchall()]
         finally:
             conn.close()
 
