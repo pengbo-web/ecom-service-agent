@@ -5,6 +5,11 @@ import { Card } from "@/components/ui/card";
 
 type Summary = { pass_rate?: number; avg_process_score?: number; avg_result_score?: number; total_tokens?: number };
 type ReflowCase = { id: string; turns?: string[]; expected_intent?: string; expected_requires_human?: boolean; expected_tools?: string[] };
+/** 回流的丢弃披露:少给了东西必须说出来(与 anomaly_scope / degraded 同一条纪律)。 */
+type ReflowStats = {
+  kept: number; dropped_no_assertion: number;
+  dropped_samples?: string[]; note?: string;
+};
 type Diff = { metric: string; baseline: number; current: number; delta: number; regressed: boolean };
 type EvalStatus = {
   status: string;
@@ -15,7 +20,8 @@ type EvalStatus = {
 const pct = (x?: number) => ((x || 0) * 100).toFixed(0) + "%";
 
 export function EvalView() {
-  const [reflow, setReflow] = useState<{ count: number; cases: ReflowCase[] } | null>(null);
+  const [reflow, setReflow] = useState<
+    { count: number; cases: ReflowCase[]; stats?: ReflowStats | null } | null>(null);
   const [baseline, setBaseline] = useState<Summary | null>(null);
   const [status, setStatus] = useState<EvalStatus | null>(null);
   const timer = useRef<number | null>(null);
@@ -70,6 +76,29 @@ export function EvalView() {
           ) : (
             <div className="flex flex-col gap-2">
               <div className="text-sm">共回流 <b>{reflow.count}</b> 条候选用例：</div>
+              {/* 两句必须说在人采纳之前:
+                  ① 期望是**线上实际发生的行为**,不是已验证的正确答案。实测有一条
+                     "你们几点上班"的意图被记成 return_request——照抄进回归集就把这个
+                     误判固化成了标准答案,而回归集正是 skill 转正门禁的比较基准。
+                  ② 丢掉了几条也要说。不说的话,"共回流 N 条"读起来像"线上就这么点问题"。 */}
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-2
+                              text-[11px] text-amber-700 dark:text-amber-400"
+                   data-testid="reflow-caveat">
+                ⚠️ 这里的「期望」取自**线上实际发生的行为**，不是已验证的正确答案
+                （例如意图可能本身就是一次误判）。采纳进回归集前请逐条人工核对——
+                回归集是转正门禁的比较基准，错的期望会把错误固化成标准答案。
+                {reflow.stats && reflow.stats.dropped_no_assertion > 0 && (
+                  <div className="mt-1" data-testid="reflow-dropped">
+                    另有 <b>{reflow.stats.dropped_no_assertion}</b> 条已丢弃：
+                    去掉不可复现的期望后一条断言都不剩
+                    {reflow.stats.dropped_samples?.length
+                      ? `（如「${reflow.stats.dropped_samples.slice(0, 3).join("」「")}」）`
+                      : ""}
+                    。多为仅因「同一问题重复N次未解决」这种会话级判定升级的轮次，
+                    单轮用例复现不了它。
+                  </div>
+                )}
+              </div>
               {reflow.cases.map((c) => (
                 <Card key={c.id} className="p-3 text-sm">
                   <div className="font-medium">{c.id}</div>

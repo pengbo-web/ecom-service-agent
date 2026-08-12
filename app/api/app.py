@@ -2669,8 +2669,13 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.post("/api/reflow", dependencies=[Depends(admin_auth)])
     def reflow(limit: int = 200):
-        cases = collect_reflow_cases(store, limit=limit) if store else []
-        return {"count": len(cases), "cases": cases}
+        # 带上 stats:回流会丢掉"去掉不可复现期望后一条断言都不剩"的候选,
+        # 丢了多少必须让操作者看见,否则页面上那句"共回流 N 条"读起来像
+        # "线上就这么点问题"(见 collect_reflow_cases 的说明)。
+        if not store:
+            return {"count": 0, "cases": [], "stats": None}
+        cases, stats = collect_reflow_cases(store, limit=limit, with_stats=True)
+        return {"count": len(cases), "cases": cases, "stats": stats}
 
     @app.get("/api/eval/baseline", dependencies=[Depends(admin_auth)])
     def eval_baseline():

@@ -60,6 +60,30 @@ def repeated_unresolved(user_input: str, prior_user_msgs: list,
     return similar >= times - 1
 
 
+#: 「同一问题重复N次未解决」这条理由的固定前缀。次数是可配的,所以只能按前缀认。
+REPEAT_REASON_PREFIX = "同一问题重复"
+
+#: **会话级**升级原因的前缀集合:这些理由由"之前说过什么"决定,单看本轮这一句
+#: 无从判定,因此**无法用一条单轮用例复现**。
+#:
+#: 其余理由(投诉关键词、敏感意图、负面情绪、模型判定、置信度过低、查询理解判的
+#: 转人工/投诉倾向)全都只看本轮输入或本轮模型输出,单轮可复现。
+#:
+#: 放在这里而不是放在下游:这些字符串是在本模块拼出来的,判据跟着真源走,才不会
+#: 因为哪天改了文案而让下游的字符串匹配悄悄失效(这个仓库反复吃过手抄表 drift 的亏)。
+CONTEXT_DERIVED_REASON_PREFIXES = (REPEAT_REASON_PREFIX,)
+
+
+def is_context_derived_reason(reason: str) -> bool:
+    """这条升级原因是不是由**会话上下文**决定的(而非本轮这一句)。
+
+    用途见 `app/evaluation/trace_to_case.py`:线上回流生成的是**单轮**用例,
+    把上下文导致的升级写成"看到这一句就该转人工"是不可复现的假期望。
+    """
+    return any(str(reason or "").startswith(p)
+               for p in CONTEXT_DERIVED_REASON_PREFIXES)
+
+
 def should_escalate(intent: str, confidence: float, requires_human: bool,
                     threshold: float, sensitive_intents: set,
                     user_input: str = "", qu_intent: str = "",
@@ -83,7 +107,7 @@ def should_escalate(intent: str, confidence: float, requires_human: bool,
         reasons.append("投诉倾向(查询理解)")
     if prior_user_msgs and repeated_unresolved(user_input, prior_user_msgs,
                                                times=repeat_times):
-        reasons.append(f"同一问题重复{repeat_times}次未解决")
+        reasons.append(f"{REPEAT_REASON_PREFIX}{repeat_times}次未解决")
     anger = [k for k in ANGER_KEYWORDS if k in (user_input or "")]
     if anger:
         reasons.append(f"负面情绪({'、'.join(anger[:3])})")
