@@ -254,6 +254,18 @@ def _process_skill_upload(raw: bytes, filename: str) -> dict:
 MANUAL_TAKEOVER_NOTICE = "🎧 当前会话已转由人工客服处理，请稍候…"
 
 
+class ProductServiceUnavailable(RuntimeError):
+    """商品服务(hmdp)连不上——**不等于商品不存在**。
+
+    两者在界面上是完全不同的两句话:"这个商品下架了"会让买家去找别的商品甚至离开,
+    而"服务暂时不可用,请稍后再试"会让他等一会儿再来。把故障说成下架,等于用一次网络
+    抖动赶走一个正要下单的买家。
+
+    做成异常而不是多一种返回值:调用方现在都写着 `if not p`,新增一种假值会被悄悄
+    当成"不存在"——那正是要修的这个错本身。
+    """
+
+
 def create_app(session_manager: Optional[SessionManager] = None,
                trace_store: Optional[TraceStore] = None,
                hitl: Optional[HitlManager] = None,
@@ -425,7 +437,22 @@ def create_app(session_manager: Optional[SessionManager] = None,
                     "reason": f"商品服务连不上({type(exc).__name__})"}
 
     def _fetch_hmdp_product(item_id: str) -> Optional[dict]:
-        """按 id 从 hmdp 取单个商品并映射为前端结构;失败/无则 None。"""
+        """按 id 从 hmdp 取单个商品并映射为前端结构。
+
+        **"商品不存在"返回 None,"商品服务连不上"抛 `ProductServiceUnavailable`。**
+        两者必须分开——这不是新主张,紧挨着的 `/api/products` 有一整段 docstring 讲
+        同一条纪律("买家看到一个空店铺,运维看到一切正常"),而这里原本的注释也已经
+        点明了后果:"一次代理/网络故障会在界面上呈现为『这个商品下架了』"。
+
+        原来选的缓解是"失败必须留日志"。**日志不是给买家的出口**:买家看到的仍然是
+        下架,而 `create_order` 更把它翻成 `404 商品不存在或已下架`——网络抖一下就告诉
+        想下单的买家这件商品没了。实测撞到:hmdp 挂掉时 `/api/product/1` 返回
+        `{"product": null}`,不带任何降级标记,而同一时刻 `/api/products` 老老实实报了
+        `degraded: true`。同一个故障,两个相邻端点两种说法。
+
+        抛异常而不是多加一种返回值:调用方现在都写着 `if not p`,新增一种假值会被
+        悄悄当成"不存在"——那正是要修的这个错本身。
+        """
         if not item_id.isdigit():
             return None
         from app.net.internal_http import internal_client, warn_if_proxy_would_break
@@ -439,16 +466,24 @@ def create_app(session_manager: Optional[SessionManager] = None,
             p = data.get("data") if data.get("success") else None
             return _map_hmdp_product(p) if p else None
         except Exception as exc:  # noqa: BLE001
-            # 返回 None 与"商品不存在"同形,调用方分不出来——所以失败必须留日志,
-            # 否则一次代理/网络故障会在界面上呈现为"这个商品下架了"。
             logger.warning("hmdp 商品详情读取失败 item=%s: %s", item_id, exc)
             warn_if_proxy_would_break(url)
-            return None
+            raise ProductServiceUnavailable(str(exc)) from exc
 
     @app.get("/api/product/{item_id}")
     def product_detail(item_id: str):
-        """按 id 取单个商品(结构化),供聊天窗内商品卡渲染。失败/无返回 null。"""
-        return {"product": _fetch_hmdp_product(item_id)}
+        """按 id 取单个商品(结构化),供聊天窗内商品卡渲染。
+
+        与 `/api/products` **同一条口径**:`product=null + degraded=false` 是"没有这个
+        商品",`product=null + degraded=true` 是"商品服务连不上"。前端据此决定显示
+        "商品不存在"还是"服务暂时不可用,稍后再试"——把故障说成下架,等于用一次网络
+        抖动赶走一个正要下单的买家。
+        """
+        try:
+            return {"product": _fetch_hmdp_product(item_id), "degraded": False}
+        except ProductServiceUnavailable as exc:
+            return {"product": None, "degraded": True,
+                    "reason": f"商品服务连不上({type(exc.__cause__).__name__ if exc.__cause__ else 'Error'})"}
 
     def _hmdp_token_for_user(user: str) -> str:
         """demo 模式下把登录用户映射到其 hmdp token(与 /api/chat 同一套映射),
@@ -514,7 +549,13 @@ def create_app(session_manager: Optional[SessionManager] = None,
         converted——不论这次下单是从购物车「去下单」发起,还是商品卡「立即购买」
         绕开购物车直接下的单,买家事实上都已经为这件商品完成了下单。"""
         user = _resolve_user(request, None)
-        p = _fetch_hmdp_product(req.item_id)
+        try:
+            p = _fetch_hmdp_product(req.item_id)
+        except ProductServiceUnavailable:
+            # **不能说"已下架"。** 这是买家点了「立即购买」之后看到的那句话:把一次
+            # 网络故障说成下架,等于劝退一个正要付钱的人,而且他不会再回来试。
+            # 503 = 暂时不可用、值得重试;404 = 这件商品没了,两者的买家行为完全不同。
+            raise HTTPException(503, "商品服务暂时不可用，请稍后再试")
         if not p:
             raise HTTPException(404, "商品不存在或已下架")
         qty = max(1, min(int(req.quantity or 1), 99))
@@ -626,9 +667,18 @@ def create_app(session_manager: Optional[SessionManager] = None,
         user = _resolve_user(request, None)
         rows = get_db().list_cart(user)
         out = []
+        degraded = False
         for row in rows:
             item = dict(row)
-            p = _fetch_hmdp_product(str(item.get("sku") or ""))
+            try:
+                p = _fetch_hmdp_product(str(item.get("sku") or ""))
+            except ProductServiceUnavailable:
+                # 这一行的**行为**与"商品下架"一致(保留行、不显示价格),所以仍走
+                # product_missing;但整份响应要带 degraded——否则买家看到满车商品
+                # 全是"信息缺失",会以为自己加的东西都下架了。逐行标注也可以,
+                # 但一次故障通常是整批取不到,响应级一个标记更贴合实际、也更简单。
+                p = None
+                degraded = True
             if p:
                 item.update({
                     "title": p.get("title"), "price": p.get("price"),
@@ -641,7 +691,9 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 item.update({"title": None, "price": None, "image": None,
                              "stock": None, "subtotal": None, "product_missing": True})
             out.append(item)
-        return {"success": True, "items": out}
+        # degraded=true 时 product_missing 的含义从"这些商品没了"变成"这一刻取不到"
+        # ——同一个字段,两种截然不同的处置,必须让前端分得出来。
+        return {"success": True, "items": out, "degraded": degraded}
 
     @app.put("/api/cart/{sku}")
     def set_cart_quantity_endpoint(sku: str, req: CartQuantityRequest, request: Request):

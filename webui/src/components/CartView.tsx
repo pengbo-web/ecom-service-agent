@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { createOrder, getCart, removeFromCartApi, setCartQuantity, type CartItem } from "@/lib/api";
+import { createOrder, getCartPayload, removeFromCartApi, setCartQuantity, type CartItem } from "@/lib/api";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ShoppingCart, Minus, Plus, Trash2 } from "lucide-react";
@@ -13,13 +13,18 @@ import { ProductThumb } from "@/components/ProductThumb";
 // 一件商品的操作失败不该把别的行也弄得不能点。
 export function CartView({ onShop, onCartChanged }: { onShop: () => void; onCartChanged?: () => void }) {
   const [items, setItems] = useState<CartItem[] | null>(null);
+  // 商品服务连不上时,行还在但价格取不到——**含义从"这些商品没了"变成"这一刻取
+  // 不到"**。不区分的话买家看到满车"无法定价",会以为自己加的东西全下架了。
+  const [degraded, setDegraded] = useState(false);
   const [listErr, setListErr] = useState("");
   const [busySku, setBusySku] = useState<string | null>(null);
   const [rowErr, setRowErr] = useState<Record<string, string>>({});
 
   async function load() {
     try {
-      setItems(await getCart());
+      const d = await getCartPayload();
+      setItems(d.items);
+      setDegraded(d.degraded);
       setListErr("");
       onCartChanged?.();   // 同步 AppShell 购物车 Tab 上的件数徽标
     } catch (e) {
@@ -112,6 +117,15 @@ export function CartView({ onShop, onCartChanged }: { onShop: () => void; onCart
       <ScrollArea className="min-h-0 flex-1">
         {listErr && (
           <div className="p-4 text-sm text-destructive">读取失败：{listErr}</div>
+        )}
+        {degraded && (
+          // 与商城页的 shop-degraded 同一条口径:把"这一刻取不到"和"商品没了"分开说。
+          <div role="alert" data-testid="cart-degraded"
+               className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-2
+                          text-xs text-amber-700 dark:text-amber-400">
+            ⚠️ 商品服务暂时不可用，下面的价格与库存<b>这一刻取不到</b>——
+            这<b>不代表</b>商品已下架，请稍后刷新再试。
+          </div>
         )}
         {items === null ? (
           <div className="p-10 text-center text-sm text-muted-foreground">加载中…</div>

@@ -65,13 +65,28 @@ export async function getProducts(keyword = ""): Promise<ProductList> {
     return { products: [], degraded: true, reason: `商品接口请求失败(${String(e)})` };
   }
 }
-export async function getProduct(itemId: string): Promise<Product | null> {
+/** 单个商品。**null 有两种含义,必须分开**——与 getProducts 同一条口径:
+ * `degraded=false` 是"没有这个商品"(下架/id 不对),`degraded=true` 是"商品服务
+ * 连不上"。实测 hmdp 挂掉时这个接口只返回 `{"product": null}`,而紧挨着的列表接口
+ * 老老实实报了 degraded——同一个故障两个相邻端点两种说法,买家看到的是"商品下架了"。 */
+export type ProductDetail = { product: Product | null; degraded: boolean; reason?: string };
+
+export async function getProductDetail(itemId: string): Promise<ProductDetail> {
   try {
     const r = await fetch(`/api/product/${encodeURIComponent(itemId)}`);
-    return r.ok ? ((await r.json()).product as Product | null) : null;
-  } catch {
-    return null;
+    if (!r.ok) return { product: null, degraded: true, reason: `商品接口 ${r.status}` };
+    const d = await r.json();
+    return { product: (d.product as Product | null) ?? null, degraded: !!d.degraded,
+             reason: d.reason };
+  } catch (e) {
+    return { product: null, degraded: true, reason: `商品接口请求失败(${String(e)})` };
   }
+}
+
+/** 兼容既有调用方:只要商品本身。**拿不到时分不出是下架还是故障**,所以新代码
+ * 应该用 `getProductDetail`,这个薄封装只为不惊动现有调用点。 */
+export async function getProduct(itemId: string): Promise<Product | null> {
+  return (await getProductDetail(itemId)).product;
 }
 
 // ---- 自助下单:商品卡/商城点『立即购买』→ 建单;"我的订单"页拉列表 ----
@@ -118,10 +133,19 @@ export type CartItem = {
   stock?: number | null; subtotal?: number | null; product_missing?: boolean;
 };
 
-export async function getCart(): Promise<CartItem[]> {
+/** 购物车。`degraded=true` 时行还在、但价格取不到——**含义从"这些商品没了"变成
+ * "这一刻取不到"**,前端必须分得出来,否则买家会以为自己加的东西全下架了。 */
+export type CartPayload = { items: CartItem[]; degraded: boolean };
+
+export async function getCartPayload(): Promise<CartPayload> {
   const r = await fetch("/api/cart", { headers: authHeaders() });
   if (!r.ok) throw new Error(`加载购物车失败 (${r.status})`);
-  return (await r.json()).items as CartItem[];
+  const d = await r.json();
+  return { items: (d.items as CartItem[]) || [], degraded: !!d.degraded };
+}
+
+export async function getCart(): Promise<CartItem[]> {
+  return (await getCartPayload()).items;
 }
 
 export async function addToCartApi(itemId: string, quantity = 1): Promise<{ success: boolean }> {
