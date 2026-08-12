@@ -247,6 +247,13 @@ def _process_skill_upload(raw: bytes, filename: str) -> dict:
             shutil.rmtree(tmp_root, ignore_errors=True)
 
 
+#: 人工接管期间给买家的短路提示。具名成常量是因为它现在有**两个**用处:一处是这一轮
+#: 回给买家的文本,一处是写进会话历史的那条 assistant 消息(见接管那道门)。两处各写一遍
+#: 字面量,改文案时漏掉一处,买家看到的和历史里记下的就会对不上——而那种不一致在复盘
+#: 时最难解释:坐席会以为系统当时说了另一句话。
+MANUAL_TAKEOVER_NOTICE = "🎧 当前会话已转由人工客服处理，请稍候…"
+
+
 def create_app(session_manager: Optional[SessionManager] = None,
                trace_store: Optional[TraceStore] = None,
                hitl: Optional[HitlManager] = None,
@@ -800,7 +807,42 @@ def create_app(session_manager: Optional[SessionManager] = None,
         # 2) 人工接管中：短路，不调用 Agent。同理用原始 ID:坐席是对客户端
         #    正在用的会话 ID 做接管;先换发会让接管被静默绕过。
         if hitl is not None and hitl.manual_mode.is_manual(req.session_id):
-            return _gate_reply_stream("manual_takeover", "🎧 当前会话已转由人工客服处理，请稍候…",
+            # 这一轮也要入历史并落盘。**这条纪律隔壁的快路径早就写着**(见下面第 4 道
+            # 门的注释:"仍把这轮问答写进会话历史并落盘,保证刷新/切换后可回显"),
+            # 只有接管这条路漏了。
+            #
+            # 实测后果:接管期间买家说的话完全不进历史——买家刷新页面自己刚说的话
+            # 不见了,而更疼的是**坐席在工作台打开这个会话,看不到买家在等待期间说了
+            # 什么**,而接管正是为了处理买家在说的事。审计与复盘同样缺这一段。
+            #
+            # 只在会话已存在时追加:这道门刻意跑在 ensure_active **之前**(注释见上),
+            # 所以这里不能建会话,只能往已有的那个上追加。取不到就跳过持久化,绝不能
+            # 因为记历史失败而让接管这道门本身失效。
+            _mt_agent = None
+            try:
+                if get_db().get_conversation(req.session_id) is not None:
+                    _mt_agent = manager.get_or_create(req.session_id, req.user_id)
+            except Exception:  # noqa: BLE001 取不到就不记,接管照常生效
+                _mt_agent = None
+            if _mt_agent is not None:
+                # 与快路径同样先抢会话锁再改 raw_messages:并发改同一个列表会串。
+                with session_lock.guard(req.session_id) as _got:
+                    if _got:
+                        _msgs = getattr(_mt_agent, "raw_messages", None)
+                        if isinstance(_msgs, list):
+                            _msgs.append({"role": "user", "content": req.message})
+                            _msgs.append({"role": "assistant", "content": json.dumps({
+                                "intent": "manual_takeover", "confidence": 1.0,
+                                "reply": MANUAL_TAKEOVER_NOTICE,
+                                "requires_human": True, "follow_up_question": None,
+                            }, ensure_ascii=False)})
+                            _save = getattr(_mt_agent, "save", None)
+                            if callable(_save):
+                                try:
+                                    _save()
+                                except Exception:  # noqa: BLE001 保存失败不影响本轮回复
+                                    pass
+            return _gate_reply_stream("manual_takeover", MANUAL_TAKEOVER_NOTICE,
                                       session_id=req.session_id, user_id=req.user_id,
                                       user_message=req.message)
 
@@ -2428,12 +2470,48 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.get("/api/handoffs", dependencies=[Depends(admin_auth)])
     def handoffs():
+        """原始升级记录(逐条)。**这是审计视图,不是坐席工作队列。**
+
+        坐席该用的是下面的 `/api/handoffs/sessions`——实测这里 50 条只来自 7 个会话,
+        直接拿它当队列渲染会让队列深度失真 7 倍。保留本端点不变:每次升级确实发生过,
+        逐条记录是审计与复盘的依据,不该为了界面好看就把它改掉。
+        """
         return hitl.queue.list_pending() if hitl else []
+
+    @app.get("/api/handoffs/sessions", dependencies=[Depends(admin_auth)])
+    def handoff_sessions():
+        """坐席工作队列:**一个买家在等 = 一行**,按等待时长升序(等最久的排最前)。
+
+        见 `HandoffQueue.list_pending_sessions` 的完整说明。每行带 `escalations`
+        (这个会话累计升级了多少次——反复升级本身就是优先级信号)与 `waiting_since`
+        (最早那次升级,排队看这个而不是最近一次)。
+        """
+        if hitl is None:
+            return {"sessions": [], "waiting_buyers": 0, "escalations_total": 0}
+        sessions = hitl.queue.list_pending_sessions()
+        return {
+            "sessions": sessions,
+            # 两个数都给:一个是"多少人在等"(坐席排班看它),一个是"累计升级次数"
+            # (质量分析看它)。混成一个数正是这次要修的那个错。
+            "waiting_buyers": len(sessions),
+            "escalations_total": sum(s["escalations"] for s in sessions),
+        }
 
     @app.post("/api/handoffs/{handoff_id}/resolve", dependencies=[Depends(admin_auth)])
     def resolve_handoff(handoff_id: str):
         ok = hitl.queue.resolve(handoff_id) if hitl else False
         return {"status": "resolved" if ok else "not_found"}
+
+    @app.post("/api/handoffs/session/{session_id}/resolve",
+              dependencies=[Depends(admin_auth)])
+    def resolve_handoff_session(session_id: str):
+        """把一个会话的全部待处理升级一次标记为已解决。
+
+        坐席处理的是"这个买家",不是"这一次升级判定"。逐条 resolve 会让一个买家需要
+        点 37 次(实测),而中间任何一次遗漏都会让这个会话重新出现在队列里。
+        """
+        n = hitl.queue.resolve_session(session_id) if hitl else 0
+        return {"status": "resolved" if n else "not_found", "resolved": n}
 
     @app.post("/api/session/{session_id}/takeover", dependencies=[Depends(admin_auth)])
     def takeover(session_id: str):
