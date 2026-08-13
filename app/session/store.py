@@ -43,11 +43,19 @@ class FileSessionStore:
         return load_session(key)
 
     def save(self, key: str, state: SessionState) -> None:
+        # **整份状态都要落**,不能只挑几个字段。原来这里只传 messages/summary/
+        # short_term_memory,把 `status`/`step_seq`/`pending` 静默丢在门口——而
+        # `EcomAgent.__init__` 读的正是它们(实测:回读全是 None)。
+        # Redis 后端存的是整块 JSON、一直保真,于是同一份代码换个后端行为就变,
+        # 而 Redis 连不上时恰好会降级到本后端。详见 `save_session` 的说明。
         save_session(
             key,
             state.get("messages", []),
             state.get("summary"),
             short_term_memory=state.get("short_term_memory"),
+            status=state.get("status"),
+            step_seq=state.get("step_seq"),
+            pending=state.get("pending"),
         )
 
     def delete(self, key: str) -> None:
