@@ -14,7 +14,8 @@ import { CollabView } from "@/components/CollabView";
 import { KnowledgeView } from "@/components/KnowledgeView";
 import { LoginCard } from "@/components/LoginCard";
 import { adminFetch, openConversation, getUserId, setUserId, me, clearToken,
-  getConfig, getToken, setToken, createUser, login, createOrder, getCart } from "@/lib/api";
+  getConfig, getToken, setToken, createUser, login, createOrder, getCart,
+  newIdempotencyKey } from "@/lib/api";
 
 export default function App() {
   const [view, setView] = useState<View>(
@@ -102,8 +103,12 @@ export default function App() {
     if (buyingRef.current) return;      // 第二次点击直接丢掉,不发第二个请求
     buyingRef.current = true;
     setBuying(true);
+    // 每次点「立即购买」生成一个新 key:同一次购买内的重试复用它(服务端返回原订单),
+    // 而下一次购买是新 key(不会被当成重试拿回旧单)。在途 ref 挡手抖,这个 key 挡
+    // 网络重试/多标签页/脚本重放——两层各管一段。
+    const key = newIdempotencyKey();
     try {
-      const r = await createOrder(id, 1);
+      const r = await createOrder(id, 1, key);
       setOrdersNonce((n) => n + 1);
       setView("orders");
       refreshCartCount();   // 后端下单成功后会把该商品的购物车行标记为 converted

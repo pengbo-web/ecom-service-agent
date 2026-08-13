@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -63,6 +63,31 @@ def initial_order_status() -> str:
     在不起 FastAPI app 的情况下也能单独跑通开关测试。每次调用都现读
     `settings.unpaid_flow_enabled`,不在导入期把值固化下来。"""
     return "unpaid" if settings.unpaid_flow_enabled else "pending"
+
+
+def _order_result_for(order_id: str | None, user: str) -> dict:
+    """幂等键命中时,拼出与第一次下单**同形状**的响应。
+
+    重试的语义是"我不知道上次成不成功,请给我结果"——所以返回 200 + 原订单,
+    不是 409。客户端拿到的字段必须与第一次一致,否则它会因为形状不同而走进错误分支,
+    等于幂等只做了一半。
+
+    订单可能在本地库、也可能在 hmdp(`POST /api/order` 按 token 分两条路建单),
+    所以这里先查本地,查不到就按 hmdp 那条路的形状返回——**不为了补齐字段再去请求
+    一次 hmdp**:那会让一次重试变成一次外部调用,而重试往往正发生在网络不稳的时候。
+    `total` 拿不到时给 None 而不是 0:0 是个会被前端当真的金额。
+    """
+    label, total = "待支付", None
+    if order_id:
+        try:
+            row = get_db().get_order(order_id)
+            if row is not None and row.get("user") == user:
+                label = STATUS_LABELS.get(row["status"], row["status"])
+                total = row.get("total")
+        except Exception:  # noqa: BLE001 查不到就按 hmdp 形状返回,不让重试因此失败
+            pass
+    return {"success": True, "order_id": order_id, "status_label": label,
+            "total": total, "idempotent_replay": True}
 
 
 def _seller_factory(session_path: str, user_id: str | None = None):
@@ -560,7 +585,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return orders
 
     @app.post("/api/order")
-    def create_order(req: CreateOrderRequest, request: Request):
+    def create_order(req: CreateOrderRequest, request: Request,
+                     idempotency_key: str = Header("", alias="Idempotency-Key")):
         """自助下单:用户在商城/商品卡点『立即购买』(或购物车「去下单」)→ 按登录身份建单。
         demo 用户 → 建到 hmdp(hmdp 自身已有真实支付流程,不受本开关影响,状态
         恒为待支付);其它 → agent 订单库,初始状态由 initial_order_status() 按
@@ -569,9 +595,34 @@ def create_app(session_manager: Optional[SessionManager] = None,
         converted——不论这次下单是从购物车「去下单」发起,还是商品卡「立即购买」
         绕开购物车直接下的单,买家事实上都已经为这件商品完成了下单。"""
         user = _resolve_user(request, None)
+
+        # 幂等键(业界惯例的 `Idempotency-Key` 头,Stripe/Square 同名)。**不传就是
+        # 改造前的行为**,老客户端不会被打断。
+        #
+        # 为什么需要:前端的在途 ref 只挡住"买家手抖点两下"(见 ㊿③),挡不住网络
+        # 超时后的重试、多标签页、脚本重放——那些都会各建一笔真订单。
+        #
+        # 三态由 `claim_idempotency_key` 用 UNIQUE(user,key) 判,不是"先查再插":
+        # 后者在并发下两个请求会同时查到"没有"然后各建一笔(本仓库反复修过的形状)。
+        key = (idempotency_key or "").strip()[:200]
+        if key:
+            state, existing = get_db().claim_idempotency_key(user, key)
+            if state == "done":
+                # 重试的语义是"我不知道上次成不成功,请给我结果"——所以返回 200 +
+                # 原订单,不是 409。客户端拿到的与第一次完全一样。
+                return _order_result_for(existing, user)
+            if state == "in_flight":
+                # 真正的并发:另一个请求正拿着这个键建单。**绝不能自己再建一笔。**
+                # 409 让客户端稍后重试,那时它会拿到 "done" 分支的原订单。
+                raise HTTPException(409, "同一下单请求正在处理中,请稍后重试")
+
         try:
             p = _fetch_hmdp_product(req.item_id)
         except ProductServiceUnavailable:
+            # **失败必须可重试。** 不释放占位行的话,这个键会永久钉在 in_flight 上,
+            # 买家点重试拿到的永远是"正在处理中",而实际上一笔单都没建。
+            if key:
+                get_db().release_idempotency_key(user, key)
             # **不能说"已下架"。** 这是买家点了「立即购买」之后看到的那句话:把一次
             # 网络故障说成下架,等于劝退一个正要付钱的人,而且他不会再回来试。
             # 503 = 暂时不可用、值得重试;404 = 这件商品没了,两者的买家行为完全不同。
@@ -599,7 +650,10 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 get_db().mark_cart_converted(user, [req.item_id])
             except Exception:  # noqa: BLE001 购物车状态清理失败不影响已下单结果
                 pass
-            return {"success": True, "order_id": d.get("data"), "status_label": "待支付", "total": total}
+            oid = d.get("data")
+            if key:
+                get_db().finish_idempotency_key(user, key, str(oid))
+            return {"success": True, "order_id": oid, "status_label": "待支付", "total": total}
         order = get_db().create_order(
             user=user,
             items=[{"name": p["title"], "sku": f"HMDP-{req.item_id}", "quantity": qty, "price": p["price"]}],
@@ -609,6 +663,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
             get_db().mark_cart_converted(user, [req.item_id])
         except Exception:  # noqa: BLE001 购物车状态清理失败不影响已下单结果
             pass
+        if key:
+            get_db().finish_idempotency_key(user, key, order["order_id"])
         return {"success": True, "order_id": order["order_id"],
                 "status_label": STATUS_LABELS.get(order["status"], order["status"]),
                 "total": order["total"]}

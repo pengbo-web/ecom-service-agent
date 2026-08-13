@@ -108,6 +108,19 @@ class Database:
                     specs TEXT,
                     floor_price REAL
                 );
+                -- 下单幂等键。`UNIQUE(user, key)` 是幂等的**全部机制**:并发下靠数据库
+                -- 唯一约束定胜负,不靠"先查再插"(那正是本仓库反复修过的先读后写竞态)。
+                --
+                -- `order_id` 允许为 NULL:抢到键的请求先插一行占位,建完单再回填。
+                -- 于是 NULL 表示"同一个键的请求正在处理中",与"已完成、这是结果"
+                -- 可区分——前者要告诉客户端稍后重试,后者直接返回原订单。
+                CREATE TABLE IF NOT EXISTS order_idempotency (
+                    user TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    order_id TEXT,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(user, key)
+                );
                 CREATE TABLE IF NOT EXISTS orders (
                     order_id TEXT PRIMARY KEY,
                     user TEXT,
@@ -557,6 +570,84 @@ class Database:
             conn.commit()
             row = conn.execute("SELECT * FROM orders WHERE order_id = ?", (oid,)).fetchone()
             return self._order_from_row(conn, row)
+        finally:
+            conn.close()
+
+    # ---------- 下单幂等 ----------
+
+    def claim_idempotency_key(self, user: str, key: str) -> tuple[str, str | None]:
+        """抢占一个幂等键。返回 `(状态, order_id)`,状态三取一:
+
+        - `"claimed"`:本次抢到了,调用方**应当**去建单,建完调 `finish_idempotency_key`;
+        - `"done"`:这个键之前已经建过单,`order_id` 是那一笔——直接返回它,别再建;
+        - `"in_flight"`:另一个请求正抢着这个键、还没建完(order_id 仍是 NULL),
+          调用方应告诉客户端稍后重试,**绝不能自己再建一笔**。
+
+        胜负由 `UNIQUE(user, key)` 判,不是"先 SELECT 再 INSERT"——后者在并发下两个
+        请求会同时查到"没有",然后各建一笔(本仓库已经修过好几处同形状的先读后写)。
+        `INSERT OR IGNORE` 的 rowcount 直接告诉我们是不是自己插进去的。
+        """
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO order_idempotency (user, key, order_id, created_at) "
+                "VALUES (?, ?, NULL, ?)", (user, key, self._now()))
+            conn.commit()
+            if cur.rowcount == 1:
+                return "claimed", None
+            row = conn.execute(
+                "SELECT order_id FROM order_idempotency WHERE user = ? AND key = ?",
+                (user, key)).fetchone()
+            # row 理论上必然存在(插入被 IGNORE 说明有冲突行);真拿不到时按抢到处理,
+            # 宁可重复建单也不要把买家卡在一个永远重试的状态上。
+            if row is None:
+                return "claimed", None
+            oid = row["order_id"] if not isinstance(row, tuple) else row[0]
+            return ("done", oid) if oid else ("in_flight", None)
+        finally:
+            conn.close()
+
+    def finish_idempotency_key(self, user: str, key: str, order_id: str) -> None:
+        """把建好的订单号回填到占位行上。只填**还没填过**的那行(条件更新)。"""
+        conn = self.connect()
+        try:
+            conn.execute(
+                "UPDATE order_idempotency SET order_id = ? "
+                "WHERE user = ? AND key = ? AND order_id IS NULL",
+                (order_id, user, key))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def release_idempotency_key(self, user: str, key: str) -> None:
+        """建单失败时释放占位行,让买家能用同一个键重试。
+
+        不释放的话,一次失败的下单会把这个键永久钉在 `in_flight` 上——买家点重试
+        拿到的永远是"正在处理中",而实际上什么都没建。**失败必须可重试。**
+        """
+        conn = self.connect()
+        try:
+            conn.execute(
+                "DELETE FROM order_idempotency WHERE user = ? AND key = ? AND order_id IS NULL",
+                (user, key))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def purge_idempotency_keys(self, older_than_hours: int = 24) -> int:
+        """清理过期键,返回删除行数。**离线调用**,不挂在请求路径上。"""
+        from app.db import dialect
+
+        # 走方言层而不是手写 `datetime('now', ...)`:时钟表达式只要有第二处,换库时
+        # 一定会漏掉其中一份(`tests/test_db_dialect.py` 会拦住手写的——我第一版就是
+        # 手写的,被那条测试逮住了)。
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "DELETE FROM order_idempotency "
+                f"WHERE created_at < {dialect.now_minus(int(older_than_hours), 'hours')}")
+            conn.commit()
+            return cur.rowcount
         finally:
             conn.close()
 

@@ -95,10 +95,31 @@ export type MyOrder = {
   order_id: string; status: string; status_label: string;
   items: OrderItem[]; total: number; created_at: string; shipping_address: string;
 };
-export async function createOrder(itemId: string, quantity = 1): Promise<{ success: boolean; order_id: string; status_label: string; total: number }> {
+/** 生成一个幂等键。`crypto.randomUUID` 在老浏览器/非安全上下文里没有,故带回退。 */
+export function newIdempotencyKey(): string {
+  const c = globalThis.crypto as Crypto | undefined;
+  if (c?.randomUUID) return c.randomUUID();
+  return `k-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * 下单。`idempotencyKey` 由**调用方**生成并决定复用范围,这是关键:
+ *
+ * - **同一次购买的重试复用同一个 key** → 服务端返回原订单,不会多建一笔;
+ * - **新的一次购买要用新 key** → 否则买家想买第二双会被当成重试,拿回旧订单。
+ *
+ * 所以 key 不能在这个函数里生成(那样每次调用都是新 key,重试就失去保护),
+ * 也不能固定成常量(那样买家永远只能下一单)。
+ * 不传时服务端退回改造前的行为。
+ */
+export async function createOrder(itemId: string, quantity = 1, idempotencyKey?: string): Promise<{ success: boolean; order_id: string; status_label: string; total: number; idempotent_replay?: boolean }> {
   const r = await fetch("/api/order", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    headers: {
+      "Content-Type": "application/json",
+      ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+      ...authHeaders(),
+    },
     body: JSON.stringify({ item_id: itemId, quantity }),
   });
   if (!r.ok) throw Object.assign(new Error("order"), { status: r.status });

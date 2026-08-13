@@ -116,3 +116,69 @@ describe("ShopView 立即购买", () => {
     expect(onBuy).toHaveBeenCalledTimes(1);
   });
 });
+
+/**
+ * 幂等键的语义:**同一次购买的重试复用同一个 key,新的一次购买用新 key。**
+ *
+ * 这两条缺一不可:
+ * - key 在 `createOrder` 内部生成 → 每次调用都是新 key,重试就失去保护;
+ * - key 固定成常量 → 买家永远只能下一单,第二双鞋会拿回第一单。
+ *
+ * 所以 key 必须由调用方生成并决定复用范围。在途 ref 挡手抖,key 挡网络重试/
+ * 多标签页/脚本重放——两层各管一段。
+ */
+describe("幂等键", () => {
+  it("newIdempotencyKey 每次都不同", async () => {
+    const { newIdempotencyKey } = await import("@/lib/api");
+    const keys = new Set(Array.from({ length: 50 }, () => newIdempotencyKey()));
+    expect(keys.size).toBe(50);
+  });
+
+  it("createOrder 带上 Idempotency-Key 头", async () => {
+    const calls: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u: any, init: any) => {
+      calls.push(init);
+      return { ok: true, json: async () => ({ success: true, order_id: "O1" }) };
+    }));
+    const { createOrder } = await import("@/lib/api");
+    await createOrder("1", 1, "my-key");
+    expect(calls[0].headers["Idempotency-Key"]).toBe("my-key");
+  });
+
+  it("不传 key 时不带这个头(老客户端行为不变)", async () => {
+    const calls: any[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u: any, init: any) => {
+      calls.push(init);
+      return { ok: true, json: async () => ({ success: true, order_id: "O1" }) };
+    }));
+    const { createOrder } = await import("@/lib/api");
+    await createOrder("1", 1);
+    expect("Idempotency-Key" in calls[0].headers).toBe(false);
+  });
+
+  it("同一次购买重试复用同一个 key", async () => {
+    const seen: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u: any, init: any) => {
+      seen.push(init.headers["Idempotency-Key"]);
+      return { ok: true, json: async () => ({ success: true, order_id: "O1" }) };
+    }));
+    const { createOrder, newIdempotencyKey } = await import("@/lib/api");
+
+    const key = newIdempotencyKey();          // 一次购买 = 一个 key
+    await createOrder("1", 1, key);
+    await createOrder("1", 1, key);           // 重试
+    expect(seen[0]).toBe(seen[1]);
+  });
+
+  it("两次独立购买用不同 key", async () => {
+    const seen: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u: any, init: any) => {
+      seen.push(init.headers["Idempotency-Key"]);
+      return { ok: true, json: async () => ({ success: true, order_id: "O1" }) };
+    }));
+    const { createOrder, newIdempotencyKey } = await import("@/lib/api");
+    await createOrder("1", 1, newIdempotencyKey());
+    await createOrder("1", 1, newIdempotencyKey());
+    expect(seen[0]).not.toBe(seen[1]);
+  });
+});

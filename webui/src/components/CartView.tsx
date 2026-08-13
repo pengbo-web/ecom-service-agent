@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { createOrder, getCartPayload, removeFromCartApi, setCartQuantity, type CartItem } from "@/lib/api";
+import { createOrder, getCartPayload, newIdempotencyKey, removeFromCartApi, setCartQuantity, type CartItem } from "@/lib/api";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
 import { ShoppingCart, Minus, Plus, Trash2 } from "lucide-react";
@@ -82,8 +82,11 @@ export function CartView({ onShop, onCartChanged }: { onShop: () => void; onCart
   async function placeOrder(item: CartItem) {
     setBusySku(item.sku);
     clearErr(item.sku);
+    // 幂等键:这一次「去下单」内的重试复用它,下一次是新 key。`disabled={busy}`
+    // 挡的是手抖,这个 key 挡网络重试/多标签页(两层各管一段,见 App.onBuy)。
+    const key = newIdempotencyKey();
     try {
-      const r = await createOrder(item.sku, item.quantity);
+      const r = await createOrder(item.sku, item.quantity, key);
       await load();   // 下单成功后端已把该行标记为 converted,重新拉一次列表即可
       alert(`下单成功！订单号 ${r.order_id}（${r.status_label}），实付 ¥${r.total}`);
     } catch (e) {
