@@ -216,11 +216,21 @@ class LongTermMemory:
         self.save()
 
     def _merge_facts(self, client: OpenAI, model: str, new_facts: list[MemoryFact]) -> None:
-        """并入新事实:启用策展则 LLM 合并/纠正/淘汰,失败降级回 add_facts。"""
+        """并入新事实:启用策展则 LLM 合并/纠正/淘汰,失败降级回 add_facts。
+
+        **策展分支必须自己再筛一遍归属。** 它直接 `self.facts = curated`,不走
+        `add_facts`——而写入侧的归属过滤加在 `add_facts` 里。`memory_curation_enabled`
+        默认是 True,所以那道过滤在**默认配置下本来是被绕过的**(这是加完过滤之后
+        才发现的:只测了 `add_facts`,没测这条实际生效的路径)。
+        """
         if self.curate_enabled:
             from app.agent.memory.curation import curate_facts
             curated = curate_facts(client, model, self.facts, new_facts, self.max_facts)
             if curated is not None:
+                # 策展的输入含 self.facts(历史)与 new_facts(新抽取),输出是 LLM
+                # 重写过的全量列表——它可能把他人订单信息改写进一条新句子里,
+                # 所以这里筛的是**输出**,不是只筛 new_facts。
+                curated = self._owned_only(curated, "事实(策展后)")
                 with self._lock:
                     self.facts = curated
                 return

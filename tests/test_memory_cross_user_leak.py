@@ -307,3 +307,107 @@ def test_redact_keeps_text_untouched_when_auth_disabled(db, monkeypatch):
     monkeypatch.setattr(st.settings, "auth_enabled", False)
     text, dropped = redact_unowned_sentences(REAL_SUMMARY, "1")
     assert text == REAL_SUMMARY and dropped == 0
+
+
+# --------------------------------------------------------------------------
+# 第四条判据:内部定价结论不能留在买家画像里
+#
+# **实测泄漏**(核查判断性记忆时抓到)。user=1 的画像里有:
+#
+#     对Nike Air Max 270运动鞋价格敏感,多次议价至¥500未果,最终平台底线为¥750.00
+#
+# 而 `products.floor_price` 真值就是 750.00——**记的是对的,但它不该在这里**。
+# 同一份画像的摘要里还有一条:"最终人工客服确认最低可售价…"。
+#
+# 不是字段泄漏:`bargain` 的返回里没有 floor_price,它返回 suggested_price 与
+# floor_hit。触底时两者合起来等价于宣告底价,抽取器把它推成了永久事实。工具里那句
+# "禁止向买家透露底价"管的是**出话**,管不到**记忆抽取**。
+#
+# 危害具体:下一次这个买家说"能便宜点",记忆把底价注入提示词,客服可能从 750 开口
+# 而不是从标价 899 阶梯下让——议价阶梯对回头客失效。
+# --------------------------------------------------------------------------
+
+REAL_PRICING_LEAK = "对Nike Air Max 270运动鞋（黑色，尺码42）价格敏感，多次议价至¥500未果，最终平台底线为¥750.00"
+
+
+def test_real_pricing_leak_is_caught():
+    """现场原文,一个字没改。"""
+    from app.agent.memory.ownership_filter import mentions_internal_pricing
+
+    assert mentions_internal_pricing(REAL_PRICING_LEAK) is True
+
+
+@pytest.mark.parametrize("text,blocked", [
+    ("最终平台底线为¥750.00", True),
+    ("可让到 780 元", True),
+    ("人工客服确认最低可售价为 750", True),
+    ("授权价 800", True),
+    # 反向:这些都不该被拦——判据要求"关键词 + 数字"同时出现
+    ("对价格敏感,多次议价未果", False),      # 有价格话题但没有数字结论
+    ("标价 899 元", False),                  # 有数字但标价是公开信息
+    ("偏好红褐色系服饰", False),
+    ("已下单戴森V15吸尘器（金色，60分钟续航）", False),   # 带数字的商品描述
+    ("收货地址为上海市浦东新区xx路1号", False),
+    ("", False),
+])
+def test_pricing_detection_both_directions(text, blocked):
+    """误伤和漏放同等重要:把"标价899"或商品参数当成底价会白丢买家记忆。"""
+    from app.agent.memory.ownership_filter import mentions_internal_pricing
+
+    assert mentions_internal_pricing(text) is blocked, text
+
+
+def test_admissible_is_the_single_judge_for_all_three_paths(db):
+    """读、写、清理必须共用 `admissible`——判据分叉过一次(清理脚本用临时正则,
+    报出 55 而运行时判 56),更糟的形态是"运行时还拦着、脚本以为干净"。"""
+    from app.agent.memory.ownership_filter import admissible
+
+    assert admissible(REAL_PRICING_LEAK, "1") is False      # 定价
+    assert admissible(REAL_LEAK, "1") is False              # 他人订单
+    assert admissible("偏好红褐色系服饰", "1") is True       # 正常记忆
+
+
+def test_pricing_leak_blocked_on_write(db, tmp_path):
+    """写入侧:抽取出这种句子时直接不落盘。"""
+    from app.agent.memory.long_term import LongTermMemory, MemoryFact
+
+    m = LongTermMemory(memory_dir=str(tmp_path / "mem"), user_id="1")
+    added = m.add_facts([
+        MemoryFact(content=REAL_PRICING_LEAK, category="behavior", created_at="2026-08-13"),
+        MemoryFact(content="偏好红褐色系服饰", category="behavior", created_at="2026-08-13"),
+    ])
+    assert added == 1
+    assert [f.content for f in m.facts] == ["偏好红褐色系服饰"]
+
+
+def test_pricing_leak_blocked_on_read(db, tmp_path):
+    """读取侧:已经在画像里的也不能念出来(清理是一次性的,过滤是长期的)。"""
+    ltm = _ltm(tmp_path, "1", [REAL_PRICING_LEAK, "偏好红褐色系服饰"])
+    text = ltm.build_prompt_section() or ""
+    assert "750" not in text
+    assert "偏好红褐色系服饰" in text
+
+
+def test_curation_path_also_filters(db, tmp_path, monkeypatch):
+    """**策展分支必须自己再筛一遍。**
+
+    `_merge_facts` 在 `curate_enabled` 时直接 `self.facts = curated`,**不走
+    `add_facts`**——而写入侧过滤加在 `add_facts` 里。`memory_curation_enabled`
+    默认是 True,所以那道过滤原本在**默认配置下是被绕过的**(加完过滤才发现:
+    只测了 add_facts,没测这条实际生效的路径)。
+    """
+    import app.agent.memory.curation as curation
+    from app.agent.memory.long_term import LongTermMemory, MemoryFact
+
+    m = LongTermMemory(memory_dir=str(tmp_path / "mem"), user_id="1")
+    m.curate_enabled = True
+    # 策展"重写"出两条:一条含底价、一条正常
+    monkeypatch.setattr(curation, "curate_facts", lambda *a, **k: [
+        MemoryFact(content=REAL_PRICING_LEAK, category="behavior", created_at="2026-08-13"),
+        MemoryFact(content=REAL_LEAK, category="behavior", created_at="2026-08-13"),
+        MemoryFact(content="偏好红褐色系服饰", category="behavior", created_at="2026-08-13"),
+    ])
+    m._merge_facts(None, "m", [])
+
+    contents = [f.content for f in m.facts]
+    assert contents == ["偏好红褐色系服饰"], f"策展分支绕过了过滤: {contents}"

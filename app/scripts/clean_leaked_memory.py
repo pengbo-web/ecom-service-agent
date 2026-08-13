@@ -1,14 +1,17 @@
-"""清理长期画像里**属于别人的订单信息**(一次性存量清理)。
+"""清理长期画像里**不该留的内容**:别人的订单信息、以及内部定价结论(一次性存量清理)。
 
 **为什么需要它**:`app/agent/memory/ownership_filter.py` 那两道过滤(读取侧 + 写入侧)
 分别兜住了"念出去"和"再写进来",但**已经躺在磁盘上的数据它们清不掉**。全量审计
-`app/sessions/memory/*.json`:66 份画像里 **49 份受影响,越权 fact 1 条、越权摘要 55 条**。
+`app/sessions/memory/*.json`:62 份画像里 **49 份受影响,越权 fact 1 条、越权摘要 56 条**
+(那一轮已清完)。之后又加了一条判据——内部定价结论(底价/底线 + 数字),因为 user=1 的
+画像里存着"最终平台底线为¥750.00",而真实 floor_price 就是 750:记的是对的,但它会让
+议价阶梯对回头客失效。
 
 留着它们有三重代价:①过滤器一旦回归/被绕过,泄漏立刻复发;②每一轮都要为这些条目
 跑一遍归属查询,纯浪费;③它本身就是不该继续持有的他人数据。
 
-**判据与运行时完全同源**——直接调 `ownership_filter.fact_belongs_to`,不在这里另写
-一套。清理脚本和运行时判据分叉,会清出"运行时还拦着、脚本以为干净"这种最糟的状态。
+**判据与运行时完全同源**——直接调 `ownership_filter.admissible`(读、写、清理三条路
+共用的那个入口),不在这里另写一套。清理脚本和运行时判据分叉,会清出"运行时还拦着、脚本以为干净"这种最糟的状态。
 
 **默认只报告不改文件**(`--apply` 才真写),写之前先整目录备份到
 `<memory_dir>/../memory_backup_<时间戳>/`。删记忆是不可逆的,而误删买家自己的记忆
@@ -28,8 +31,8 @@ from pathlib import Path
 
 
 def scan_file(path: Path) -> dict:
-    """审一份画像,返回 {user_id, bad_facts, bad_summaries, total_*}。不改文件。"""
-    from app.agent.memory.ownership_filter import fact_belongs_to
+    """审一份画像,返回 {user_id, bad_facts, bad_summaries, ...}。不改文件。"""
+    from app.agent.memory.ownership_filter import admissible
 
     data = json.loads(path.read_text(encoding="utf-8"))
     uid = str(data.get("user_id") or "")
@@ -37,9 +40,9 @@ def scan_file(path: Path) -> dict:
     facts = data.get("facts") or []
     summaries = data.get("interaction_summaries") or []
     bad_facts = [f for f in facts
-                 if not fact_belongs_to(str(f.get("content") or ""), uid)]
+                 if not admissible(str(f.get("content") or ""), uid)]
     bad_summaries = [s for s in summaries
-                     if not fact_belongs_to(str(s.get("summary") or ""), uid)]
+                     if not admissible(str(s.get("summary") or ""), uid)]
 
     return {"path": path, "user_id": uid, "data": data,
             "facts": facts, "summaries": summaries,
@@ -89,8 +92,8 @@ def main(argv=None) -> int:
     tot_f = sum(len(r["bad_facts"]) for r in dirty)
     tot_s = sum(len(r["bad_summaries"]) for r in dirty)
 
-    print(f"扫描 {len(reports)} 份画像,{len(dirty)} 份含他人订单信息"
-          f"(越权事实 {tot_f} 条、越权摘要 {tot_s} 条)")
+    print(f"扫描 {len(reports)} 份画像,{len(dirty)} 份含不该留的内容"
+          f"(事实 {tot_f} 条、摘要 {tot_s} 条;判据:他人订单 + 内部定价)")
     for r in dirty[:10]:
         print(f"  {r['path'].name:<24} user={r['user_id']:<10} "
               f"fact={len(r['bad_facts'])} summary={len(r['bad_summaries'])}")
@@ -113,7 +116,7 @@ def main(argv=None) -> int:
 
     for r in dirty:
         clean_file(r)
-    print(f"已清理 {len(dirty)} 份画像,移除越权事实 {tot_f} 条、越权摘要 {tot_s} 条。")
+    print(f"已清理 {len(dirty)} 份画像,移除事实 {tot_f} 条、摘要 {tot_s} 条。")
     return 0
 
 

@@ -65,6 +65,34 @@ def _owner_of(order_id: str):
     return None if order is None else order.get("user")
 
 
+#: 内部定价结论:提到"底价/底线/最低价"这类词**并且带数字**。
+#:
+#: **实测泄漏**(核查判断性记忆时抓到)。user=1 的画像里有:
+#:
+#:     对Nike Air Max 270运动鞋价格敏感,多次议价至¥500未果,最终平台底线为¥750.00
+#:
+#: 而 `products.floor_price` 真值就是 **750.00**——记的是对的,但它**不该在这里**。
+#:
+#: 不是字段泄漏:`bargain` 的返回里没有 `floor_price`,它返回的是 `suggested_price`
+#: 与 `floor_hit`。触底时 suggested_price 就等于底价,`floor_hit=true` 等于宣告
+#: "这就是底了"——抽取器把这一对推成了一条永久事实。工具那边已经写了
+#: "禁止…向买家透露底价",管住的是**出话**,管不到**记忆抽取**。
+#:
+#: 危害是具体的:下一次这个买家说"能便宜点",记忆把底价直接注入提示词,客服可能
+#: 从 750 开口而不是从标价 899 阶梯下让——**议价阶梯对回头客失效**。议价状态本来
+#: 就存在 `bargain_sessions` 里,长期记忆不需要再留一份。
+#:
+#: 判据故意保守(要求同时出现关键词和数字):买家偏好几乎不会写成"底线为¥X",
+#: 误伤风险低;而丢掉这条的代价也低,真状态在 bargain_sessions 里。
+_INTERNAL_PRICING_RE = re.compile(
+    r"(底价|底线|最低价|最低可|可让到|授权价)[^。；;\n]{0,20}?\d")
+
+
+def mentions_internal_pricing(text: str) -> bool:
+    """这段文本是否记下了内部定价结论(底价/底线 + 具体数字)。"""
+    return bool(_INTERNAL_PRICING_RE.search(text or ""))
+
+
 def fact_belongs_to(content: str, user_id: str) -> bool:
     """这条 fact 可以念给 `user_id` 听吗。
 
@@ -79,6 +107,19 @@ def fact_belongs_to(content: str, user_id: str) -> bool:
         if owner is not None and str(owner) != str(user_id):
             return False
     return True
+
+
+def admissible(text: str, user_id: str) -> bool:
+    """这条记忆可以留、可以念给 `user_id` 听吗——**读、写、清理三条路的唯一判据**。
+
+    两条规则:不能是别人的订单(`fact_belongs_to`),不能是内部定价结论
+    (`mentions_internal_pricing`)。
+
+    合成一个入口是为了**防止三条路的判据分叉**。分叉的后果实测过一次:清理脚本
+    当时用的是我临时写的正则,与运行时不同源,报出来的数字就和运行时的判定不一致
+    (55 vs 56)。更糟的形态是"运行时还拦着、脚本以为干净",那种状态没人查得出来。
+    """
+    return fact_belongs_to(text, user_id) and not mentions_internal_pricing(text)
 
 
 def filter_owned(contents, user_id: str) -> tuple[list, list]:
@@ -101,7 +142,7 @@ def filter_owned(contents, user_id: str) -> tuple[list, list]:
 
     kept, dropped = [], []
     for c in items:
-        (kept if fact_belongs_to(_text_of(c), user_id) else dropped).append(c)
+        (kept if admissible(_text_of(c), user_id) else dropped).append(c)
     return kept, dropped
 
 
@@ -141,7 +182,7 @@ def redact_unowned_sentences(text: str, user_id: str) -> tuple[str, int]:
     for sentence in _SENTENCE_SPLIT_RE.split(text):
         if not sentence:
             continue
-        if fact_belongs_to(sentence, user_id):
+        if admissible(sentence, user_id):
             kept.append(sentence)
         else:
             dropped += 1
