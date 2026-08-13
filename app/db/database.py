@@ -1546,7 +1546,15 @@ class Database:
                    -- 在这里加一列 `SUM(payload.degraded)` 只会得到恒为 0 的假信号,
                    -- 比不做更糟。降级统计走 /collab/health 的 degraded 段。
                    {self.d.group_concat('source_agent')}  AS sources,
-                   {self.d.group_concat('target_agent')}  AS targets
+                   {self.d.group_concat('target_agent')}  AS targets,
+                   -- 这条链**走到了哪几步**。没有它,前端只能显示"1 个事件",
+                   -- 看不出这条链是刚起头还是已经走完——而"卡在哪一步"正是
+                   -- 运维看这个页面唯一想知道的事。用 group_concat 拼事件类型,
+                   -- 前端按规范链的阶段序还原进度(见 CollabView 的 STAGES)。
+                   {self.d.group_concat('event_type')}    AS event_types,
+                   -- 每一步的最新状态:同一类事件可能既有 done 又有 pending
+                   -- (扇出成多行),拼起来交给前端按"最坏状态优先"归并。
+                   {self.d.group_concat('status')}        AS statuses
               FROM agent_events
              WHERE correlation_id IS NOT NULL AND correlation_id != ''
              GROUP BY correlation_id
@@ -1559,12 +1567,23 @@ class Database:
             out = []
             for row in rows:
                 item = dict(row)
+                raw_targets = (item.get("targets") or "").split(",")
                 agents = [a for a in
                           (item.pop("sources") or "").split(",") +
                           (item.pop("targets") or "").split(",") if a]
                 # dict.fromkeys 而不是 set:保留首次出现顺序,链上的 Agent 顺序
                 # 本身就是给人看的信息(谁先动手),排序打乱它就没意义了。
                 item["agents"] = list(dict.fromkeys(agents))
+                # 事件类型与状态**按位置一一对应**(同一个 GROUP BY 里的两个
+                # group_concat 顺序一致),前端靠这个配对还原每一步的状态。
+                # 不在这里配对成对象:SQL 层只负责取,聚合语义留给调用方,
+                # 免得这张表的形状被一个展示需求绑死。
+                item["event_types"] = [t for t in (item.pop("event_types") or "").split(",") if t]
+                item["statuses"] = [t for t in (item.pop("statuses") or "").split(",") if t]
+                # targets 也要按位置留一份:一条事件处于 pending 时,前端要说清
+                # **在等谁处理**。少了它只能说"等待<这一步>",而那会把"归因结果
+                # 已产出、等人看"说成"等待归因"——方向正好反了(实测踩过)。
+                item["targets"] = [t for t in raw_targets if t]
                 out.append(item)
             return out
         finally:

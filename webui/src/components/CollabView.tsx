@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { StageRail, StageRailCompact, deriveStages, stageSummary } from "./collab/StageRail";
 import { RotateCcw, AlertTriangle, ArrowRight, Radio, Workflow, Inbox } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -300,13 +301,20 @@ export function CollabView() {
                             (路由无目标 → 不插行),按链统计只会恒为 0。
                             降级看上方健康条的 degraded 段。 */}
                       </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-1 text-[11px] text-muted-foreground">
-                        {c.agents.map((a, i) => (
-                          <span key={`${a}-${i}`} className="flex items-center gap-1">
-                            {i > 0 && <ArrowRight className="h-3 w-3" />}
-                            {agentLabel(routing, a)}
-                          </span>
-                        ))}
+                      {/* 阶段轨取代原来的「Agent → Agent」箭头行。
+                          原来那行只说明"碰过谁",说不清**走到哪一步**——而实测 30 条链
+                          里 28 条都显示成一样的「客服 → 参谋 · 1 个事件」,因为它们全
+                          卡在第一步。看不出卡住,就等于这个页面没在报信。 */}
+                      <div className="mt-1.5 flex items-center gap-2">
+                        <StageRailCompact stages={deriveStages(c.event_types, c.statuses, c.targets)} />
+                        <span className={`text-[11px] ${
+                          stageSummary(deriveStages(c.event_types, c.statuses, c.targets)).tone === "bad"
+                            ? "text-destructive"
+                            : stageSummary(deriveStages(c.event_types, c.statuses, c.targets)).tone === "wait"
+                              ? "text-amber-700 dark:text-amber-400"
+                              : "text-muted-foreground"}`}>
+                          {stageSummary(deriveStages(c.event_types, c.statuses, c.targets)).text}
+                        </span>
                       </div>
                       <div className="mt-1 text-[11px] text-muted-foreground">
                         {c.events} 个事件 · {c.started_at}
@@ -327,6 +335,38 @@ export function CollabView() {
               {!selected && !tlBusy && (
                 <div className="text-sm text-muted-foreground">左侧选一条协作链查看它的完整时间线</div>
               )}
+
+              {/* 完整阶段轨:时间线是"发生过什么"的流水账,轨是"整条链处在什么位置"。
+                  两者都要有——流水账回答不了"还差几步"、"在等谁",而那是打开这个
+                  面板最先想知道的事。轨从时间线里的事件类型现算,不额外请求。 */}
+              {events.length > 0 && (() => {
+                const stages = deriveStages(events.map((e) => e.event_type),
+                                            events.map((e) => e.status),
+                                            events.map((e) => e.target_agent));
+                const sum = stageSummary(stages);
+                return (
+                  <Card className="mb-3 p-3" data-testid="stage-rail">
+                    <div className="mb-2.5 flex items-center gap-2">
+                      <span className="text-xs font-medium">链路进度</span>
+                      <span className={`rounded px-1.5 py-0.5 text-[11px] ${
+                        sum.tone === "bad" ? "bg-destructive/10 text-destructive"
+                        : sum.tone === "wait" ? "bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                        : sum.tone === "unknown" ? "bg-muted text-muted-foreground"
+                        : "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"}`}>
+                        {sum.text}
+                      </span>
+                    </div>
+                    <StageRail stages={stages} />
+                    {/* 未走完不等于出错,这句必须写在旁边:归因降级的诊断按路由规则
+                        不唤醒营销,链正常地停在第 2 步。少了这句,空心圆会被读成故障。 */}
+                    <p className="mt-2.5 text-[11px] leading-relaxed text-muted-foreground">
+                      空心 = 这一步还没发生。<strong className="font-medium">未走完不一定是故障</strong>:
+                      归因降级的诊断按路由规则不唤醒营销(routing._marketing_worthy),
+                      这条链会正常地停在「参谋归因」。真正的故障只有红色的「失败」。
+                    </p>
+                  </Card>
+                );
+              })()}
 
               {events.length > 0 && (
                 <div className="flex flex-col" data-testid="timeline">

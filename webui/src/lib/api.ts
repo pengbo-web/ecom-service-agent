@@ -758,6 +758,15 @@ export type CollabChain = {
   // 注意这里**没有** degraded:降级诊断不产生任何总线事件(路由算不出目标时
   // publish 不插行),按链统计必然恒为 0。降级走 CollabHealth.degraded。
   agents: string[];
+  // 这条链**走到了哪几步**。`event_types[i]` 与 `statuses[i]` 按位置一一对应
+  // (后端同一个 GROUP BY 里的两个 group_concat 顺序一致)。
+  // 前端按规范链的阶段序还原进度——没有它,页面只能显示"1 个事件",
+  // 看不出这条链是刚起头还是已经走完。
+  event_types?: string[];
+  statuses?: string[];
+  // 每条事件的收件人。pending 时要靠它说清"在等谁处理"——只有阶段名的话,
+  // 会把"归因结果已产出、等人看"说成"等待归因"。
+  targets?: string[];
 };
 
 export async function getCollabChains(limit = 30): Promise<{ chains: CollabChain[] }> {
