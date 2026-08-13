@@ -21,7 +21,8 @@ export function ConversationList({ items, selected, onSelect, filter, onFilter, 
   ];
 
   return (
-    <div className="flex h-full flex-col border-r bg-card/40">
+    // min-h-0:同 MessageThread,网格 item 必须允许缩到内容高度以下
+    <div className="flex h-full min-h-0 flex-col border-r bg-card/40">
       {/* 搜索 */}
       <div className="border-b p-2">
         <div className="flex items-center gap-2 rounded-md border bg-background px-2.5 py-1.5">

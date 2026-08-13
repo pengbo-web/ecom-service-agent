@@ -40,13 +40,15 @@ export function ContextPanel({ conv }: { conv: WbConversation | null }) {
   }, [userId]);
 
   if (!conv) return (
-    <div className="hidden h-full items-center justify-center border-l bg-card/40 p-6 text-center text-xs text-muted-foreground lg:flex">
+    <div className="hidden h-full min-h-0 items-center justify-center border-l bg-card/40 p-6 text-center text-xs text-muted-foreground lg:flex">
       选择左侧会话查看客户信息
     </div>
   );
   const sm = statusMeta(conv);
   return (
-    <div className="hidden h-full flex-col gap-4 overflow-y-auto border-l bg-card/40 p-4 lg:flex">
+    // min-h-0:网格 item 必须允许缩到内容高度以下,否则这一列的长内容
+    // 会把整个网格顶开(overflow-y-auto 只在它自己拿到确定高度时才生效)
+    <div className="hidden h-full min-h-0 flex-col gap-4 overflow-y-auto border-l bg-card/40 p-4 lg:flex">
       <div className="flex flex-col items-center gap-2 pt-2">
         <span className="flex h-14 w-14 items-center justify-center rounded-full text-lg font-semibold text-white shadow-sm ring-2 ring-background"
           style={{ backgroundImage: avatarGradient(conv.user_id) }}>

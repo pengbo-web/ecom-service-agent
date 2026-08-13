@@ -23,7 +23,10 @@ export function MessageThread({ sessionId, userId, manual, turns, onAfterReply, 
   }
 
   return (
-    <div className="flex h-full flex-col">
+    // `min-h-0` 不能省:本组件是 WorkbenchView 网格的一个 item,而 grid/flex item 的
+    // 自动最小尺寸等于内容尺寸——消息一多,它会带着 `h-full` 一起撑破容器(实测容器
+    // 663px、它长到 3113px),把下面的输入框推出视口。
+    <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-3 border-b px-4 py-2.5">
         <span className="text-sm font-semibold">客户 {userId}</span>
         <span className="font-mono text-[11px] text-muted-foreground">{sessionId}</span>

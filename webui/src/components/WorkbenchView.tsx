@@ -73,7 +73,21 @@ export function WorkbenchView() {
   }
 
   return (
-    <div className="grid h-full grid-cols-[288px_1fr] lg:grid-cols-[288px_1fr_260px]">
+    // `grid-rows-[minmax(0,1fr)]` + 每列 `min-h-0` 是这个面板能用的前提,不是样式偏好。
+    //
+    // **实测缺陷**:会话消息一多,中间那列(MessageThread)会**撑破整个网格**——
+    // 容器 663px,它长到 3113px;输入框被推到 top=3101(视口只有 720),买家看不见,
+    // 而 `AppShell` 的 `<main>` 是 `overflow-hidden`,所以页面也滚不动。
+    // 结果就是:消息刷屏之后**既看不到输入框、也滚不动**,这一路会话等于废了。
+    //
+    // 原因是 CSS 的默认行为:grid/flex item 的**自动最小尺寸等于内容尺寸**,
+    // 所以子元素写了 `h-full` 也不肯缩到容器高度以下,行轨道跟着被内容顶开。
+    // 必须两处都给:行轨道 `minmax(0,1fr)` 不让它超过容器,item `min-h-0` 允许它缩。
+    // 只给其中一处仍然会溢出(实测)。
+    //
+    // 三列都要给,不能只修中间那一列:左右两列各自也有长列表,今天没炸只是因为
+    // 它们内部先有了滚动条——那是运气,不是设计。
+    <div className="grid h-full grid-rows-[minmax(0,1fr)] grid-cols-[288px_1fr] lg:grid-cols-[288px_1fr_260px]">
       <ConversationList items={convs} selected={selected} onSelect={setSelected}
         filter={filter} onFilter={setFilter} query={query} onQuery={setQuery} unreadIds={unreadIds} />
       {selConv ? (
@@ -81,7 +95,7 @@ export function WorkbenchView() {
           manual={selConv.manual} turns={turns}
           onAfterReply={setTurns} onToggleManual={onToggleManual} />
       ) : (
-        <div className="flex items-center justify-center text-sm text-muted-foreground">
+        <div className="flex min-h-0 items-center justify-center text-sm text-muted-foreground">
           {err ? <span className="text-destructive">加载失败:{err}</span> : "从左侧选择一路会话开始接待"}
         </div>
       )}
