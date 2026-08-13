@@ -136,6 +136,14 @@ class LongTermMemory:
         返回值不能用"前后长度比较"替代:满 max_facts 时新增会触发裁剪,
         长度不变但确实写入了(淘汰最老一条)——长度比较会误报"已存在"。
         """
+        # **写入侧的归属过滤。** 读取侧(`owned_facts`)挡住了已经写进去的东西,
+        # 但挡不住新的继续写进来——每写一条,磁盘上就多一份要清的数据,而清理是
+        # 一次性的、事后的。两侧都要有:读取侧兜住历史污染,写入侧止住增量。
+        #
+        # 放在这里而不是各个抽取器里:`add_facts` 是所有 fact 写入的唯一收口
+        # (LLM 抽取、`save_user_memory` 工具、以及将来任何新入口都经过它)。
+        new_facts = self._owned_only(new_facts, "事实")
+
         with self._lock:
             existing_contents = {f.content.lower() for f in self.facts}
             added = 0
@@ -149,7 +157,36 @@ class LongTermMemory:
                 self.facts = self.facts[-self.max_facts:]
             return added
 
+    def _owned_only(self, items, label: str):
+        """写入前筛掉提到**他人订单**的条目;判据与读取侧完全同源。
+
+        过滤自身出错时**放行**(与读取侧的 fail-closed 相反,这是刻意的):写入侧
+        误拦会让买家自己的记忆凭空消失且无法恢复,而读取侧那道过滤仍然会在念出来
+        之前再筛一次——真正的防线在读取侧,这里是止血,不该为了止血而丢数据。
+        """
+        import logging
+
+        items = list(items or [])
+        try:
+            from app.agent.memory.ownership_filter import filter_owned
+
+            kept, dropped = filter_owned(items, self.user_id)
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "长期记忆写入侧归属过滤失败,本次照常写入(读取侧仍会再筛一遍)",
+                exc_info=True)
+            return items
+        if dropped:
+            logging.getLogger(__name__).warning(
+                "长期记忆拒绝写入 %d 条提到他人订单的%s(user=%s)",
+                len(dropped), label, self.user_id)
+        return kept
+
     def add_interaction_summary(self, summary: str) -> None:
+        # 摘要同样在写入侧筛一遍。实测那批污染里摘要占 55 条、fact 只占 1 条
+        # ——大头在这儿。
+        if not self._owned_only([summary], "摘要"):
+            return
         with self._lock:
             self.interaction_summaries.append({
                 "summary": summary,

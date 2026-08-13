@@ -54,3 +54,6 @@ app/agent/skills/definitions/_swap/
 # 每次点一次转正就多出一堆 diff。
 app/agent/skills/definitions/_promoted/
 app/agent/skills/definitions/_rejected/
+
+# 记忆清理脚本的备份目录(含买家原始画像,不入库)
+app/sessions/memory_backup_*/
