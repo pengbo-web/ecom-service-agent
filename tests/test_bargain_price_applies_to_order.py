@@ -309,3 +309,82 @@ def test_no_user_identity_says_it_is_not_locked(client):
         out = negotiate_price(SKU, buyer_offer=850.0)
     assert "未能锁定" in out["price_effect"]
     assert "禁止" in out["price_effect"]
+
+
+# --------------------------------------------------------------------------
+# hmdp 履约路径:议价价**用不了**,而且不能假装能用
+#
+# **实测缺陷**(拉起 Redis 之后真下了一单才发现)。demo 用户的订单建在 hmdp,而
+# `POST {base}/order` 的入参只有 `productId/quantity/address`——**没有价格字段**。
+# 于是那一单的实际形态是:
+#
+#     购物车显示「议价 ¥780」、按钮「去下单 ¥780」、我们的响应也回 total=780
+#     hmdp 真实建单 total=89900 分 = ¥899
+#     议价成交价还被核销掉了(consumed_at 有值、order_id 指向那笔 hmdp 单)
+#
+# **承诺 780、实收 899、券也没了**——比修复前那个诚实的 899 更糟。
+#
+# 判据放在 `_apply_bargain_price` 里而不是各调用点:购物车、商品详情、下单三处都调
+# 它,一处判、三处一致。分散判早晚出现"购物车显示 780、结账收 899"。
+#
+# 这是 demo 模式专属的缺口:真实部署 demo_mode=False,所有订单走本地库,议价正常。
+# 要让它在 hmdp 上生效,得 hmdp 支持接收成交价——那是另一个系统的改动,
+# 这里不假装能做到。
+# --------------------------------------------------------------------------
+
+def test_hmdp_user_does_not_get_the_bargained_price(client, monkeypatch):
+    """**核心断言。** 走 hmdp 的用户拿标价,不拿议价价——因为价格传不过去。"""
+    import app.api.app as app_mod
+    from app.config import settings as st
+
+    c, db = client
+    monkeypatch.setattr(st.settings, "demo_mode", True)
+    monkeypatch.setattr(st.settings, "demo_hmdp_user_id", "hmdpuser")
+    monkeypatch.setattr(st.settings, "demo_hmdp_token", "tok")
+    db.record_bargain_deal("hmdpuser", SKU, DEAL)
+
+    p = {"id": "1", "title": "鞋", "price": LIST_PRICE, "sku": SKU}
+    assert app_mod._apply_bargain_price("hmdpuser", p, 1) == (LIST_PRICE, None)
+
+
+def test_local_user_still_gets_the_bargained_price(client, monkeypatch):
+    """**反向断言**:本地建单的用户照常生效。少了这条,"一律不给议价"也能让上面过。"""
+    import app.api.app as app_mod
+    from app.config import settings as st
+
+    c, db = client
+    monkeypatch.setattr(st.settings, "demo_mode", True)
+    monkeypatch.setattr(st.settings, "demo_hmdp_user_id", "hmdpuser")
+    db.record_bargain_deal("localuser", SKU, DEAL)
+
+    p = {"id": "1", "title": "鞋", "price": LIST_PRICE, "sku": SKU}
+    price, deal = app_mod._apply_bargain_price("localuser", p, 1)
+    assert price == DEAL and deal is not None
+
+
+def test_hmdp_path_does_not_consume_the_deal(client, monkeypatch):
+    """不生效就**不能核销**——白吃掉买家一次议价额度是这条缺陷里最伤人的一半。"""
+    import app.api.app as app_mod
+    from app.config import settings as st
+
+    c, db = client
+    monkeypatch.setattr(st.settings, "demo_mode", True)
+    monkeypatch.setattr(st.settings, "demo_hmdp_user_id", "hmdpuser")
+    db.record_bargain_deal("hmdpuser", SKU, DEAL)
+
+    p = {"id": "1", "title": "鞋", "price": LIST_PRICE, "sku": SKU}
+    _, deal = app_mod._apply_bargain_price("hmdpuser", p, 1)
+    app_mod._consume_bargain(deal, "ORD-X")          # deal 是 None,应当什么都不做
+    assert db.active_bargain_deal("hmdpuser", SKU) is not None, "议价额度被白吃了"
+
+
+def test_hmdp_token_helper_is_module_level(client):
+    """判据必须是模块级、唯一一份。
+
+    第一版把它写成引用 `create_app()` 里的闭包——import 能过、**一调就 NameError**。
+    抄第二份更糟:"谁走 hmdp"有两份判断,迟早分叉成"购物车按本地算价、下单却建到
+    了 hmdp"。
+    """
+    import app.api.app as app_mod
+
+    assert callable(getattr(app_mod, "_hmdp_token_for", None))

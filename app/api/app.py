@@ -65,6 +65,21 @@ def initial_order_status() -> str:
     return "unpaid" if settings.unpaid_flow_enabled else "pending"
 
 
+def _hmdp_token_for(user: str) -> str:
+    """demo 模式下把登录用户映射到其 hmdp token(与 /api/chat 同一套映射),
+    用于让"我的订单"页/自助下单与 AI 读同一份 hmdp 真实订单。非 demo 返回空。
+
+    **提到模块级的原因**:`_apply_bargain_price` 也要用它判"这个用户的订单会不会
+    建到 hmdp"(hmdp 收不了议价价,见那边的说明)。而它原本是 `create_app()` 里的
+    闭包——模块级函数引用闭包会在运行时 NameError(第一版就是这么写的,import 能过、
+    一调就炸)。抄第二份更糟:"谁走 hmdp"这个判断有两份,迟早分叉成
+    "购物车按本地算价、下单却建到了 hmdp"。
+    """
+    demo_tokens = {str(settings.demo_hmdp_user_id): settings.demo_hmdp_token,
+                   "1011": "demo-hmdp-token-1011"}
+    return demo_tokens.get(str(user), "") if settings.demo_mode else ""
+
+
 def _apply_bargain_price(user: str, product: dict, qty: int) -> tuple[float, dict | None]:
     """下单取价:有未兑现的议价成交就用它,否则用标价。返回 `(单价, 成交记录或None)`。
 
@@ -87,6 +102,23 @@ def _apply_bargain_price(user: str, product: dict, qty: int) -> tuple[float, dic
     list_price = float(product.get("price") or 0)
     sku = product.get("sku")
     if not sku:
+        return list_price, None
+
+    # **走 hmdp 建单的用户拿不到议价价——因为我们没法把价格传给 hmdp。**
+    #
+    # 实测缺陷(拉起 Redis 之后真下了一单才发现):demo 用户的订单建在 hmdp,而
+    # `POST {base}/order` 的入参只有 `productId/quantity/address`,**没有价格字段**。
+    # 于是:购物车显示「议价 ¥780」、按钮写「去下单 ¥780」、我们的响应也回 780,
+    # 而 hmdp 真实建单 ¥899(实测 total=89900 分),议价成交价还被核销掉了。
+    # **承诺 780、实收 899、券也没了**——比原来诚实的 899 更糟。
+    #
+    # 判据放在这个函数里而不是各调用点:购物车、商品详情、下单三处都调它,
+    # 一处判、三处一致。分散判早晚出现"购物车显示 780、结账收 899"。
+    #
+    # 这是 demo 模式专属的缺口:真实部署 demo_mode=False,所有订单走本地库,
+    # 议价正常生效。要让它在 hmdp 上也生效,得 hmdp 支持接收成交价——那是另一个
+    # 系统的改动,不在这里假装能做到。
+    if _hmdp_token_for(user):
         return list_price, None
 
     try:
@@ -601,11 +633,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
                     "reason": f"商品服务连不上({type(exc.__cause__).__name__ if exc.__cause__ else 'Error'})"}
 
     def _hmdp_token_for_user(user: str) -> str:
-        """demo 模式下把登录用户映射到其 hmdp token(与 /api/chat 同一套映射),
-        用于让"我的订单"页/自助下单与 AI 读同一份 hmdp 真实订单。非 demo 返回空。"""
-        demo_tokens = {str(settings.demo_hmdp_user_id): settings.demo_hmdp_token,
-                       "1011": "demo-hmdp-token-1011"}
-        return demo_tokens.get(str(user), "") if settings.demo_mode else ""
+        """见模块级的 `_hmdp_token_for`。保留这个名字是为了不动几十处调用点。"""
+        return _hmdp_token_for(user)
 
     def _fetch_hmdp_order(order_id: str, token: str) -> Optional[dict]:
         """按单号从 hmdp 取一笔订单(已映射)。失败/无返回 None。
