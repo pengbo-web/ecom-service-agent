@@ -101,9 +101,20 @@ class ToolManager:
         if source == "mcp" and self._mcp_client:
             # 跨进程身份透传:MCP 工具在独立 server 进程执行,ContextVar 传不过去,
             # 用保留参数把当前用户带过去(server 端 set_current_user 后 owned_order 才能校验)。
+            #
+            # **确认门(consent)同样传不过去,而它比身份更容易被漏掉。** 实测:
+            # 客户端已 `consent_scope(['refund'])`,MCP 路径上 `apply_refund` 仍然
+            # 返回 need_confirm——买家确认→工具再问一次→无限循环,**退款永远完不成**。
+            # 方向是安全的(不会越权执行),但功能是坏的,而 mcp_enabled=True 就是
+            # 当前部署配置。
+            #
+            # 注意保留参数放在 `**arguments` **之后**:模型自己在 arguments 里塞
+            # ctx_user_id/ctx_consent 也会被这里的真值覆盖,自授权无效。
+            from app.agent.consent import allowed_actions
             from app.agent.runtime_context import get_current_user, get_current_token
             args = {**arguments, "ctx_user_id": get_current_user() or "",
-                    "ctx_token": get_current_token() or ""}
+                    "ctx_token": get_current_token() or "",
+                    "ctx_consent": ",".join(sorted(allowed_actions()))}
             result = self._mcp_client.call_tool(name, args)
         elif source == "local":
             result = local_execute_tool(name, arguments)

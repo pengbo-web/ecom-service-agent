@@ -47,11 +47,32 @@ def query_logistics(order_id: str, ctx_user_id: str = "") -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def _consent_from(ctx_consent: str):
+    """把客户端带过来的确认门落到本进程的 ContextVar 上。
+
+    **为什么需要它**(走查 MCP 全链路时实测):确认门 `app/agent/consent.py` 用的是
+    ContextVar,而 MCP 工具在**这个独立进程**里执行——客户端 `consent_scope(['refund'])`
+    传不过来。实测症状:买家确认了退款,`apply_refund` 仍然返回 need_confirm,
+    客服再问一次确认,**退款永远完不成**(方向安全,但功能是坏的)。
+
+    与 `ctx_user_id` 同一套办法:客户端 `ToolManager.execute_tool` 把保留参数放在
+    `**arguments` 之后,模型自己塞的同名参数会被真值覆盖,**自授权无效**。
+
+    空串 → 空集合 → `is_allowed` 全为假,即"没有任何授权",与改造前的行为一致。
+    """
+    from app.agent.consent import consent_scope
+
+    actions = [a for a in (ctx_consent or "").split(",") if a]
+    return consent_scope(actions)
+
+
 @mcp.tool()
-def apply_refund(order_id: str, reason: str, ctx_user_id: str = "") -> str:
+def apply_refund(order_id: str, reason: str, ctx_user_id: str = "",
+                 ctx_consent: str = "") -> str:
     """为指定订单申请退款。注意：这是一个敏感操作，调用前应先与用户确认"""
     set_current_user(ctx_user_id or None)
-    result = _apply_refund(order_id, reason)
+    with _consent_from(ctx_consent):
+        result = _apply_refund(order_id, reason)
     return json.dumps(result, ensure_ascii=False)
 
 

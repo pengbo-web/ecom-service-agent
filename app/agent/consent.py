@@ -20,6 +20,18 @@ def is_allowed(action: str) -> bool:
     return action in _ALLOWED.get()
 
 
+def allowed_actions() -> frozenset:
+    """本轮已授权的动作集合。
+
+    存在的理由只有一个:**MCP 工具在独立进程里执行,ContextVar 传不过去。**
+    `ToolManager.execute_tool` 需要把这个集合读出来、随保留参数 `ctx_consent`
+    带过去,server 端再 `consent_scope(...)` 落地——与 `ctx_user_id` 同一套办法。
+    没有这个读取口时,跨进程后 `is_allowed` 永远为假:实测 MCP 路径上买家确认了
+    退款,工具仍然回一句"请确认是否办理退款",**退款永远完不成**。
+    """
+    return _ALLOWED.get()
+
+
 @contextmanager
 def consent_scope(actions):
     """在作用域内授权一组动作;退出即复位。"""
