@@ -182,6 +182,28 @@ class Database:
                     updated_at TEXT,
                     PRIMARY KEY (session_id, product_id)
                 );
+                -- 议价成交记录。**与 `bargain_sessions` 是两回事**:那张表存的是
+                -- 谈判过程(轮次、上一轮报价),按 session 键;这张表存的是**结果**
+                -- ——"这个买家可以按这个价买这件商品"。
+                --
+                -- 按 `user + sku` 而不是 session:兑现发生在 `POST /api/order`,
+                -- 那个请求里**没有 session_id**(买家是在商城点「立即购买」,
+                -- 不是在对话里下单)。按 session 存等于存了个兑不了的凭证。
+                --
+                -- `consumed_at`/`order_id` 为 NULL 表示还没用掉。一次性:一笔成交只
+                -- 兑一单,否则买家谈一次就能按底价无限买。
+                CREATE TABLE IF NOT EXISTS bargain_deals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user TEXT NOT NULL,
+                    sku TEXT NOT NULL,
+                    price REAL NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT,
+                    order_id TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_bargain_deals_lookup
+                    ON bargain_deals (user, sku, consumed_at);
                 CREATE TABLE IF NOT EXISTS session_snapshots (
                     session_id TEXT PRIMARY KEY,
                     user_id TEXT,
@@ -926,6 +948,75 @@ class Database:
                 (session_id, product_id, offer, now, offer, now),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+    # ---------- 议价成交(与上面的谈判过程分开,见建表处的说明) ----------
+
+    def record_bargain_deal(self, user: str, sku: str, price: float,
+                            ttl_hours: int = 24) -> int:
+        """记一笔成交:该买家可在 `ttl_hours` 内按 `price` 买这件商品。返回记录 id。
+
+        **同一 (user, sku) 只保留最新一笔未兑现的**:买家可能谈了一轮不满意、
+        再谈一轮谈得更低,留着旧的那笔没有意义,而且会让"到底按哪个价"变成一个
+        要看时间戳才能回答的问题。
+        """
+        from app.db import dialect
+
+        # 非正的 ttl 会让 `datetime('now','+-1 hours')` 求值成 NULL,撞上 expires_at
+        # 的 NOT NULL——报出来是一条看不出原因的 IntegrityError。这里明确拒绝。
+        if int(ttl_hours) <= 0:
+            raise ValueError(f"议价成交有效期必须为正小时数,收到 {ttl_hours}")
+
+        conn = self.connect()
+        try:
+            conn.execute(
+                "DELETE FROM bargain_deals WHERE user = ? AND sku = ? AND consumed_at IS NULL",
+                (user, sku))
+            # 用方言层的 RETURNING 而不是 `cur.lastrowid`:后者是 sqlite3 驱动特有的,
+            # psycopg 没有(`tests/test_db_dialect.py` 会拦住——我第一版就写的 lastrowid)。
+            cur = conn.execute(
+                dialect.returning_id(
+                    "INSERT INTO bargain_deals (user, sku, price, created_at, expires_at) "
+                    f"VALUES (?, ?, ?, {dialect.now()}, {dialect.now_plus_param('hours')})"),
+                (user, sku, round(float(price), 2), int(ttl_hours)))
+            new_id = cur.fetchone()[0]
+            conn.commit()
+            return int(new_id)
+        finally:
+            conn.close()
+
+    def active_bargain_deal(self, user: str, sku: str) -> Optional[dict]:
+        """取该买家在这件商品上**未兑现且未过期**的成交价;没有则 None。"""
+        from app.db import dialect
+
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT id, price, expires_at FROM bargain_deals "
+                f"WHERE user = ? AND sku = ? AND consumed_at IS NULL AND expires_at > {dialect.now()} "
+                "ORDER BY id DESC LIMIT 1",
+                (user, sku)).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def consume_bargain_deal(self, deal_id: int, order_id: str) -> bool:
+        """把成交标记为已兑现。**条件更新**:只对还没兑现的那行生效。
+
+        与 `pay_order` / `set_refund` 同一套幂等纪律——并发下单时只有一个能兑到,
+        另一个拿 False 并按标价走。"先查再改"在这里等于让同一笔成交兑出两单。
+        """
+        from app.db import dialect
+
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                f"UPDATE bargain_deals SET consumed_at = {dialect.now()}, order_id = ? "
+                "WHERE id = ? AND consumed_at IS NULL",
+                (order_id, int(deal_id)))
+            conn.commit()
+            return cur.rowcount > 0
         finally:
             conn.close()
 

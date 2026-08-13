@@ -65,6 +65,68 @@ def initial_order_status() -> str:
     return "unpaid" if settings.unpaid_flow_enabled else "pending"
 
 
+def _apply_bargain_price(user: str, product: dict, qty: int) -> tuple[float, dict | None]:
+    """下单取价:有未兑现的议价成交就用它,否则用标价。返回 `(单价, 成交记录或None)`。
+
+    **这是"议价谈了不算数"那条缺陷的兑现端。** 改造前 `POST /api/order` 对议价的
+    引用次数是 0,买家谈到 ¥750(标价 ¥899)下单被收 ¥899——客服刚亲口答应过的价格。
+
+    命名空间的桥:议价按**本地 `products.product_id`**(如 `SHOE-270-BK-42`)记,
+    而下单入参是 **hmdp 的 `item_id`**(如 `1`)。`_map_hmdp_product` 现在会把 hmdp
+    记录里的 `sku` 带出来,这里就用它做换算——hmdp 老版本没有 `sku` 时取不到成交价,
+    按标价走(**宁可多收得对,不可少收得错**)。
+
+    兑现时**重新校验**,不信任存下来的数字:
+
+    - 不低于当前底价:底价可能在成交之后被调过,而这一笔还没兑现;
+    - 不高于当前标价:标价降到成交价以下时按标价收——绝不能因为"谈过价"反而收得更贵。
+
+    只取价、**不核销**:核销要等订单真的建出来(见 `_consume_bargain`),否则建单
+    失败会白白吃掉买家一次成交。
+    """
+    list_price = float(product.get("price") or 0)
+    sku = product.get("sku")
+    if not sku:
+        return list_price, None
+
+    try:
+        deal = get_db().active_bargain_deal(user, str(sku))
+    except Exception:  # noqa: BLE001 取不到成交价就按标价走,不能让下单因此失败
+        logger.warning("查询议价成交失败,本单按标价结算 (user=%s sku=%s)", user, sku,
+                       exc_info=True)
+        return list_price, None
+    if not deal:
+        return list_price, None
+
+    price = float(deal["price"])
+    try:
+        local = get_db().get_product(str(sku)) or {}
+        floor = local.get("floor_price")
+        if floor is not None:
+            price = max(price, float(floor))
+    except Exception:  # noqa: BLE001 校不到底价时不放宽,保持成交价
+        pass
+    price = min(price, list_price)
+    return round(price, 2), deal
+
+
+def _consume_bargain(deal: dict | None, order_id: str) -> None:
+    """订单建成之后核销这笔成交(一次性)。
+
+    条件更新失败(并发下另一单先兑走了)**只记日志不报错**:订单已经建出来了,
+    此时把接口回成失败会让买家看到"下单失败"而库里其实有单——那比少收一次价更糟。
+    """
+    if not deal:
+        return
+    try:
+        if not get_db().consume_bargain_deal(int(deal["id"]), order_id):
+            logger.warning("议价成交核销未生效(可能已被另一单兑走) deal_id=%s order=%s",
+                           deal.get("id"), order_id)
+    except Exception:  # noqa: BLE001 核销失败不能回滚一笔已经建好的订单
+        logger.warning("议价成交核销失败 deal_id=%s order=%s", deal.get("id"), order_id,
+                       exc_info=True)
+
+
 def _order_result_for(order_id: str | None, user: str) -> dict:
     """幂等键命中时,拼出与第一次下单**同形状**的响应。
 
@@ -630,7 +692,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
         if not p:
             raise HTTPException(404, "商品不存在或已下架")
         qty = max(1, min(int(req.quantity or 1), 99))
-        total = round((p.get("price") or 0) * qty, 2)
+        unit_price, bargain = _apply_bargain_price(user, p, qty)
+        total = round(unit_price * qty, 2)
         token = _hmdp_token_for_user(user)
         if token:
             from app.net.internal_http import internal_client
@@ -651,14 +714,17 @@ def create_app(session_manager: Optional[SessionManager] = None,
             except Exception:  # noqa: BLE001 购物车状态清理失败不影响已下单结果
                 pass
             oid = d.get("data")
+            _consume_bargain(bargain, str(oid))
             if key:
                 get_db().finish_idempotency_key(user, key, str(oid))
             return {"success": True, "order_id": oid, "status_label": "待支付", "total": total}
         order = get_db().create_order(
             user=user,
-            items=[{"name": p["title"], "sku": f"HMDP-{req.item_id}", "quantity": qty, "price": p["price"]}],
+            items=[{"name": p["title"], "sku": f"HMDP-{req.item_id}", "quantity": qty,
+                    "price": unit_price}],
             total=total, status=initial_order_status(), shipping_address=req.shipping_address,
         )
+        _consume_bargain(bargain, order["order_id"])
         try:
             get_db().mark_cart_converted(user, [req.item_id])
         except Exception:  # noqa: BLE001 购物车状态清理失败不影响已下单结果

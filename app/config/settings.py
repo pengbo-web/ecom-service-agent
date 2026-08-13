@@ -257,6 +257,10 @@ class Settings(BaseSettings):
     bargain_enabled: bool = True
     bargain_floor_ratio: float = 0.85   # 未设 floor_price 时：底价 = 标价 × 该系数
     bargain_max_rounds: int = 5         # 达到该轮次后直接让到底价
+    # 议价成交价的有效期。24 小时是个产品决定:谈成的价不该无限期挂着(标价、库存、
+    # 活动都会变),但要给买家一个"回去想想"的窗口。一笔成交只兑一单(见
+    # `bargain_deals` 建表说明),所以这个窗口不会被用来按底价囤货。
+    bargain_deal_ttl_hours: int = 24
     bargain_decay: float = 0.5          # 阶梯让价衰减系数（越大让得越慢）
 
     # 多轮对话管理
