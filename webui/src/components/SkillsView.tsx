@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { countLabel } from "@/lib/count";
 import { distillSkillFromDoc, getSkillsOverview, uploadSkillBundle,
   promoteSkill, rejectSkill, rollbackSkill,
   type SkillCandidate, type SkillDistillResult, type SkillUploadResult,
@@ -253,7 +254,7 @@ export function SkillsView() {
 
         {/* 现行技能 */}
         <section>
-          <h3 className="mb-2 text-sm font-semibold">现行技能（{data?.live.length ?? 0}）</h3>
+          <h3 className="mb-2 text-sm font-semibold">现行技能（{countLabel(data?.live.length)}）</h3>
           <div className="flex flex-col gap-2">
             {(data?.live || []).map((s) => {
               const counts = data?.traces[s.name];
@@ -303,7 +304,7 @@ export function SkillsView() {
 
         {/* 待审候选 */}
         <section>
-          <h3 className="mb-2 text-sm font-semibold">待审候选（{data?.candidates.length ?? 0}）</h3>
+          <h3 className="mb-2 text-sm font-semibold">待审候选（{countLabel(data?.candidates.length)}）</h3>
           <div className="flex flex-col gap-2">
             {(data?.candidates || []).map((c) => (
               <Card key={c.name} className="p-3">
@@ -370,7 +371,7 @@ export function SkillsView() {
 
         {/* 活跃灰度 */}
         <section>
-          <h3 className="mb-2 text-sm font-semibold">活跃灰度（{data?.canaries.length ?? 0}）</h3>
+          <h3 className="mb-2 text-sm font-semibold">活跃灰度（{countLabel(data?.canaries.length)}）</h3>
           <div className="flex flex-col gap-2">
             {(data?.canaries || []).map((c) => (
               <Card key={c.skill_name} className="p-3 text-sm">

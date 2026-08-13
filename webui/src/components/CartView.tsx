@@ -60,7 +60,8 @@ export function CartView({ onShop, onCartChanged }: { onShop: () => void; onCart
       }
       await load();
     } catch (e) {
-      setErr(item.sku, String(e));
+      // 只取 message:String(e) 会渲染成「Error: …」,那个前缀对买家没有意义
+      setErr(item.sku, (e as Error)?.message || String(e));
     } finally {
       setBusySku(null);
     }
@@ -73,7 +74,8 @@ export function CartView({ onShop, onCartChanged }: { onShop: () => void; onCart
       await removeFromCartApi(item.sku);
       await load();
     } catch (e) {
-      setErr(item.sku, String(e));
+      // 只取 message:String(e) 会渲染成「Error: …」,那个前缀对买家没有意义
+      setErr(item.sku, (e as Error)?.message || String(e));
     } finally {
       setBusySku(null);
     }
@@ -90,7 +92,8 @@ export function CartView({ onShop, onCartChanged }: { onShop: () => void; onCart
       await load();   // 下单成功后端已把该行标记为 converted,重新拉一次列表即可
       alert(`下单成功！订单号 ${r.order_id}（${r.status_label}），实付 ¥${r.total}`);
     } catch (e) {
-      setErr(item.sku, String(e));
+      // 只取 message:String(e) 会渲染成「Error: …」,那个前缀对买家没有意义
+      setErr(item.sku, (e as Error)?.message || String(e));
     } finally {
       setBusySku(null);
     }
@@ -161,7 +164,18 @@ export function CartView({ onShop, onCartChanged }: { onShop: () => void; onCart
                         </div>
                       ) : (
                         <div className="mt-0.5 flex items-baseline gap-2 text-xs">
-                          <span className="text-red-500">单价 ¥{it.price}</span>
+                          {/* 议价成交价:**买家看到的价必须等于他会被收的价**。
+                              实测缺陷——谈成 ¥780 后购物车仍显示 ¥899、按钮写
+                              「去下单 ¥899」,而下单实收 ¥780。原价保留并划掉,
+                              让买家看得见"便宜了多少"以及"为什么便宜"。 */}
+                          {it.deal_price != null ? (
+                            <span className="flex items-center gap-1.5">
+                              <span className="text-muted-foreground line-through">¥{it.price}</span>
+                              <span className="font-medium text-red-500">议价 ¥{it.deal_price}</span>
+                            </span>
+                          ) : (
+                            <span className="text-red-500">单价 ¥{it.price}</span>
+                          )}
                           <span className="text-muted-foreground">
                             小计 <b className="text-foreground">¥{it.subtotal}</b>
                           </span>
@@ -196,6 +210,16 @@ export function CartView({ onShop, onCartChanged }: { onShop: () => void; onCart
                             : it.subtotal != null ? `去下单 ¥${it.subtotal}` : "去下单"}
                     </Button>
                   </div>
+                  {/* 说清边界:议价价有有效期、且只作用一笔订单。少了这句,
+                      买家会以为这个价永久有效——那是个会落空的预期,与当初那句
+                      "已锁定"性质相同(见 streaming._build_confirm_reply)。 */}
+                  {it.deal_price != null && (
+                    <div className="mt-1.5 rounded-md bg-red-500/5 px-2.5 py-1.5 text-[11px]
+                                    text-muted-foreground">
+                      已按与客服谈成的价格 <b className="text-foreground">¥{it.deal_price}</b> 计价,
+                      下单自动生效(有效期内、仅限一笔订单;过期或用掉后恢复标价 ¥{it.price})。
+                    </div>
+                  )}
                   {err && <div role="alert" className="mt-2 text-xs text-destructive">⚠️ {err}</div>}
                 </div>
               );

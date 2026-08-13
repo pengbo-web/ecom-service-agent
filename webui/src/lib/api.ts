@@ -122,7 +122,16 @@ export async function createOrder(itemId: string, quantity = 1, idempotencyKey?:
     },
     body: JSON.stringify({ item_id: itemId, quantity }),
   });
-  if (!r.ok) throw Object.assign(new Error("order"), { status: r.status });
+  if (!r.ok) {
+    // **把服务端那句人话带出来。** 改造前这里抛的是 `new Error("order")`,
+    // 于是买家在购物车上看到的是「⚠️ Error: order」——而服务端明明回了
+    // 「下单请求已发出但未收到确认,请稍后在「我的订单」查看…」。
+    // 实测踩到:Redis 挂 → hmdp 下单挂住 → 503 + 完整说明,买家却只看到 Error: order。
+    // 后端把话说清楚了,前端不能在最后一步把它丢掉。
+    let detail = "";
+    try { detail = (await r.json())?.detail || ""; } catch { /* 非 JSON 就用兜底文案 */ }
+    throw Object.assign(new Error(detail || "下单失败,请稍后再试"), { status: r.status });
+  }
   return r.json();
 }
 export async function getMyOrders(): Promise<MyOrder[]> {
@@ -152,6 +161,9 @@ export type CartItem = {
   id: number; user_id: string; sku: string; quantity: number; added_at: string; status: string;
   title?: string | null; price?: number | null; image?: string | null;
   stock?: number | null; subtotal?: number | null; product_missing?: boolean;
+  /** 该买家谈成的成交单价。**只在真的比标价低时出现**——等于标价时给它,
+   *  前端会渲染出一条"划掉 899 → 899"的假优惠。`subtotal` 已按它算好。 */
+  deal_price?: number | null;
 };
 
 /** 购物车。`degraded=true` 时行还在、但价格取不到——**含义从"这些商品没了"变成

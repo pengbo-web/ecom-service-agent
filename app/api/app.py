@@ -578,7 +578,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
             raise ProductServiceUnavailable(str(exc)) from exc
 
     @app.get("/api/product/{item_id}")
-    def product_detail(item_id: str):
+    def product_detail(item_id: str, request: Request):
         """按 id 取单个商品(结构化),供聊天窗内商品卡渲染。
 
         与 `/api/products` **同一条口径**:`product=null + degraded=false` 是"没有这个
@@ -587,7 +587,15 @@ def create_app(session_manager: Optional[SessionManager] = None,
         抖动赶走一个正要下单的买家。
         """
         try:
-            return {"product": _fetch_hmdp_product(item_id), "degraded": False}
+            p = _fetch_hmdp_product(item_id)
+            if p:
+                # 与购物车同一条口径:买家看到的价必须等于他会被收的价。
+                # 这个端点本身是公开的(不要求登录),`_resolve_user` 在未登录/
+                # auth 关闭时回落成默认用户,取不到成交价就照常显示标价——
+                # 不因为"想显示议价"而给这个端点加登录要求。
+                unit, deal = _apply_bargain_price(_resolve_user(request, None), p, 1)
+                p = {**p, "deal_price": unit if (deal and unit < (p.get("price") or 0)) else None}
+            return {"product": p, "degraded": False}
         except ProductServiceUnavailable as exc:
             return {"product": None, "degraded": True,
                     "reason": f"商品服务连不上({type(exc.__cause__).__name__ if exc.__cause__ else 'Error'})"}
@@ -701,12 +709,41 @@ def create_app(session_manager: Optional[SessionManager] = None,
             base = settings.hmdp_base_url.rstrip("/")
             pid = int(req.item_id) if req.item_id.isdigit() else req.item_id
             url = f"{base}/order"
-            with internal_client(url, timeout=4.0) as c:
-                r = c.post(url,
-                           json={"productId": pid, "quantity": qty,
-                                 "address": req.shipping_address or "上海市浦东新区示例路 1 号"},
-                           headers={"authorization": token})
-                d = r.json() if r.status_code == 200 else {}
+            import httpx as _httpx
+
+            try:
+                with internal_client(url, timeout=4.0) as c:
+                    r = c.post(url,
+                               json={"productId": pid, "quantity": qty,
+                                     "address": req.shipping_address or "上海市浦东新区示例路 1 号"},
+                               headers={"authorization": token})
+                    d = r.json() if r.status_code == 200 else {}
+            except _httpx.TimeoutException:
+                # **超时与连接失败必须分开处理,因为"订单建没建"的答案不一样。**
+                #
+                # 实测(前端体验时踩到):Redis 挂掉 → hmdp 的下单接口挂住(它要
+                # Redis 做库存)→ 这里 4 秒读超时 → 异常没人接 → 买家看到一个裸的
+                # 500 Internal Server Error。而 hmdp 的只读接口当时是好的
+                # (GET /product/1 → 200),所以商城看着一切正常,只有下单会炸。
+                #
+                # 超时的含义是**我们不知道对面做了什么**:请求可能已经到达并建了单,
+                # 也可能没有。所以:
+                #   ① 不释放幂等键——释放了,买家拿同一个 key 重试就会建出第二笔;
+                #   ② 不核销议价成交价——那笔单是否存在还不确定;
+                #   ③ 文案让买家**去看订单**,而不是"请重试"。劝一个可能已经下过单的
+                #      人再下一次,是这里最坏的建议。
+                logger.warning("hmdp 下单超时,结果未知 user=%s item=%s", user, req.item_id)
+                raise HTTPException(
+                    503, "下单请求已发出但未收到确认,请稍后在「我的订单」查看是否已生成;"
+                         "为避免重复下单,请不要立即重试。")
+            except _httpx.RequestError as exc:
+                # 连接层面的失败(拒绝/DNS/断开)= **请求没送达**,这个是确定的。
+                # 所以可以安全地释放幂等键让买家重试,议价也没被消耗。
+                if key:
+                    get_db().release_idempotency_key(user, key)
+                logger.warning("hmdp 下单连接失败 user=%s item=%s: %s",
+                               user, req.item_id, type(exc).__name__)
+                raise HTTPException(503, "下单服务暂时不可用,请稍后再试。")
             if not d.get("success"):
                 raise HTTPException(502, d.get("errorMsg") or "下单失败,请稍后再试")
             try:
@@ -843,10 +880,25 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 p = None
                 degraded = True
             if p:
+                # **买家看到的价必须等于他会被收的价。**
+                #
+                # 实测缺陷(前端体验时抓到):买家谈成 ¥780 后,购物车仍显示单价 ¥899、
+                # 按钮写「去下单 ¥899」,而下单实收 ¥780(`_apply_bargain_price`)。
+                # 三重后果:①他不知道议价生效了,整个功能对他不可见;②可能因为
+                # "看着还是原价"就不下单,议价白谈;③**按钮上的金额是承诺**,
+                # 而实收是另一个数——这个项目修过"让人闭着眼睛付钱",同一条纪律。
+                #
+                # 取价复用下单那条路的 `_apply_bargain_price`,不另写一套:两处若
+                # 各算各的,迟早出现"购物车显示 780、结账收 899"这种更糟的形态。
+                qty_ = item.get("quantity") or 0
+                unit, deal = _apply_bargain_price(user, p, qty_)
                 item.update({
                     "title": p.get("title"), "price": p.get("price"),
                     "image": p.get("image"), "stock": p.get("stock"),
-                    "subtotal": round((p.get("price") or 0) * (item.get("quantity") or 0), 2),
+                    # deal_price 只在**真的更便宜**时出现:等于标价时给它反而会让
+                    # 前端显示一条"划掉 899 → 899"的假优惠。
+                    "deal_price": unit if (deal and unit < (p.get("price") or 0)) else None,
+                    "subtotal": round(unit * qty_, 2),
                     "product_missing": False,
                 })
             else:

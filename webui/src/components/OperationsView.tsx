@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { countLabel } from "@/lib/count";
 import { getSellerOverview, sellerChat,
   type SellerOverview, type SellerChatReply, type EmotionDistribution,
   type ReviewInsights, type SkillQuality } from "@/lib/api";
@@ -478,7 +479,7 @@ export function OperationsView() {
 
         {/* 异常清单:每条都并排给出当前值与告警线,以及跨线幅度对应的颜色 */}
         <section>
-          <h3 className="mb-2 text-sm font-semibold">跨线异常（{data?.anomalies.length ?? 0}）</h3>
+          <h3 className="mb-2 text-sm font-semibold">跨线异常（{countLabel(data?.anomalies.length)}）</h3>
           <div className={`flex flex-col gap-2 ${stale ? "opacity-60" : ""}`}>
             {!data && busy && <div className="text-sm text-muted-foreground">加载中…</div>}
             {(data?.anomalies || []).map((a, i) => (

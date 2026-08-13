@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { countLabel } from "@/lib/count";
 import { StageRail, StageRailCompact, deriveStages, stageSummary } from "./collab/StageRail";
 import { RotateCcw, AlertTriangle, ArrowRight, Radio, Workflow, Inbox } from "lucide-react";
 import { Card } from "@/components/ui/card";
@@ -267,7 +268,7 @@ export function CollabView() {
           <div className="grid gap-4 lg:grid-cols-[minmax(0,20rem)_minmax(0,1fr)]">
             {/* 链列表 */}
             <section className="flex flex-col gap-2">
-              <h3 className="text-sm font-semibold">最近协作链（{chains?.length ?? 0}）</h3>
+              <h3 className="text-sm font-semibold">最近协作链（{countLabel(chains?.length)}）</h3>
               {chainsErr && <div className="text-sm text-destructive">读取失败：{chainsErr}</div>}
               {!chains && !chainsErr && <div className="text-sm text-muted-foreground">加载中…</div>}
               {chains && chains.length === 0 && (

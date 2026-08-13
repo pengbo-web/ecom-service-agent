@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { countLabel } from "@/lib/count";
 import { getMyOrders, getReviewableItems, payOrder, type MyOrder, type ReviewableItem } from "@/lib/api";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Button } from "@/components/ui/button";
@@ -70,7 +71,7 @@ export function OrdersView({ onShop }: { onShop: () => void }) {
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-3 border-b bg-card/50 px-6 py-2">
         <span className="text-sm font-semibold">我的订单</span>
-        <span className="text-xs text-muted-foreground">{orders?.length ?? 0} 笔</span>
+        <span className="text-xs text-muted-foreground">{countLabel(orders?.length)} 笔</span>
         <Button variant="ghost" size="sm" className="ml-auto" onClick={load}>
           <RotateCcw className="h-3.5 w-3.5" /> 刷新
         </Button>
