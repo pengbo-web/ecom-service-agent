@@ -394,6 +394,12 @@ export type SkillsOverview = {
   candidates: SkillCandidate[];
   traces: Record<string, Record<string, number>>;
   traces_window: { limit: number; note: string };
+  // 每个 skill 的失败按**可修性**分类:knowledge_gap(唯一会回流自改进的一类)/
+  // capability_limit(权限或依赖边界)/ evaluation_noise / undetermined。
+  // 只看成功率会把"归属校验正确拦截"读成"这个 skill 很烂"。
+  // 老后端不返回这个字段,前端按缺失处理(不显示,不猜)。
+  failure_attribution?: Record<string, Record<string, number>>;
+  failure_attribution_note?: string;
   canaries: SkillCanary[];
 };
 

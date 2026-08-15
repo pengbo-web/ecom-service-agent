@@ -79,6 +79,47 @@ function SyntheticNote({ c }: { c: SkillCandidate }) {
   );
 }
 
+/** 这个 skill 的失败里,有多少**根本不该算在它头上**。
+ *
+ * 光看成功率会得出完全错误的结论:实测 track-order 的 success 15 / tool_error 38
+ * 读起来是"成功率 28%,这 skill 很烂",而 41 条失败里 37 条是**归属校验正确地
+ * 拦住了跨用户访问**——安全机制在按设计工作,不是 skill 缺知识。少了这一行,
+ * 运营看着成功率会去改一份一个字都没写错的流程文档。
+ *
+ * `undetermined` 照常显示,不因为"不好看"而藏起来:它大起来说明判据不够用了。
+ */
+const ATTR_LABEL: Record<string, { text: string; cls: string }> = {
+  knowledge_gap: { text: "缺知识", cls: "text-red-600 dark:text-red-400" },
+  capability_limit: { text: "权限/依赖边界", cls: "text-muted-foreground" },
+  evaluation_noise: { text: "非有效证据", cls: "text-muted-foreground" },
+  undetermined: { text: "判不出", cls: "text-amber-700 dark:text-amber-400" },
+};
+
+function FailureAttribution({ counts, name }:
+  { counts?: Record<string, number>; name: string }) {
+  if (!counts) return null;
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (!total) return null;
+  const gap = counts.knowledge_gap || 0;
+  return (
+    <div className="mt-1 text-[11px]" data-testid={`failure-attr-${name}`}>
+      <span className="text-muted-foreground">{total} 次失败归因：</span>
+      {["knowledge_gap", "capability_limit", "evaluation_noise", "undetermined"]
+        .filter((k) => counts[k])
+        .map((k) => (
+          <span key={k} className={`ml-1.5 ${ATTR_LABEL[k].cls}`}>
+            {ATTR_LABEL[k].text} {counts[k]}
+          </span>
+        ))}
+      {gap === 0 && (
+        <span className="ml-1.5 text-emerald-700 dark:text-emerald-400">
+          · 无一条指向 skill 本身，改流程文档解决不了这些失败
+        </span>
+      )}
+    </div>
+  );
+}
+
 function RiskBadge({ risk }: { risk: string | null }) {
   const r = (risk && RISK_LABEL[risk]) || RISK_UNKNOWN;
   return <span className={`rounded px-1.5 py-0.5 text-[11px] ${r.cls}`}>{r.text}</span>;
@@ -293,6 +334,8 @@ export function SkillsView() {
                       </span>
                     )}
                   </div>
+                  <FailureAttribution counts={data?.failure_attribution?.[s.name]}
+                                      name={s.name} />
                   <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{s.description}</div>
                   {/* 回滚是转正的对偶动作:没有它,「一键转正」就是一个**没有退路**
                       的按钮——而技能正文直接决定客服说什么,上线后发现不对必须能

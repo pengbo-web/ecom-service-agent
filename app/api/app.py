@@ -1569,6 +1569,35 @@ def create_app(session_manager: Optional[SessionManager] = None,
         except Exception:  # noqa: BLE001
             traces = {}
 
+        # 失败归因:**这个 skill 的失败里,有多少根本不该算在它头上。**
+        #
+        # 只看上面那张 outcome 表会得出完全错误的结论:实测 track-order 的
+        # success 15 / tool_error 38 读起来是"成功率 28%,这个 skill 很烂",
+        # 而 41 条失败里 37 条是**归属校验正确地拦住了跨用户访问**——那是安全
+        # 机制在按设计工作,不是 skill 缺知识。少了这一层,运营看着这张表会去
+        # 改一份一个字都没写错的流程文档。
+        #
+        # 纯确定性计算(读库判归属,不调 LLM),failure_attribution 归因不到的
+        # 那一类如实报成 undetermined,绝不为了让表格好看而塞进某一类。
+        failure_attribution: dict[str, dict[str, int]] = {}
+        try:
+            from app.agent.skills.attribution import partition
+
+            db = get_db()
+            # **单独按 outcome 查,不复用上面那个窗口。** 那个窗口是所有 outcome
+            # 共用的:失败远少于成功,一段正常运行就能把窗口填满,失败被整体挤出去
+            # ——实测最近 200 条轨迹里失败 0 条,而库里有 44 条。归因面板会因此
+            # 长期空白,而空白读起来像"没有失败",恰好是最误导人的一种显示。
+            failed = db.list_skill_traces(outcomes=["tool_error", "handoff"],
+                                          limit=_TRACE_WINDOW)
+            if failed:
+                verdict = partition(failed, db.list_recent_archives(limit=200), db=db)
+                for item in verdict["details"]:
+                    bucket = failure_attribution.setdefault(item["skill_name"] or "", {})
+                    bucket[item["category"]] = bucket.get(item["category"], 0) + 1
+        except Exception:  # noqa: BLE001 归因算不出来就不显示,不拖累整份总览
+            failure_attribution = {}
+
         return {
             "live": live,
             "candidates": candidates,
@@ -1577,6 +1606,13 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 "limit": _TRACE_WINDOW,
                 "note": "按最近轨迹计数的窗口值,非全时段统计;窗口为所有 skill 共用,高频 skill 可能挤占低频 skill 的样本",
             },
+            "failure_attribution": failure_attribution,
+            "failure_attribution_note": (
+                "失败轨迹按可修性分类:knowledge_gap=skill 缺知识(唯一会回流自改进的一类)/ "
+                "capability_limit=权限或依赖边界(如归属校验拒绝跨用户访问、上游超时)/ "
+                "evaluation_noise=不构成证据(会话过短、守卫拦截)/ undetermined=判不出。"
+                "确定性规则判定,不调模型。"
+                f"失败按 outcome 单独取最近 {_TRACE_WINDOW} 条,与上面的 traces 窗口互不挤占。"),
             "canaries": canaries,
         }
 

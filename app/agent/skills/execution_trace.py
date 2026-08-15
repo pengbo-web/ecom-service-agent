@@ -92,6 +92,19 @@ def _parse_result(result_str: str) -> tuple[bool, str | None]:
     return True, None
 
 
+def _needs_confirm(result_str: str) -> bool:
+    """这次工具返回是不是"前置授权门未放行"(`consent.need_confirm_result`)。
+
+    非 JSON / 无该字段一律 False —— 不猜。老轨迹没有这个标记,归因层会退到
+    "判不出"而不是编一个结论。
+    """
+    try:
+        data = json.loads(result_str)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and data.get("need_confirm") is True
+
+
 def _loaded_skill_name(result_str: str) -> str:
     """从 load_skill 的成功返回里取出 skill 名;取不到返回空串。"""
     try:
@@ -170,6 +183,7 @@ class SkillTurn:
         args 一并记录:G1 守卫要据此判定"前置调用的参数与本次是否一致"。
         """
         ok, error = _parse_result(result_str)
+        need_confirm = _needs_confirm(result_str)
         if name == LOAD_SKILL_TOOL and ok:
             loaded = _loaded_skill_name(result_str)
             if loaded:
@@ -179,8 +193,18 @@ class SkillTurn:
                 self.set_fingerprint(_loaded_fingerprint(result_str))
                 if loaded not in self.loaded_skills:
                     self.loaded_skills.append(loaded)
-        self.tool_calls.append({"name": name, "ok": ok, "error": error,
-                                "args": dict(args or {})})
+        entry = {"name": name, "ok": ok, "error": error, "args": dict(args or {})}
+        if need_confirm:
+            # **归因要用的结构化事实,不是给模型看的。** 前置授权门未放行时,
+            # `need_confirm_result` 返回 `{"success": false, "need_confirm": true, …}`,
+            # 而 `_parse_result` 只留下 ok/error —— 那句 error 是给用户的确认话术
+            # ("请确认是否办理退款"),到了轨迹里与一次真实的工具失败长得一模一样。
+            #
+            # 归因层若靠匹配这句话来认它,措辞一改就静默失效,而失效的表现是
+            # "确认门拦下的动作被当成 skill 知识缺口去补"——往 SKILL.md 里写
+            # 一堆没用的东西,没有任何报错。所以把它作为事实记下来。
+            entry["need_confirm"] = True
+        self.tool_calls.append(entry)
 
     def note_preloaded(self, skill_name: str, variant: str = "live") -> None:
         """记录服务端**确定性预加载**的 skill(非模型调用,故不产生 tool_call 条目)。

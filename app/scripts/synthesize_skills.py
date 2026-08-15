@@ -281,23 +281,37 @@ def main() -> None:
             failed_traces = get_db().list_skill_traces(
                 outcomes=["handoff", "tool_error"], limit=trace_cap,
             )
-            # 剔掉纯基础设施故障的轨迹:一次代理抖动/Redis 掉线/上游超时产生的
-            # 失败,与 skill 的流程文档毫无关系。照单全收 = **基础设施坏了,
-            # 系统去改一份没写错的流程文档**,还要走灰度、占审批位。
-            # 实测撞到过:track-order 成功率被打到 3%(tool_error:37),根因是
-            # MCP 连接被系统代理打断后静默降级读了本地库,skill 一个字没错。
-            from app.agent.skills.execution_trace import trace_is_infrastructure_only
+            # 归因分层:**只让可修的信号回流。** 这一段此前只有一道过滤
+            # (纯基础设施故障),现在推广到三类 + 一个"判不出"。
+            #
+            # 没有归因就驱动修订,会把不可修的信号错误编码成知识——产出文档膨胀
+            # 与事实冲突。本库的实测数据非常干净:44 条失败轨迹里 **41 条是归属
+            # 校验正确拦住了跨用户访问**(订单 ORD-20240115-001 属于「小明」,而
+            # 打出这些失败的是 ab0/ev3/trk5 这类压测与评测用户),3 条是会话过短,
+            # **真正的知识缺口 0 条**。改造前这 44 条会被整批喂给 improve_skill。
+            from app.agent.skills.attribution import partition, summarize
 
             before = len(failed_traces)
-            failed_traces = [t for t in failed_traces
-                             if not trace_is_infrastructure_only(t.get("tool_calls"))]
+            verdict = partition(failed_traces, samples, db=get_db(),
+                                client=client, model=model)
+            failed_traces = verdict["flows_back"]
+            print("③ " + summarize(verdict))
             dropped = before - len(failed_traces)
             if dropped:
-                # 剔除必须**说出来**:静默过滤会让"为什么这轮没产出改进候选"
-                # 变成一个查不下去的问题。
-                print(f"③ 已剔除 {dropped}/{before} 条纯基础设施故障轨迹"
-                      f"(连接/超时/服务不可用)——它们不构成 skill 需要改进的证据。"
-                      f"若这个数字很大,先去修依赖,不要指望自进化把它绕过去")
+                # 剔除必须**说出来**,而且要说清**按什么理由剔的**:静默过滤会让
+                # "为什么这轮没产出改进候选"变成一个查不下去的问题。
+                from collections import Counter
+                by_rule = Counter(d["rule"] for d in verdict["details"]
+                                  if not d["flows_back"])
+                detail = "、".join(f"{rule}×{n}" for rule, n in by_rule.most_common())
+                print(f"   已剔除 {dropped}/{before} 条不构成 skill 改进证据的轨迹:{detail}")
+                if verdict["counts"]["capability_limit"] > before * 0.5:
+                    print("   ⚠ 过半失败属于能力/权限边界 —— 这不是 skill 该改的东西。"
+                          "若不符合预期,先去看权限配置与依赖健康度,"
+                          "不要指望自进化把它绕过去")
+                if verdict["counts"]["undetermined"]:
+                    print(f"   注:{verdict['counts']['undetermined']} 条判不出(不回流)。"
+                          "这个数字大起来说明判据不够用了,该补的是判据")
             if failed_traces:
                 improve_paths = run_improvements_from_traces(
                     client, model, failed_traces, samples,
