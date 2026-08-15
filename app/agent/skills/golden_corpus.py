@@ -21,33 +21,9 @@ HUMAN_AGENT_INTENT = "human_agent"
 # 金牌语料稀少:一次人工救场就值得学,故不套用"同类样本需≥2"的门槛(否则每桶常仅1条→全被跳过)
 GOLDEN_MIN_GROUP_SIZE = 1
 
-GOLDEN_SYSTEM_PROMPT = """你是电商客服 Skill 蒸馏器。
+from prompts import get as _get_prompt
 
-下面会给你一组**人工客服接管处理过**的历史会话样本(AI 未能独立解决,由人工
-坐席接手并解决)。请从人工的处理方式中归纳出一份可复用的 SKILL.md,让 AI 下次
-遇到同类问题时能像这位人工客服一样处理。
-
-归纳重点:
-- 人工是怎么判断的(先确认什么、依据什么下结论);
-- 人工做了哪些 AI 漏掉的**核对与升级步骤**(补充查询、交叉验证、及时转人工);
-- 人工的话术分寸(如何安抚、如何表达歉意)。
-
-授权红线(必须体现在产出的 SKILL.md 里,不得省略):
-- 人工做出的让利、补偿、免运费、超常规退款等**酌情决定**属于人工权限,
-  **不得**归纳成 AI 可自主执行的步骤;
-- 凡涉及金钱或对外承诺的动作,产出的流程必须写明"经用户确认后调用对应工具"
-  或"转人工处理",不得写成由 AI 直接给出;
-- 不要把某一次的个案让利写成通用规则。
-
-严格要求:
-- 只输出一份完整的 SKILL.md 文本,不要任何额外说明、不要用 markdown 代码块包裹。
-- 必须以如下格式开头(frontmatter):
----
-name: <kebab-case 技能名>
-description: <一句话描述适用场景与关键词,供路由匹配>
----
-- frontmatter 之后是 Markdown body,写出步骤化流程。
-"""
+GOLDEN_SYSTEM_PROMPT = _get_prompt("skills/golden_corpus")
 
 
 def is_human_handled(archived: dict) -> bool:

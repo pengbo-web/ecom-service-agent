@@ -29,7 +29,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
+
+from prompts import get_json as _get_json
 
 logger = logging.getLogger(__name__)
 
@@ -43,23 +46,7 @@ SHOP_SUBJECT = "shop"
 #:   1. 只描述"该怎么应答",不描述"经营指标怎么了";
 #:   2. 不出现任何百分比、计数、阈值;
 #:   3. 不出现"退款率""差评率"这类内部指标名——客服说出来就是内部黑话外泄。
-_HINTS: dict[str, str] = {
-    "refund_rate_high":
-        "该商品近期退换反馈偏多。回答时更谨慎:主动核对规格与适用场景、不要夸大;"
-        "买家提出疑虑时先安抚,再给出可执行的下一步。",
-    "bad_review_rate_high":
-        "该商品近期收到过一些负面反馈。买家问到时如实回应、不回避,"
-        "遇到具体问题优先给解决方案而不是辩解。",
-    "tool_error_rate_high":
-        "该流程近期偶有查询失败。若工具返回异常,如实告知正在核实并给出替代路径,"
-        "不要凭印象编造结果。",
-    "human_rate_high":
-        "该类问题近期较多转人工。若两轮内没能真正解决,主动提出转接人工,"
-        "不要反复兜圈子。",
-    "angry_rate_high":
-        "近期买家情绪偏激烈。回复优先安抚与共情,给明确的下一步,"
-        "避免只讲规则条款。",
-}
+_HINTS: dict[str, str] = _get_json("collaboration/buyer_hints")
 
 
 # 退换原因 → 类别。**固定关键词表,不问模型。**
@@ -102,20 +89,10 @@ def reason_category(top_reason: str) -> str:
 
 # (kind, category) 级的提示。比只按 kind 的版本**具体到能挡住编造**,但仍然
 # 不含任何数字、指标名或 LLM 生成内容。
+# JSON 用 "kind|category" 字符串键,这里转成 tuple 键。
 _HINTS_BY_CATEGORY: dict[tuple[str, str], str] = {
-    ("refund_rate_high", "size"):
-        "该商品近期退换反馈集中在尺码。回答尺码问题时**不得断言版型标准、也不得编造"
-        "顾客反馈**;如实说明存在尺码偏差反馈,建议买家核对脚长/尺码表或参考同款经验,"
-        "并主动告知可换货。",
-    ("refund_rate_high", "quality"):
-        "该商品近期退换反馈集中在质量问题。**不要为商品品质做担保性陈述**;买家问到时"
-        "如实回应、优先给出检验与售后路径。",
-    ("refund_rate_high", "mismatch"):
-        "该商品近期退换反馈集中在“与描述不符”。描述商品时严格按详情页字段陈述,"
-        "**不要补充详情页里没有的细节**;买家有疑虑时建议先核对参数再下单。",
-    ("refund_rate_high", "logistics"):
-        "该商品近期退换反馈集中在物流环节。**不要承诺具体送达时间**;如实说明当前物流"
-        "状态并给出可查询的下一步。",
+    tuple(k.split("|")): v
+    for k, v in _get_json("collaboration/buyer_hints_by_category").items()
 }
 
 

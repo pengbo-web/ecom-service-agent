@@ -113,27 +113,9 @@ _EMOTION_RUBRIC = (
     "只描述用户当下语气,不要因为话题是投诉就自动判高;语气平和的投诉仍是 neutral/低 level。"
 )
 
-_QU_PROMPT = """你是电商客服的查询理解模块。分析用户最新消息,输出严格 JSON(不要任何解释、不要代码块):
-{{"domain": "presale|midsale|aftersale", "intent": "政策咨询|商品咨询|订单事务|闲聊寒暄|投诉|其他", "need_kb": true或false, "kb_query": "自包含检索查询或null", "emotion": "neutral|unhappy|angry", "emotion_level": 0到3的整数}}
+from prompts import get as _get_prompt
 
-domain(路由,选最主要的):
-- presale: 下单前——商品推荐/商品信息/价格/库存/活动优惠/优惠券/议价
-- midsale: 订单进行中——查订单/物流/催发货/改收货地址/取消订单
-- aftersale: 收货后或交易后——退换货/退款/发票/质量投诉/赔偿;打招呼闲聊账户问题默认归此
-
-need_kb(是否需要检索平台知识库):
-- true: 涉及平台政策/规则/流程/时效/费用/权益/售后标准(如"运费谁出""价保多久""怎么退货""发票怎么开")
-- false: 纯订单操作(查单号/物流)/纯商品参数/闲聊寒暄/情绪宣泄——这些靠工具或对话即可
-
-kb_query(need_kb=true 时必填):结合最近对话把指代和省略补全成自包含查询,
-如上文聊退货、用户问"那运费呢?"→"退货运费谁承担";need_kb=false 时为 null。
-
-""" + _EMOTION_RUBRIC + """
-
-最近对话(用户侧):
-{context}
-
-用户最新消息:{user_input}"""
+_QU_TEMPLATE = _get_prompt("query_understanding/system_prompt")
 
 
 def _label_for_level(level: int) -> str:
@@ -202,7 +184,9 @@ def understand(user_input: str, history: list[dict], client, model: str) -> Quer
     req = dict(
         model=model, temperature=0.0, max_tokens=200,   # 多两个字段(emotion/emotion_level)
         messages=[{"role": "user",
-                   "content": _QU_PROMPT.format(context=context, user_input=text)}],
+                   "content": _QU_TEMPLATE.replace(
+                       "{{_EMOTION_RUBRIC}}", _EMOTION_RUBRIC
+                   ).format(context=context, user_input=text)}],
     )
     try:
         try:
