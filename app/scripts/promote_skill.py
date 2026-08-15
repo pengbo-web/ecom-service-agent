@@ -13,8 +13,18 @@
 写入正式路径前必须:
   ① 过静态校验(frontmatter + 工具名真实性,validator);
   ② 过灰度评测门禁(影子目录对比,gate);
-  ③ 把现行版本备份到 `_archive/<name>/<时间戳>/SKILL.md`。
-`--force` 只能跳过②(门禁),**不能**跳过①(校验)——编错工具名的候选永远不许上。
+  ③ 过事实一致性双锚点(相对生产基线没丢硬事实,fact_consistency);
+  ④ 把现行版本备份到 `_archive/<name>/<时间戳>/SKILL.md`。
+
+**两个放行开关,各管一件事,刻意不合并**:
+  `--force`            只放行②(门禁)  —— "我知道这次没测过"
+  `--allow-fact-loss`  只放行③(事实)  —— "我知道我在删掉哪几条硬事实"
+都**不能**放行①(校验)——编错工具名的候选永远不许上。
+
+为什么不让 `--force` 一并放行③:界面上的「转正上线」按钮**永远**带 force=true
+(它默认不跑门禁,而后端对 gate=None 是 fail-closed 的,不带 force 一步都走不了)。
+把事实一致性也挂在 force 上,这道闸在人最常走的那条路上就从来不生效——
+一道只在 CLI 上有效的闸不叫闸。
 
 `promote()` 另有一个仅供代码调用的 `block_on_high` 参数(CLI 不暴露):它是给
 **无人值守**调用方(`skill_watchdog`)用的关,`high`(碰钱/承诺类)档一律拒绝
@@ -25,6 +35,7 @@
   python -m app.scripts.promote_skill --list                    列出候选与校验结果
   python -m app.scripts.promote_skill <skill-name>              校验+门禁+转正
   python -m app.scripts.promote_skill <skill-name> --force      跳过门禁(仍校验)
+  python -m app.scripts.promote_skill <skill-name> --allow-fact-loss  放行事实一致性
   python -m app.scripts.promote_skill <skill-name> --rollback   从最新备份恢复
 
 备份目录 `_archive/<name>/<ts>/SKILL.md` 比正式 skill 多嵌两层,且 `_archive`
@@ -45,6 +56,7 @@ logger = logging.getLogger(__name__)
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.agent.skills import fact_consistency  # noqa: E402
 from app.agent.skills import risk as risk_mod  # noqa: E402
 from app.agent.skills.gate import is_safe_skill_name  # noqa: E402
 from app.agent.skills.tree_text import (  # noqa: E402
@@ -254,7 +266,7 @@ def _snapshot_candidate(candidate_dir: Path, definitions_dir: str, skill_name: s
 
 def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_dir: str,
             gate_result: dict | None, force: bool, timestamp: str,
-            *, block_on_high: bool = False) -> dict:
+            *, block_on_high: bool = False, allow_fact_loss: bool = False) -> dict:
     """把候选转正:快照 → 校验 → 门禁 → (可选)风险门 → 备份 → 写正式目录。
 
     返回 `{"promoted", "reason", "backup", "risk"}`。
@@ -318,6 +330,31 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
         is_new = not (Path(definitions_dir) / skill_name / "SKILL.md").exists()
         risk = classify_tree_risk(snapshot, is_new_skill=is_new, tree=report["tree"])
 
+        # 事实一致性双锚点:多轮自我改进最阴的一种退化,是把硬事实**一点点**改没。
+        # 每一轮只删一点,轮轮都"看起来没问题",十轮之后「超过 7 天不支持退货」
+        # 已经不见了,而没有任何一次转正被拦下来——因为每次都只和上一版比。
+        # 这里同时和 S₀(归档里最早那一份)与 S_{t-1}(现行版本)比,
+        # 只有相对 S₀ 丢了硬事实才拦。详见 app/agent/skills/fact_consistency.py。
+        #
+        # **放行开关是独立的 `allow_fact_loss`,不是 `force`。**
+        #
+        # 差点做错:`force` 的既有含义是"放行**评测门禁**"。而界面上的「转正上线」
+        # 按钮**永远**带 force=true(它默认不跑门禁,后端对 gate=None fail-closed,
+        # 不带 force 一步都走不了)。把事实一致性也挂在 force 上,等于这道闸在
+        # 人最常走的那条路上从来不生效——一道只在 CLI 上有效的闸不叫闸。
+        #
+        # 分开之后语义也更准:放行门禁是"我知道没测过",放行事实丢失是"我知道
+        # 我在删哪几条硬事实",这是两个不同的知情同意,不该由一个开关代表。
+        fact_check = fact_consistency.check_candidate(
+            skill_name, (snapshot / "SKILL.md").read_text(encoding="utf-8"),
+            definitions_dir, archive_dir)
+        if not fact_check["ok"] and not allow_fact_loss:
+            return {"promoted": False,
+                    "reason": f"事实一致性未通过({fact_check['baseline_source']}): "
+                              f"{fact_check['reason']}。确属有意删除请显式放行"
+                              f"(CLI: --allow-fact-loss;界面上会再问一次并列出丢失项)",
+                    "backup": None, "risk": risk, "fact_check": fact_check}
+
         if block_on_high and risk_mod.promotion_policy(risk) == risk_mod.POLICY_MANUAL:
             return {"promoted": False,
                     "reason": f"整棵技能树判档为高风险({risk}),自动化转正拒绝放行,"
@@ -339,9 +376,17 @@ def promote(skill_name: str, definitions_dir: str, candidates_dir: str, archive_
         _replace_tree(snapshot, live_dir)
         _write_version_nonfatal(live_dir, old_version + 1)
 
-        return {"promoted": True,
-                "reason": "已转正" + ("(--force 跳过门禁)" if force else ""),
-                "backup": str(backup) if backup else None, "risk": risk}
+        reason = "已转正" + ("(--force 跳过门禁)" if force else "")
+        if fact_check["applicable"] and not fact_check["ok"]:
+            reason += f"(⚠ 已显式放行事实一致性:{fact_check['reason']})"
+        elif fact_check.get("lost_before_this_round"):
+            # 这些不是本候选删的,拦它没道理;但只看上一版永远看不见它们,
+            # 而它们是"某一轮漏掉了"的证据 —— 沉默等于让那次漏掉永远沉底。
+            reason += (f"(注:相对生产基线,更早的轮次已丢失 "
+                       f"{', '.join(fact_check['lost_before_this_round'])})")
+        return {"promoted": True, "reason": reason,
+                "backup": str(backup) if backup else None, "risk": risk,
+                "fact_check": fact_check}
     finally:
         shutil.rmtree(snapshot, ignore_errors=True)
 
@@ -420,6 +465,10 @@ def main() -> None:
     parser.add_argument("skill_name", nargs="?", help="要转正/回滚的 skill 名")
     parser.add_argument("--list", action="store_true", help="列出候选与校验结果")
     parser.add_argument("--force", action="store_true", help="跳过评测门禁(仍做校验)")
+    # 与 --force 分开:放行门禁是"我知道没测过",放行事实丢失是"我知道我在删哪几条
+    # 硬事实"。两个不同的知情同意,不该由一个开关代表。
+    parser.add_argument("--allow-fact-loss", action="store_true",
+                        help="放行事实一致性检查(明确知道要删掉哪些硬事实时才用)")
     parser.add_argument("--rollback", action="store_true", help="从最新备份恢复")
     args = parser.parse_args()
 
@@ -474,7 +523,8 @@ def main() -> None:
                   f"→ 候选 pass_rate={gate_result['candidate'].get('pass_rate')}")
 
     result = promote(args.skill_name, DEFINITIONS_DIR, CANDIDATES_DIR, ARCHIVE_DIR,
-                     gate_result=gate_result, force=args.force, timestamp=_now_stamp())
+                     gate_result=gate_result, force=args.force, timestamp=_now_stamp(),
+                     allow_fact_loss=args.allow_fact_loss)
     print(result)
     if result["promoted"]:
         # 清待审队列(候选目录同时是产品里的"待审队列",见 archive_candidate)。

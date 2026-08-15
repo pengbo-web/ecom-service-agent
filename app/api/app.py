@@ -2540,7 +2540,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
     @app.post("/api/admin/skills/{skill_name}/promote",
               dependencies=[Depends(admin_auth)])
     async def admin_promote_skill(skill_name: str, force: bool = False,
-                                  run_gate: bool = False):
+                                  run_gate: bool = False,
+                                  allow_fact_loss: bool = False):
         """把候选转正上线。保留全部既有关卡,只是把扳机搬到界面上。
 
         **门禁是显式选项,不是默认动作。** `gate_candidate()` 会真跑两轮评测
@@ -2610,8 +2611,14 @@ def create_app(session_manager: Optional[SessionManager] = None,
                     # 门禁自己崩了同样是"评不了",不是候选不达标。
                     gate_evaluable = False
                     gate_note = f"门禁执行失败(评不了,非候选质量问题): {exc}"
+            # `allow_fact_loss` 与 `force` **必须分开**。界面上的「转正上线」按钮
+            # 永远带 force=true(它默认不跑门禁,后端对 gate=None fail-closed),
+            # 事实一致性若也挂在 force 上,这道闸在人最常走的那条路上就从来不生效。
+            # 分开之后语义也更准:放行门禁是"我知道没测过",放行事实丢失是"我知道
+            # 我在删哪几条硬事实" —— 两个不同的知情同意。
             r = ps.promote(skill_name, ps.DEFINITIONS_DIR, ps.CANDIDATES_DIR,
-                           ps.ARCHIVE_DIR, gate, bool(force), ps._now_stamp())
+                           ps.ARCHIVE_DIR, gate, bool(force), ps._now_stamp(),
+                           allow_fact_loss=bool(allow_fact_loss))
             r["policy"] = promotion_policy(r.get("risk")) if r.get("risk") else None
             r["gate_note"] = gate_note
             r["gate_evaluable"] = gate_evaluable

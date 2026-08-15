@@ -671,14 +671,29 @@ export type SkillPromoteResult = {
   success: boolean; promoted: boolean; reason?: string;
   backup?: string | null; risk?: string | null; policy?: string | null;
   gate_note?: string;
+  // 事实一致性双锚点(见 app/agent/skills/fact_consistency.py)。
+  // promoted=false 且这里带着 lost_since_baseline,说明候选相对**生产基线**丢了
+  // 硬事实(退货天数、金额、工具引用)。前端据此把丢了哪几条列给操作者看,
+  // 由人决定是不是有意为之 —— 不由前端替他判断。
+  fact_check?: {
+    ok: boolean; applicable: boolean; reason: string;
+    baseline_source?: string;
+    lost_since_baseline: string[]; lost_since_previous: string[];
+    lost_before_this_round: string[]; added: string[]; bloat_ratio: number;
+  };
 };
 
 export async function promoteSkill(
-  name: string, opts: { force?: boolean; runGate?: boolean } = {}
+  name: string,
+  // allowFactLoss 与 force 是**两个**开关:force 放行评测门禁("我知道没测过"),
+  // allowFactLoss 放行事实一致性("我知道我在删哪几条硬事实")。合成一个的话,
+  // 界面上永远带 force 的那个按钮会让事实一致性这道闸从来不生效。
+  opts: { force?: boolean; runGate?: boolean; allowFactLoss?: boolean } = {}
 ): Promise<SkillPromoteResult> {
   const q = new URLSearchParams();
   if (opts.force) q.set("force", "true");
   if (opts.runGate) q.set("run_gate", "true");
+  if (opts.allowFactLoss) q.set("allow_fact_loss", "true");
   const r = await adminFetch(
     `/api/admin/skills/${encodeURIComponent(name)}/promote?${q}`, { method: "POST" });
   if (!r.ok) {

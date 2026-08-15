@@ -254,7 +254,32 @@ export function SkillsView() {
       // force=true 才能在未跑门禁时放行(后端对 gate=None 是 fail-closed 的)。
       // 这不是"绕过安全检查":校验、风险判档、备份全都照走,force 只放行评测门禁,
       // 而操作者刚刚在确认框里明确接受了这一点。
-      const r = await promoteSkill(c.name, { force: true });
+      let r = await promoteSkill(c.name, { force: true });
+
+      // 事实一致性双锚点拦下来了:候选相对**生产基线**丢了硬事实(政策数字、
+      // 工具引用)。这不是"候选质量不行"那种笼统结论——它能精确说出丢了哪几条,
+      // 所以把那几条摆给操作者看,由人判断是不是有意删的。
+      //
+      // 这里刻意**不复用** force:那个开关的含义是"我知道没跑门禁",而这一次
+      // 要征求的是另一个知情同意——"我知道我在删掉这几条硬事实"。
+      const fc = r.fact_check;
+      if (!r.promoted && fc && !fc.ok) {
+        const lost = fc.lost_since_baseline.join("、");
+        const thisRound = fc.lost_since_previous.length
+          ? `\n本轮删除：${fc.lost_since_previous.join("、")}` : "";
+        const earlier = fc.lost_before_this_round.length
+          ? `\n更早的轮次已丢失（不是这份候选造成的）：${fc.lost_before_this_round.join("、")}`
+          : "";
+        if (!window.confirm(
+          `${c.name} 相对生产基线丢失了硬事实：\n\n${lost}${thisRound}${earlier}\n\n`
+          + `基线来源：${fc.baseline_source ?? "未知"}\n\n`
+          + "这类内容（退货天数、金额、工具引用）客服会照着它对用户做承诺。\n"
+          + "确认这些是**有意删除**，仍然上线？"
+        )) return "已取消（未上线）";
+        r = await promoteSkill(c.name, { force: true, allowFactLoss: true });
+      }
+
+      if (!r.promoted) return `未上线：${r.reason ?? "原因未知"}`;
       return `已上线${r.risk ? `（风险档 ${r.risk}）` : ""}`
         + `${r.backup ? `，旧版本已备份到 ${r.backup}` : ""}`;
     });
