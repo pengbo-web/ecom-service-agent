@@ -391,3 +391,114 @@ c_U < 1 的样本 → 判为 evaluation_noise,从 Agent 侧分母里剔除
 
 > 这是本仓库一贯的纪律(`anomaly_scope`、`degraded`、`data_scope` 都是这个形状),
 > 也是论文治理层的精神:**把"这是什么"说清楚,比把数字做好看更重要**。
+
+---
+
+# 附:执行记录(2026-08-16)
+
+本节是**方案落地之后补的实测结果**,与上文的计划分开写——计划归计划,
+跑出来什么归跑出来什么。
+
+## 已执行
+
+| 阶段 | 状态 | 落地位置 |
+|---|---|---|
+| 一 · 门禁用例自动合成 | 已上线 | `app/agent/skills/case_synthesis.py`、`app/scripts/synth_gate_cases.py` |
+| 零成本 · Generator ≠ Evaluator | 已上线 | `app/evaluation/independence.py`,`.env` 配 `EVAL_JUDGE_MODEL=deepseek-v3` |
+| 二 · 三分类归因 | 已上线 | `app/agent/skills/attribution.py` |
+| 四 · 事实一致性双锚点 | 已上线 | `app/agent/skills/fact_consistency.py`,接在 `promote()` 之前 |
+| 三 · 多轮用户模拟 | **未做** | 见下文「未做的部分」 |
+
+## 死结确实断了(实测)
+
+改造前 `gate_readiness` 对这批 skill 全是 0 条用例 → `evaluable=False` →
+`--start-all` 每轮 `gate_unavailable`,永远如此。合成之后:
+
+```
+refund-attribution            0 → 5 条   evaluable: False → True
+order-query                   0 → 5 条
+return-and-exchange-handling  0 → 5 条
+query-coupons                 0 → 3 条
+track-order                   1 → 6 条(人工 1 + 合成 5,其中 3 条来自真实轨迹)
+process-return                1 → 6 条
+```
+
+拿 `query-coupons` 真跑了一次完整门禁(候选 vs 现行,两侧各真调 LLM):
+
+```
+evaluable = True   case_count = 3   underpowered = False      ← 改造前这里是 no_gate_cases
+耗时 58 s / 47.5k tokens
+avg_process_score  现行 0.733 → 候选 0.467
+判定:候选劣化超过容差,拒绝转正
+裁判独立性:Agent=qwen-plus / 裁判=deepseek-v3 / 编辑器=qwen-plus
+```
+
+**门禁不但跑起来了,而且给出了拒绝。** 这比"跑通了并放行"更能说明它在工作:
+它现在有能力基于证据说不,而不是说"我评不了"。
+
+## 归因把最大的一类误判摘了出来(实测)
+
+44 条失败轨迹归因结果:
+
+```
+能力/权限边界 41  ·  评测噪声 3  ·  知识缺口 0  ·  判不出 0
+```
+
+41 条里 37 条属于 `track-order`,全是同一句「未找到订单 ORD-20240115-001」。
+查库:该订单存在、属于「小明」,而发起请求的 user_id 是 `ab0`/`ev3`/`trk5` 这类
+压测与评测用户,`auth_enabled=True` → 归属校验按设计拒绝,并复用「未找到订单」
+话术(刻意不泄露订单存在性)。
+
+**改造前这 44 条会被整批喂给 `improve_skill`。** 产出的每一份"改进候选"都建立在
+非信号上,还要走灰度、占审批位。
+
+顺带修掉一个一直存在、被归因面板顶出来的错:界面上 `track-order` 显示
+「实战成功率 100%(success:1)」,真实成绩是 `success 15 / tool_error 38`(28%)。
+成绩原本取「最近 N 条轨迹」,而窗口是所有 skill、所有结局共用的,失败被成功整体
+挤出去了。改成 COUNT + GROUP BY。
+
+## 事实一致性(实测)
+
+对仓库里 `track-order` 真实的三版归档跑过:从未丢过事实,只多了「2小时」,
+正文相对基线膨胀 33% —— **无误判**。造一份删掉 `query_logistics` 与「超过 3 天」
+的候选,两项都被精确拦下并点名,且区分「本轮删除」与「更早的轮次已丢失」。
+
+放行开关是独立的 `--allow-fact-loss`,**没有**挂在 `--force` 上:界面上的
+「转正上线」按钮永远带 `force=true`(它默认不跑门禁),挂上去这道闸在人最常走的
+那条路上就从来不生效。
+
+## 已知限制(不掩饰)
+
+**① 合成用例的 `expected_tools` 是"那次发生了什么",不等于"必须这么做"。**
+`query-coupons` 的三条合成用例里,「你好,请问优惠券在哪里领」断言必须调用
+`query_coupons`,而回答"在「我的」→「优惠券」页面领"其实不调工具也说得通。
+这条断言来自那次会话里真实发生的调用,不是编的,但它比必要的更严格。
+后果是那次门禁两侧 `pass_rate` 都是 0——**门禁仍然有效**(它比的是同一批用例上
+的差值,严格用例对两侧一样严格),但 `pass_rate` 这个指标在这批用例上不出信号,
+判定实际由两个 score 均值给出。
+
+**② 三个卖家侧 skill 合成不出用例。**
+`daily-business-report` / `draft-outreach-campaign` / `product-health-check` 仍是
+0 条,原因是归档语料目前只有买家会话。CLI 会把这个理由打出来,不是一句光秃秃的
+「0 条」。要解决它得先归档参谋/营销侧的会话。
+
+**③ 新蒸馏 skill 的用例仍靠关键词采样。**
+候选目录里没有记录"这个 skill 是从哪些会话蒸馏出来的"。轨迹路(强证据)对全新
+候选天然为空,只能退到按 frontmatter 声明的关键词去捞会话。要把这一路也变成强
+证据,得在 `synthesize_skills` 产出候选时把来源 session_id 一并落下来。
+
+**④ 归因的语义合并没做。** 论文用 Jaccard 0.3 把指向同一缺口的多个失败合成一条
+信号,本项目 `clustering.py` 有这个能力但没接上——当前是按会话逐条归因。
+语料量级(44 条)还没到需要合并的程度,到了再说。
+
+## 未做的部分:阶段三(多轮用户模拟)
+
+**这是方案里收益最大的一步,没有做。** 原因不是难度,是成本口径没定:
+
+按方案里算的量级(15 场景 × 6 轮 × 2 侧 × 7 skill × 2 轮 ≈ 2500 次调用),而
+`collab_daily_llm_budget` 只有 200。它**必须单独配额**,否则一次进化跑完当天的
+协作 worker 就没预算了。这个配额该给多少是产品决策,不是实现细节。
+
+在它做之前,阶段一~四的价值是**信号质量**上的:门禁能跑了、失败不再被错误归类、
+硬事实不会被悄悄改掉、裁判不再自审。阶段三提供的是**梯度自我更新**——
+让每一轮进化都能产出新的、非饱和的反馈,那是论文单轮 66.4 → 多轮 81.8 的来源。
