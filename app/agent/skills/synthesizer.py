@@ -49,7 +49,11 @@ MAX_CONTENT_CHARS = 200
 
 from prompts import get as _get_prompt
 
-SYNTH_SYSTEM_PROMPT = _get_prompt("skills/synthesis")
+# 尾部换行是**拼接分隔符**,不是三引号写法的副产品:本 prompt 会与
+# `build_tool_hint()`(以换行开头)相接,少了它工具清单会紧贴在最后一句下面。
+# 提示词加载器对每个 .md 做 strip(),所以分隔符必须由这里补——`.md` 文件末尾
+# 有没有空行并不可靠(实测 5 个文件里 3 个没有)。
+SYNTH_SYSTEM_PROMPT = _get_prompt("skills/synthesis") + "\n"
 
 def build_tool_hint(known: set[str] | None = None) -> str:
     """把工具清单拼成 prompt 片段,防 LLM 凭空编工具名(实测编过 order_list)。
@@ -65,7 +69,7 @@ def build_tool_hint(known: set[str] | None = None) -> str:
     )
 
 
-IMPROVE_SYSTEM_PROMPT = _get_prompt("skills/improve")
+IMPROVE_SYSTEM_PROMPT = _get_prompt("skills/improve") + "\n"
 
 
 def _first_user_message(messages: list[dict]) -> str:

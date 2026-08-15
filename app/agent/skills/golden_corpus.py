@@ -23,7 +23,9 @@ GOLDEN_MIN_GROUP_SIZE = 1
 
 from prompts import get as _get_prompt
 
-GOLDEN_SYSTEM_PROMPT = _get_prompt("skills/golden_corpus")
+# 尾部换行:与外置前保持逐字节一致。这条是整段直接当 system message 用的,
+# 换行本身无关紧要,但不留例外——"有的补有的不补"会让每次改动都要重新判断属于哪一类。
+GOLDEN_SYSTEM_PROMPT = _get_prompt("skills/golden_corpus") + "\n"
 
 
 def is_human_handled(archived: dict) -> bool:

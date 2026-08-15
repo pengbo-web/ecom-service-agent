@@ -19,7 +19,12 @@ from prompts import get as _get_prompt
 # 不代客下单(硬规则,禁止违反)。这是**安全规则**,拼接顺序上必须晚于店主可控
 # 的风格块——见下面 build_profile_prompt 的顺序说明。对外公开为 SAFETY_RULES
 # (原名 _NO_ORDER,内容不变)供拼接顺序测试断言。
-SAFETY_RULES = _get_prompt("customer_service/safety_rules")
+# 尾部这两个换行是**分隔符不是排版**:`build_profile_prompt` 把三段直接相接,
+# 而提示词加载器对每个 .md 做了 strip()。外置重构时它们丢了,导致安全规则最后
+# 一行与领域正文第一句被粘成一句("…不解释自己是怎么运作的。你是「并夕夕」…")。
+# 分隔符属于**组装逻辑**,该由这里补——指望 .md 末尾留空行是不可靠的,
+# 任何一次编辑器保存都可能把它清掉,而且加载器本来就会 strip。
+SAFETY_RULES = _get_prompt("customer_service/safety_rules") + "\n\n"
 
 # 默认风格块(店主未自定义时使用):用空 profile 渲染,render_style_block 内部
 # 会回落到 shop_profile.DEFAULT_TONE / DEFAULT_SHOP_NAME。不走 load_profile()——

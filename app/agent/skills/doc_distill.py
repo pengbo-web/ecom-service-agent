@@ -25,7 +25,11 @@ MAX_DOC_CHARS = 12000
 
 from prompts import get as _get_prompt
 
-DOC_SYNTH_SYSTEM_PROMPT = _get_prompt("skills/doc_distill")
+# 尾部换行是**拼接分隔符**,不是三引号写法的副产品:本 prompt 会与
+# `build_tool_hint()`(以换行开头)相接,少了它工具清单会紧贴在最后一句下面。
+# 提示词加载器对每个 .md 做 strip(),所以分隔符必须由这里补——`.md` 文件末尾
+# 有没有空行并不可靠(实测 5 个文件里 3 个没有)。
+DOC_SYNTH_SYSTEM_PROMPT = _get_prompt("skills/doc_distill") + "\n"
 _DOC_USER_TEMPLATE = _get_prompt("skills/doc_distill_user")
 
 

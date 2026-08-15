@@ -23,7 +23,7 @@ MAX_TAGS = 5
 
 from prompts import get as _get_prompt
 
-MODEL_USER_SYSTEM_PROMPT = _get_prompt("skills/user_modeling")
+MODEL_USER_SYSTEM_PROMPT = _get_prompt("skills/user_modeling") + "\n"
 
 
 def _build_prompt(samples: list[dict]) -> str:

@@ -9,12 +9,19 @@
 
 from prompts import get
 
-_NO_FABRICATION = get("seller_profiles/no_fabrication")
+# 同 agents.SAFETY_RULES:尾部两个换行是分隔符。占位符在 .md 里紧贴着下一节
+# 标题(`{{_NO_FABRICATION}}## 回答方式`),少了它们,`## 回答方式` 就不在行首,
+# 不再是 Markdown 标题。
+_NO_FABRICATION = get("seller_profiles/no_fabrication") + "\n\n"
 
+
+#: 两个画像的正文都以一个换行收尾(旧版三引号字符串的收尾),加载器 strip 掉了。
+#: 单独拎成常量,免得两处各写一个裸 "\n" 又漂移。
+_TRAILING_NEWLINE = "\n"
 
 ANALYST_PROMPT = get("seller_profiles/analyst").replace(
     "{{_NO_FABRICATION}}", _NO_FABRICATION
-)
+) + _TRAILING_NEWLINE
 
 
 def _kind_lines() -> str:
@@ -28,11 +35,13 @@ def _kind_lines() -> str:
     return "\n".join(f"  - `{k}`:{v}" for k, v in OPPORTUNITY_KINDS.items())
 
 
+# `{{_kind_lines()}}` 在 .md 里**独占一行**,前后换行由文件本身提供;外置重构时
+# 又补了一次(`"\n" + _kind_lines() + "\n"`),结果比旧版多出两个空行。
 GROWTH_PROMPT = get("seller_profiles/growth").replace(
-    "{{_kind_lines()}}", "\n" + _kind_lines() + "\n"
+    "{{_kind_lines()}}", _kind_lines()
 ).replace(
     "{{_NO_FABRICATION}}", _NO_FABRICATION
-)
+) + _TRAILING_NEWLINE
 
 
 SELLER_ROUTER_PROMPT = get("routing/seller_router")
