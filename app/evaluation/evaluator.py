@@ -168,6 +168,16 @@ class Evaluator:
             "total_tokens": total_tokens,
             "avg_tokens_per_case": total_tokens / total if total else 0,
         }
+        if self.use_judge:
+            # **这份报告里的分数是谁打的、独立不独立,跟着分数一起走。**
+            # avg_result_score / avg_process_score 主要由 judge 构成;裁判与被评
+            # Agent 同模型时它们是自评。摘要会被门禁、看门狗、管理端各自转述,
+            # 把这个事实留在原地是让它一路跟到人眼前的唯一办法。
+            # 只在真的用了 judge 时才写:关掉 judge 的那些跑法全是代码规则打分,
+            # 不存在自审问题,凭空多一行免责声明只会变成噪声。
+            from app.evaluation.independence import independence_report
+
+            summary["judge_independence"] = independence_report()
         return {
             "summary": summary,
             "cases": [self._result_to_dict(r) for r in results],

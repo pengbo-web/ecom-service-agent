@@ -35,6 +35,7 @@ from app.observability.langfuse_bridge import background_trace  # noqa: E402
 from app.observability.langfuse_client import make_openai_client  # noqa: E402
 from app.db import get_db  # noqa: E402
 from app.agent.skills.loader import SkillManager  # noqa: E402
+from app.evaluation.independence import editor_model  # noqa: E402
 from app.agent.skills.synthesizer import (  # noqa: E402
     INTENT_KEYWORDS,
     improve_skill,
@@ -245,7 +246,9 @@ def main() -> None:
     print(f"读取到 {len(samples)} 条归档会话样本，开始三步离线闭环（建模/创建/自改进）...")
 
     client = make_openai_client(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
-    model = settings.model_name
+    # 编辑器模型:写/改 SKILL.md 的那个。与裁判分开配(留空则同为主模型,
+    # 此时是自审,评测报告与门禁结论会如实标注)。见 evaluation/independence.py。
+    model = editor_model()
 
     # 阶段一 gap⑤:三步离线闭环(建模/创建/自改进)的全部真实 LLM 调用包进一条
     # 命名 trace,离线跑一次即可在 Langfuse 里看到整段耗时与内部各次生成。

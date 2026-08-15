@@ -29,6 +29,8 @@ from app.config.settings import settings  # noqa: E402
 from app.utils.console import enable_utf8_stdout  # noqa: E402
 from app.evaluation.dataset import load_dataset  # noqa: E402
 from app.evaluation.evaluator import Evaluator  # noqa: E402
+from app.evaluation.independence import (  # noqa: E402
+    independence_report, judge_client, judge_model)
 from app.evaluation.regression import (  # noqa: E402
     compare_to_baseline, save_baseline, load_baseline,
 )
@@ -122,7 +124,10 @@ def main():
     print(f"  模式      : {args.mode}")
     print(f"  数据集    : {dataset_path}")
     print(f"  LLM judge : {'开启' if args.judge else '关闭（仅规则）'}")
-    print(f"  裁判模型  : {settings.model_name}")
+    print(f"  裁判模型  : {judge_model()}")
+    # 自审与否**必须印在报告抬头**:一份不知道自己在自审的评测报告,
+    # 比一份标着"自审"的危险得多(见 app/evaluation/independence.py)。
+    print(f"  评判独立性: {independence_report()['note']}")
     print("=" * 78)
 
     print("\n[1/3] 加载测试集...")
@@ -140,8 +145,9 @@ def main():
     sandbox = Sandbox(mode=args.mode)
     evaluator = Evaluator(
         sandbox=sandbox,
-        client=client,
-        model=settings.model_name,
+        # client/model 只喂 LLM-as-judge;沙箱里的 Agent 走线上那套模型。
+        client=judge_client(),
+        model=judge_model(),
         use_judge=args.judge,
         pass_threshold=settings.eval_pass_threshold,
     )

@@ -178,6 +178,20 @@ class Settings(BaseSettings):
     # 永远 gate_unavailable —— 这个开关存在是为了出问题时能一键退回原状。
     skill_gate_synth_enabled: bool = True
 
+    # ---- Generator ≠ Evaluator(见 app/evaluation/independence.py)----
+    # 写东西的模型不能给自己打分。改造前三处全是 model_name:沙箱里的客服 Agent、
+    # LLM-as-judge、skill 编辑器 —— 后两者对前者都是自审,而门禁的
+    # avg_result_score / avg_process_score 主要就由 judge 打出来。
+    #
+    # **默认留空 = 沿用 model_name,行为逐字节不变。** 硬把默认改成某个模型名,
+    # 会让所有没配那个端点的部署第一次跑门禁就 404 —— 那是把一条架构建议变成
+    # 一次线上故障。取而代之的做法是:此刻是不是自审,在每份报告与门禁结论里
+    # 如实说出来(与 degraded / anomaly_scope / "未经人工审核" 同一条纪律)。
+    eval_judge_model: str = ""       # 裁判模型(留空=主模型)
+    eval_judge_base_url: str = ""    # 裁判端点(留空=主端点)
+    eval_judge_api_key: str = ""     # 裁判 key(留空=主 key)
+    skill_editor_model: str = ""     # 写/改 SKILL.md 的编辑器模型(留空=主模型)
+
     # API 服务（Web 流式对话）
     api_host: str = "127.0.0.1"
     api_port: int = 8010  # 默认 8010，避开常被占用的 8000

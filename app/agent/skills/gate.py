@@ -119,6 +119,12 @@ def gate_candidate(skill_name: str, candidate_path: str, definitions_dir: str,
                     "case_count": len(case_ids)}
         regressed = comparison["regressed"]
         reason = "候选劣化超过容差,拒绝转正" if regressed else "候选未劣化,允许转正"
+        # 「未劣化」是谁判的要跟着结论走。裁判与被评 Agent / skill 编辑器同模型时,
+        # 这个结论是自评——它仍然可以用来看趋势,但不足以作为"候选确实更好"的
+        # 独立证据。无人值守路径上这句 reason 是唯一留痕,漏了就再也找不回来。
+        independence = (candidate or {}).get("judge_independence") or {}
+        if independence and not independence.get("independent", True):
+            reason += f"({independence['note']})"
         # 样本太少时把这句话**贴在结论上**。放行判定不变(仍按是否劣化),但
         # `promote=True` 后面必须紧跟着证据强度,不能让 n=1 的对比在日志和界面上
         # 长得跟一次真正的回归评测一模一样。
@@ -261,17 +267,18 @@ def default_eval_fn(skills_dir: str, case_ids: list[str]) -> dict:
     """
     from app.config.settings import settings
     from app.evaluation.evaluator import Evaluator
+    from app.evaluation.independence import judge_client, judge_model
     from app.evaluation.sandbox import Sandbox
-    from app.observability.langfuse_client import make_openai_client
 
     original_dir = settings.skills_dir
     settings.skills_dir = skills_dir
     try:
         cases = resolve_cases(case_ids)
-        client = make_openai_client(api_key=settings.openai_api_key,
-                                    base_url=settings.openai_base_url)
+        # `Evaluator` 的 client/model 只用于 **LLM-as-judge**(沙箱里的 Agent 用的
+        # 是线上那套,不受这里影响)。所以这里换的是**裁判**,不是被评对象——
+        # 换错了就等于在评一个不存在的线上行为。见 evaluation/independence.py。
         evaluator = Evaluator(
-            sandbox=Sandbox(mode="single"), client=client, model=settings.model_name,
+            sandbox=Sandbox(mode="single"), client=judge_client(), model=judge_model(),
             use_judge=settings.eval_use_judge, pass_threshold=settings.eval_pass_threshold,
         )
         return evaluator.run_all(cases)
