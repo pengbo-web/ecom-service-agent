@@ -111,7 +111,15 @@ def _force_local_session_backends():
     # 钉成 False。开着时 /api/chat 会给 demo 用户注入 hmdp 身份并改写 user_id,
     # 会话归属类断言(reset/翻篇/历史回显)会连带失真。
     settings.demo_mode = False
+    _orig_synth = settings.eval_synth_cases_dir
+    # 指到一个不存在的目录。`gate_case_ids` 现在**除了**传进去的 dataset_path,
+    # 还会读 `eval_synth_cases_dir` 下真实生成的合成用例——那是仓库里的实际文件,
+    # 不随 tmp_path 变。实测:`test_one_case_is_evaluable_but_underpowered` 自己
+    # 造了一个只有 1 条用例的 tmp 数据集,却断言出 6 条,因为仓库里真的有 5 条
+    # track-order 合成用例。测试要看到合成用例时自行 monkeypatch 这个值。
+    settings.eval_synth_cases_dir = "app/evaluation/_no_synth_cases_in_tests"
     yield
+    settings.eval_synth_cases_dir = _orig_synth
     settings.kb_local_fallback_enabled = _orig_fb
     settings.mcp_enabled = _orig_mcp
     settings.demo_mode = _orig_demo

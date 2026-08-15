@@ -1,0 +1,82 @@
+{
+  "synthetic": true,
+  "skill": "query-coupons",
+  "generated_at": "2026-08-16T02:51:42",
+  "note": "本文件由 app.agent.skills.case_synthesis 从真实会话自动合成,**未经人工审核**;只用于 skill 转正门禁,不进回归基线 cases.json。",
+  "stats": {
+    "skill": "query-coupons",
+    "actor": "buyer",
+    "kept": 3,
+    "sessions_scanned": 73,
+    "from_trace": 0,
+    "from_keyword": 3,
+    "keywords": [
+      "优惠券",
+      "有哪些券",
+      "能领哪些",
+      "在哪里领"
+    ],
+    "dropped_no_assertion": 0,
+    "dropped_too_short": 0,
+    "provenance": [
+      {
+        "case_id": "synth-query-coupons-327ddb33",
+        "session_id": "c-844cf6add32f4c7b",
+        "source": "keyword"
+      },
+      {
+        "case_id": "synth-query-coupons-f8f4aa31",
+        "session_id": "c-655c26ab4eff4a84",
+        "source": "keyword"
+      },
+      {
+        "case_id": "synth-query-coupons-f6e445cb",
+        "session_id": "c-068fd3de2f824c2c",
+        "source": "keyword"
+      }
+    ],
+    "note": "断言全部来自事实:expected_tools 取自该轮真实调用过的工具,expected_keywords 取自人工坐席回复里的已知词表命中,买家原话逐字照抄。关键词来源的用例只说明「挑了哪些真实会话」,不参与任何断言。",
+    "skill_md_found": true
+  },
+  "cases": [
+    {
+      "id": "synth-query-coupons-327ddb33",
+      "description": "自动合成·未经人工审核 | query-coupons | 我能领哪些优惠券",
+      "turns": [
+        "我能领哪些优惠券"
+      ],
+      "related_skills": [
+        "query-coupons"
+      ],
+      "expected_tools": [
+        "query_coupons"
+      ]
+    },
+    {
+      "id": "synth-query-coupons-f8f4aa31",
+      "description": "自动合成·未经人工审核 | query-coupons | 看一下有哪些优惠券",
+      "turns": [
+        "看一下有哪些优惠券"
+      ],
+      "related_skills": [
+        "query-coupons"
+      ],
+      "expected_tools": [
+        "query_coupons"
+      ]
+    },
+    {
+      "id": "synth-query-coupons-f6e445cb",
+      "description": "自动合成·未经人工审核 | query-coupons | 你好,请问优惠券在哪里领",
+      "turns": [
+        "你好,请问优惠券在哪里领"
+      ],
+      "related_skills": [
+        "query-coupons"
+      ],
+      "expected_tools": [
+        "query_coupons"
+      ]
+    }
+  ]
+}

@@ -1540,10 +1540,17 @@ def create_app(session_manager: Optional[SessionManager] = None,
                     item["gate_evaluable"] = r["evaluable"]
                     item["gate_underpowered"] = r["underpowered"]
                     item["gate_note"] = r["note"]
+                    # 人工/合成分开给前端。**不能只给总数**:5 条全自动合成的
+                    # "门禁用例 5 条",与 5 条人工用例在证据强度上完全不是一回事,
+                    # 而界面上长得一模一样正是自动化最容易骗到人的地方。
+                    item["gate_human_cases"] = r["human_count"]
+                    item["gate_synthetic_cases"] = r["synthetic_count"]
                 except Exception:  # noqa: BLE001 数不出来就不显示,不拖累整份列表
                     item["gate_cases"] = None
                     item["gate_evaluable"] = None
                     item["gate_underpowered"] = None
+                    item["gate_human_cases"] = None
+                    item["gate_synthetic_cases"] = None
                     item["gate_note"] = "门禁用例数未知"
         except Exception:  # noqa: BLE001 候选目录异常不该让总览 500
             candidates = []
@@ -1764,6 +1771,52 @@ def create_app(session_manager: Optional[SessionManager] = None,
         return {"success": True, "reply": reply, "agent_key": key,
                 "agent": SELLER_AGENT_CONFIGS.get(key, {}).get("name", key),
                 "session_id": sid}
+
+    @app.post("/api/seller/stream", dependencies=[Depends(admin_auth)])
+    async def seller_stream(req: SellerChatRequest):
+        """店主与参谋的 SSE 流式对话。
+
+        与买家侧 run_agent_streaming() 同一套事件协议(progress/stage/
+        route/tool_call/reply/metadata/done),前端可复用同一 SSE 解析器。
+
+        鉴权、会话管理与 /api/seller/chat 一致:admin_auth 门控、
+        seller_sessions 独立 SessionManager、get_lock 防并发。
+        """
+        _require_seller_console()
+        from app.api.streaming import run_seller_streaming
+        sid = (req.session_id or "").strip() or "seller-default"
+        orch = seller_sessions.get_or_create(sid, user_id="seller")
+        lock = seller_sessions.get_lock(sid)
+        return StreamingResponse(
+            run_seller_streaming(orch, req.message or "", sid, lock),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # ---- 店主通知(参谋异常诊断主动推送,前端轮询)----
+
+    @app.get("/api/seller/notifications", dependencies=[Depends(admin_auth)])
+    def seller_notifications(unread_only: bool = False, limit: int = 20):
+        """获取店主通知列表。unread_only=True 时只返回未读。"""
+        _require_seller_console()
+        db = get_db()
+        items = db.list_notifications(unread_only=unread_only, limit=limit)
+        return {"notifications": items,
+                "unread_count": db.count_unread_notifications()}
+
+    @app.post("/api/seller/notifications/{nid}/read", dependencies=[Depends(admin_auth)])
+    def mark_notification_read(nid: int):
+        """标记单条通知已读。"""
+        _require_seller_console()
+        get_db().mark_notification_read(nid)
+        return {"success": True}
+
+    @app.post("/api/seller/notifications/read-all", dependencies=[Depends(admin_auth)])
+    def mark_all_notifications_read():
+        """一键全部已读。"""
+        _require_seller_console()
+        n = get_db().mark_all_notifications_read()
+        return {"success": True, "marked": n}
 
     @app.get("/api/seller/overview", dependencies=[Depends(admin_auth)])
     def seller_overview(window_days: int = 7):
@@ -2282,13 +2335,13 @@ def create_app(session_manager: Optional[SessionManager] = None,
         """
         _require_seller_console()
         from app.multi_agent import bus
+        from app.multi_agent import shared_context as sc
 
-        db = get_db()
         events = bus.timeline(correlation_id=correlation_id or None, limit=limit)
-        # 按链过滤必须发生在 SQL 里(而不是取回最近 limit 行再在 Python 里筛):
-        # shared_context 的行数随会话/异常商品增长,先 LIMIT 后过滤会让稍旧的
-        # 协作链读出空的 shared 列表,而那些行明明还在库里。见 list_shared_context。
-        shared = db.list_shared_context(limit=limit,
+        # 通过 shared_context 模块统一读取,自动适配后端(sqlite/redis)。
+        # Redis 后端时 correlation_id 过滤在 Python 层完成(数据量小,可接受);
+        # SQLite 后端时仍在 SQL 里过滤(原行为不变)。
+        shared = sc.list_shared_context(limit=limit,
                                         correlation_id=correlation_id or None)
         return {"success": True, "events": events, "shared": shared}
 
@@ -2408,7 +2461,9 @@ def create_app(session_manager: Optional[SessionManager] = None,
         `signal.anomaly` 变成 done,然后什么都没有——链就这么断了,而界面上
         没有任何东西说得出为什么。
         """
-        rows = get_db().list_shared_context(prefix="diagnosis:", limit=limit)
+        from app.multi_agent import shared_context as sc
+
+        rows = sc.list_shared_context(prefix="diagnosis:", limit=limit)
         total = len(rows)
         bad = 0
         for r in rows:

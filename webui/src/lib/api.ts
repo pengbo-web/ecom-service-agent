@@ -376,6 +376,11 @@ export type SkillCandidate = {
   // 只能靠人在这个界面上 force 放行。null = 数不出来(不显示)。
   gate_cases: number | null; gate_evaluable: boolean | null;
   gate_underpowered: boolean | null; gate_note: string | null;
+  // 上面那个总数里,有多少条是**从真实会话自动合成、未经人工审核**的
+  // (见 app/agent/skills/case_synthesis.py)。必须与人工用例分开显示:
+  // 「门禁用例 5 条」若全是机器造的,与 5 条人工用例的证据强度完全不是一回事。
+  // null = 后端没给(旧版本),此时不猜也不显示。
+  gate_human_cases?: number | null; gate_synthetic_cases?: number | null;
 };
 
 export type SkillCanary = {
@@ -901,4 +906,40 @@ export async function putShopProfile(p: ShopProfile): Promise<{ success: boolean
     throw new Error(detail || `保存失败 (${r.status})`);
   }
   return r.json();
+}
+
+// ---- 店主通知(参谋异常诊断主动推送)----
+
+export type SellerNotification = {
+  id: number;
+  kind: string;         // diagnosis / anomaly / report
+  title: string;
+  summary: string;
+  severity: string;     // info / warning / critical
+  read: number;         // 0=未读, 1=已读
+  suggested_question: string | null;
+  created_at: string;
+};
+
+export type NotificationList = {
+  notifications: SellerNotification[];
+  unread_count: number;
+};
+
+export async function getSellerNotifications(
+  unreadOnly = false, limit = 20,
+): Promise<NotificationList> {
+  const r = await adminFetch(
+    `/api/seller/notifications?unread_only=${unreadOnly}&limit=${limit}`,
+  );
+  if (!r.ok) throw new Error(`通知加载失败 (${r.status})`);
+  return r.json();
+}
+
+export async function markNotificationRead(nid: number): Promise<void> {
+  await adminFetch(`/api/seller/notifications/${nid}/read`, { method: "POST" });
+}
+
+export async function markAllNotificationsRead(): Promise<void> {
+  await adminFetch("/api/seller/notifications/read-all", { method: "POST" });
 }

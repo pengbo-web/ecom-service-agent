@@ -135,11 +135,39 @@ def gate_candidate(skill_name: str, candidate_path: str, definitions_dir: str,
                 "case_count": len(case_ids)}
 
 
-def gate_case_ids(skill_name: str, dataset_path: str) -> list[str]:
-    """取与该 skill 相关的评测用例 id(供 CLI 组装门禁入参)。"""
+def gate_case_ids(skill_name: str, dataset_path: str,
+                  include_synthetic: bool = True) -> list[str]:
+    """取与该 skill 相关的评测用例 id(供 CLI 组装门禁入参)。
+
+    两个来源,人工的在前:
+
+    - **人工集**(`dataset_path`,即 `cases.json`):现有逻辑一字未改。
+    - **合成集**(`cases_synth/<skill>.json`):从真实会话自动合成、未经人工审核,
+      见 `app.agent.skills.case_synthesis`。它的存在是为了解开"新 skill 没有用例
+      → 门禁评不了 → 永远转不了正"这个死结。
+
+    合成集读不出来时**静默退回只用人工集**:它是增量能力,坏掉时应该回到原状态,
+    而不是连人工用例也跑不了。`settings.skill_gate_synth_enabled=False` 可一键退回。
+
+    要分别报数请用 `gate_readiness()` —— 它给 `human_count` / `synthetic_count`。
+    只报一个总数会让操作者以为这个 skill 有人工把关过。
+    """
     from app.evaluation.dataset import filter_by_skill, load_dataset
 
-    return [c.id for c in filter_by_skill(load_dataset(dataset_path), skill_name)]
+    human = [c.id for c in filter_by_skill(load_dataset(dataset_path), skill_name)]
+    if not include_synthetic:
+        return human
+
+    try:
+        from app.agent.skills.case_synthesis import load_synth_cases
+        from app.config.settings import settings
+
+        if not settings.skill_gate_synth_enabled:
+            return human
+        synth = [c.id for c in load_synth_cases(skill_name) if c.id not in set(human)]
+    except Exception:  # noqa: BLE001 合成集是增量能力,坏了就当没有
+        synth = []
+    return human + synth
 
 
 # 门禁比的是 pass_rate / avg_process_score / avg_result_score 三个**均值**
@@ -169,27 +197,60 @@ def gate_readiness(skill_name: str, dataset_path: str) -> dict:
     这种听起来很正常的结论。
     """
     try:
+        human_ids = gate_case_ids(skill_name, dataset_path, include_synthetic=False)
         case_ids = gate_case_ids(skill_name, dataset_path)
         error = ""
     except Exception as exc:  # noqa: BLE001 读不出数据集 = 评不了,不是"没有用例"
-        case_ids, error = [], f"评测数据集读取失败: {exc}"
+        human_ids, case_ids, error = [], [], f"评测数据集读取失败: {exc}"
 
     count = len(case_ids)
+    human_count = len(human_ids)
+    synthetic_count = count - human_count
+
+    # **合成用例必须单独报数,不能只给一个总数。** 一个"5 条门禁用例"的 skill,
+    # 如果那 5 条全是机器从真实会话里自动合成、没有人看过一眼的,它与一个有 5 条
+    # 人工用例的 skill 在证据强度上完全不是一回事。只报总数会让操作者以为这个
+    # skill 有人工把过关——那正是自动化最容易骗到人的地方。
+    synth_suffix = ""
+    if synthetic_count:
+        synth_suffix = (f",其中 {synthetic_count} 条为自动合成、**未经人工审核**"
+                        "(从真实会话生成,断言取自真实工具调用与人工坐席回复)")
+
     if error:
         note = error + " —— 门禁无法评估"
     elif count == 0:
         note = (f"评测集里没有任何用例点名覆盖 {skill_name}(用例的 related_skills 字段),"
-                "门禁无法评估;这不是候选质量问题")
+                "且没有可用的自动合成用例,门禁无法评估;这不是候选质量问题")
     elif count < MIN_TRUSTWORTHY_CASES:
         note = (f"仅 {count} 条门禁用例(建议至少 {MIN_TRUSTWORTHY_CASES} 条):"
                 "两轮评测各真调一次 LLM,这么少的样本上差值以运行噪声为主,"
-                "门禁结论不足以作为自动上线的依据")
+                "门禁结论不足以作为自动上线的依据" + synth_suffix)
     else:
-        note = f"{count} 条门禁用例"
+        note = f"{count} 条门禁用例" + synth_suffix
 
     return {"case_ids": case_ids, "count": count,
+            "human_count": human_count, "synthetic_count": synthetic_count,
             "evaluable": count > 0, "underpowered": 0 < count < MIN_TRUSTWORTHY_CASES,
             "note": note}
+
+
+def resolve_cases(case_ids: list[str]) -> list:
+    """按 id 把用例取出来,**人工集与合成集一起找**,顺序与 `case_ids` 一致。
+
+    单独成函数是为了能在不真调 LLM 的前提下测到它。这一步少了合成集那一半,
+    **整个阶段一等于没做**:`gate_case_ids` 会把合成用例的 id 交进来,而这里若
+    只读 `cases.json` 就一条都匹配不上 → 评测跑 0 条 → summary 为空 → 门禁按
+    fail-closed 打"评测未产出可比指标"——从看门狗日志上看,和从前的
+    `gate_unavailable` 一模一样,没有人能发现合成用例根本没被跑过。
+    """
+    from app.agent.skills.case_synthesis import load_all_synth_cases
+    from app.config.settings import settings
+    from app.evaluation.dataset import load_dataset
+
+    by_id = {c.id: c for c in load_dataset(settings.eval_dataset_path)}
+    for case in load_all_synth_cases():
+        by_id.setdefault(case.id, case)     # 人工用例同 id 时以人工的为准
+    return [by_id[cid] for cid in case_ids if cid in by_id]
 
 
 def default_eval_fn(skills_dir: str, case_ids: list[str]) -> dict:
@@ -199,7 +260,6 @@ def default_eval_fn(skills_dir: str, case_ids: list[str]) -> dict:
     finally 中还原,避免污染同进程后续调用。
     """
     from app.config.settings import settings
-    from app.evaluation.dataset import load_dataset
     from app.evaluation.evaluator import Evaluator
     from app.evaluation.sandbox import Sandbox
     from app.observability.langfuse_client import make_openai_client
@@ -207,7 +267,7 @@ def default_eval_fn(skills_dir: str, case_ids: list[str]) -> dict:
     original_dir = settings.skills_dir
     settings.skills_dir = skills_dir
     try:
-        cases = [c for c in load_dataset(settings.eval_dataset_path) if c.id in set(case_ids)]
+        cases = resolve_cases(case_ids)
         client = make_openai_client(api_key=settings.openai_api_key,
                                     base_url=settings.openai_base_url)
         evaluator = Evaluator(

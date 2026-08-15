@@ -1,0 +1,121 @@
+{
+  "synthetic": true,
+  "skill": "track-order",
+  "generated_at": "2026-08-16T02:51:42",
+  "note": "本文件由 app.agent.skills.case_synthesis 从真实会话自动合成,**未经人工审核**;只用于 skill 转正门禁,不进回归基线 cases.json。",
+  "stats": {
+    "skill": "track-order",
+    "actor": "buyer",
+    "kept": 5,
+    "sessions_scanned": 73,
+    "from_trace": 3,
+    "from_keyword": 2,
+    "keywords": [
+      "查订单",
+      "物流",
+      "快递",
+      "到哪了",
+      "发货了吗",
+      "什么时候到。支持订单号不存在时的友好兜底与自助确认机制。"
+    ],
+    "dropped_no_assertion": 4,
+    "dropped_too_short": 1,
+    "provenance": [
+      {
+        "case_id": "synth-track-order-2f96c83a",
+        "session_id": "c-026472c2fad54729",
+        "source": "trace"
+      },
+      {
+        "case_id": "synth-track-order-eb06b125",
+        "session_id": "c-698a83210989488e",
+        "source": "trace"
+      },
+      {
+        "case_id": "synth-track-order-e9de4bf2",
+        "session_id": "c-7232e3afc4034367",
+        "source": "trace"
+      },
+      {
+        "case_id": "synth-track-order-5982cf20",
+        "session_id": "c-63e56ccc05d04713",
+        "source": "keyword"
+      },
+      {
+        "case_id": "synth-track-order-59658e6c",
+        "session_id": "c-63e56ccc05d04713",
+        "source": "keyword"
+      }
+    ],
+    "note": "断言全部来自事实:expected_tools 取自该轮真实调用过的工具,expected_keywords 取自人工坐席回复里的已知词表命中,买家原话逐字照抄。关键词来源的用例只说明「挑了哪些真实会话」,不参与任何断言。",
+    "skill_md_found": true
+  },
+  "cases": [
+    {
+      "id": "synth-track-order-2f96c83a",
+      "description": "自动合成·未经人工审核 | track-order | 帮我查下 ORD-20240115-001 的物",
+      "turns": [
+        "帮我查下 ORD-20240115-001 的物流"
+      ],
+      "related_skills": [
+        "track-order"
+      ],
+      "expected_tools": [
+        "query_order"
+      ]
+    },
+    {
+      "id": "synth-track-order-eb06b125",
+      "description": "自动合成·未经人工审核 | track-order | 我的包裹 ORD-20240115-001 什么",
+      "turns": [
+        "我的包裹 ORD-20240115-001 什么时候到"
+      ],
+      "related_skills": [
+        "track-order"
+      ],
+      "expected_tools": [
+        "query_order"
+      ]
+    },
+    {
+      "id": "synth-track-order-e9de4bf2",
+      "description": "自动合成·未经人工审核 | track-order | 订单 ORD-20240115-001 的快递到",
+      "turns": [
+        "订单 ORD-20240115-001 的快递到哪了"
+      ],
+      "related_skills": [
+        "track-order"
+      ],
+      "expected_tools": [
+        "query_order",
+        "query_logistics"
+      ]
+    },
+    {
+      "id": "synth-track-order-5982cf20",
+      "description": "自动合成·未经人工审核 | track-order | 帮我查订单 ORD-20240115-001",
+      "turns": [
+        "帮我查订单 ORD-20240115-001"
+      ],
+      "related_skills": [
+        "track-order"
+      ],
+      "expected_tools": [
+        "query_order"
+      ]
+    },
+    {
+      "id": "synth-track-order-59658e6c",
+      "description": "自动合成·未经人工审核 | track-order | 帮我查订单 ORD-20240110-003 的",
+      "turns": [
+        "帮我查订单 ORD-20240110-003 的物流"
+      ],
+      "related_skills": [
+        "track-order"
+      ],
+      "expected_tools": [
+        "query_logistics"
+      ]
+    }
+  ]
+}

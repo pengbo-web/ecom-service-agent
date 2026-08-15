@@ -1,0 +1,122 @@
+{
+  "synthetic": true,
+  "skill": "refund-attribution",
+  "generated_at": "2026-08-16T02:51:42",
+  "note": "本文件由 app.agent.skills.case_synthesis 从真实会话自动合成,**未经人工审核**;只用于 skill 转正门禁,不进回归基线 cases.json。",
+  "stats": {
+    "skill": "refund-attribution",
+    "actor": "seller",
+    "kept": 5,
+    "sessions_scanned": 73,
+    "from_trace": 0,
+    "from_keyword": 5,
+    "keywords": [
+      "退款",
+      "退货",
+      "退款率",
+      "售后",
+      "为什么退",
+      "退货原因",
+      "退款率升高",
+      "退款分析。"
+    ],
+    "dropped_no_assertion": 8,
+    "dropped_too_short": 2,
+    "provenance": [
+      {
+        "case_id": "synth-refund-attribution-de78b6c6",
+        "session_id": "c-b23de87994b840cc",
+        "source": "keyword"
+      },
+      {
+        "case_id": "synth-refund-attribution-dc47f7c6",
+        "session_id": "c-d0e9f8be835b46b0",
+        "source": "keyword"
+      },
+      {
+        "case_id": "synth-refund-attribution-3ede69a6",
+        "session_id": "c-8839a65d584b4ed4",
+        "source": "keyword"
+      },
+      {
+        "case_id": "synth-refund-attribution-49167bcc",
+        "session_id": "c-1de1f36cb332402e",
+        "source": "keyword"
+      },
+      {
+        "case_id": "synth-refund-attribution-22dc1ed0",
+        "session_id": "c-87a6c5b550f045ec",
+        "source": "keyword"
+      }
+    ],
+    "note": "断言全部来自事实:expected_tools 取自该轮真实调用过的工具,expected_keywords 取自人工坐席回复里的已知词表命中,买家原话逐字照抄。关键词来源的用例只说明「挑了哪些真实会话」,不参与任何断言。",
+    "skill_md_found": true
+  },
+  "cases": [
+    {
+      "id": "synth-refund-attribution-de78b6c6",
+      "description": "自动合成·未经人工审核 | refund-attribution | 退货怎么弄?订单 ORD-20240115-00",
+      "turns": [
+        "退货怎么弄?订单 ORD-20240115-001"
+      ],
+      "related_skills": [
+        "refund-attribution"
+      ],
+      "expected_tools": [
+        "query_order"
+      ]
+    },
+    {
+      "id": "synth-refund-attribution-dc47f7c6",
+      "description": "自动合成·未经人工审核 | refund-attribution | 我要退货,订单号 ORD-20240115-00",
+      "turns": [
+        "我要退货,订单号 ORD-20240115-001,鞋子尺码不合适"
+      ],
+      "related_skills": [
+        "refund-attribution"
+      ],
+      "expected_tools": [
+        "query_order"
+      ]
+    },
+    {
+      "id": "synth-refund-attribution-3ede69a6",
+      "description": "自动合成·未经人工审核 | refund-attribution | 这个订单我想退款,ORD-20240115-00",
+      "turns": [
+        "这个订单我想退款,ORD-20240115-001,不想要了"
+      ],
+      "related_skills": [
+        "refund-attribution"
+      ],
+      "expected_tools": [
+        "query_order"
+      ]
+    },
+    {
+      "id": "synth-refund-attribution-49167bcc",
+      "description": "自动合成·未经人工审核 | refund-attribution | 我要给订单 ORD-20240115-001 退",
+      "turns": [
+        "我要给订单 ORD-20240115-001 退款,商品不喜欢"
+      ],
+      "related_skills": [
+        "refund-attribution"
+      ],
+      "expected_tools": [
+        "query_order"
+      ]
+    },
+    {
+      "id": "synth-refund-attribution-22dc1ed0",
+      "description": "自动合成·未经人工审核 | refund-attribution | 退货政策是什么",
+      "turns": [
+        "退货政策是什么"
+      ],
+      "related_skills": [
+        "refund-attribution"
+      ],
+      "expected_tools": [
+        "search_knowledge"
+      ]
+    }
+  ]
+}

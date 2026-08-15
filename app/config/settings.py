@@ -170,6 +170,13 @@ class Settings(BaseSettings):
     eval_pass_threshold: float = 0.6  # 单维度通过阈值（judge 归一化到 0-1 后比较）
     eval_baseline_path: str = "app/evaluation/baseline.json"  # 回归基线
     eval_regression_tolerance: float = 0.05  # 单指标允许的最大回退幅度
+    # 自动合成的门禁用例目录。**与 eval_dataset_path 分开是硬要求**:cases.json
+    # 同时是回归基线的采样集,把未经人工审核的用例混进去,基线会随自动合成漂移,
+    # 从此失去"参照"这唯一的作用(见 app/agent/skills/case_synthesis.py)。
+    eval_synth_cases_dir: str = "app/evaluation/cases_synth"
+    # 门禁是否把合成用例算进来。关=回到"只认人工用例",新 skill 重新变成
+    # 永远 gate_unavailable —— 这个开关存在是为了出问题时能一键退回原状。
+    skill_gate_synth_enabled: bool = True
 
     # API 服务（Web 流式对话）
     api_host: str = "127.0.0.1"
@@ -197,6 +204,11 @@ class Settings(BaseSettings):
 
     collab_bus_backend: str = "sqlite"        # sqlite | pg
     collab_pg_dsn: str = ""                   # 例:postgresql://ecom:pw@127.0.0.1:5442/ecom
+    # 共享上下文存储后端。默认 redis:复用项目现有 Redis(session_store 同一个
+    # 实例),原生 TTL 自动清理、多实例共享无文件锁竞争。挂掉时 fail-soft
+    # (不回退 SQLite):shared_context 可重算,丢了只影响本轮注入。
+    # sqlite = 回退到 Database 类(与事件总线共用 SQLite 文件)。
+    shared_context_backend: str = "redis"     # redis | sqlite
     hmdp_base_url: str = "http://127.0.0.1:8085"   # hmdp 后端(商品上下文按 id 取详情用)
 
     # 可观测性（W2）

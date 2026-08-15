@@ -138,10 +138,31 @@ def start_for_candidate(skill_name: str, definitions_dir: str, candidates_dir: s
                 "detail": f"已开 {risk_mod.CANARY_PERCENT}% 灰度,等 --check 收口"}
 
     # POLICY_GATE_THEN_WATCH:新建 skill 无对照组,过离线门禁即转正,之后绝对值看门狗
-    from app.agent.skills.gate import default_eval_fn, gate_candidate, gate_case_ids
+    from app.agent.skills.gate import default_eval_fn, gate_candidate, gate_readiness
     from app.config.settings import settings
 
-    case_ids = gate_case_ids(skill_name, settings.eval_dataset_path)
+    ready = gate_readiness(skill_name, settings.eval_dataset_path)
+    # **死结就在这里断开。** 一条用例都没有时先试着从真实会话合成一批,再决定
+    # 要不要花钱跑评测。不合成的话,新蒸馏的 skill 会在这一行外面打
+    # `gate_unavailable` —— 下一轮、下一百轮都是同一行。
+    #
+    # 合成本身不调 LLM、不改任何线上文件,断言全部取自真实工具调用与人工坐席
+    # 回复(见 app/agent/skills/case_synthesis.py),所以放在无人值守路径里是
+    # 安全的。它**不放松放行标准**:合成不出用例时照旧 fail-closed。
+    if not ready["case_ids"] and settings.skill_gate_synth_enabled:
+        try:
+            from app.agent.skills.case_synthesis import synthesize_and_save
+
+            stats = synthesize_and_save(skill_name, db=db)
+            if stats.get("kept"):
+                print(f"  ↳ 自动合成 {stats['kept']} 条门禁用例"
+                      f"(轨迹 {stats.get('from_trace', 0)} / 关键词 "
+                      f"{stats.get('from_keyword', 0)});未经人工审核")
+                ready = gate_readiness(skill_name, settings.eval_dataset_path)
+        except Exception as exc:  # noqa: BLE001 合成失败=回到原来的"没有用例",不改变判定
+            print(f"  ↳ 门禁用例自动合成失败(按无用例处理): {exc}")
+
+    case_ids = ready["case_ids"]
     gate_result = gate_candidate(
         skill_name=skill_name, candidate_path=str(candidate),
         definitions_dir=definitions_dir,
@@ -170,6 +191,14 @@ def start_for_candidate(skill_name: str, definitions_dir: str, candidates_dir: s
         return {"risk": risk, "policy": policy,
                 "action": "gate_unavailable" if unavailable else "gate_failed",
                 "detail": detail}
+
+    # 门禁过了,但**过的是什么样的门禁**要跟着结论一起说。全自动路径上这条
+    # detail 是唯一的记录:5 条全自动合成的"未劣化"与 5 条人工用例的"未劣化",
+    # 在这一行里必须能分辨,否则日志翻回来时没人知道这次转正凭的是什么证据。
+    if ready.get("synthetic_count"):
+        gate_result["reason"] += (
+            f"(门禁 {ready['count']} 条用例中 {ready['synthetic_count']} 条为自动合成、"
+            f"未经人工审核,人工 {ready['human_count']} 条)")
 
     # block_on_high=True:门禁用的是上面 gate_candidate 那次判档时读到的候选,
     # 而 promote() 真正装机前会对**自己重新快照的那份字节**再判一次档——

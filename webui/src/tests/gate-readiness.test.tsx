@@ -91,6 +91,71 @@ describe("候选卡片的门禁就绪度", () => {
     expect(el.textContent).toMatch(/5 条/);
     expect(el.textContent).not.toMatch(/噪声|评不了/);
   });
+});
+
+/** 自动合成的门禁用例解开了"新 skill 永远转不了正"的死结,代价是引入了一种
+ * 新的骗法:一个「门禁用例 5 条」的候选,如果那 5 条全是机器从真实会话造的、
+ * 没有人看过一眼,它与 5 条人工用例的证据强度完全不是一回事——而界面上长得
+ * 一模一样。这组测试钉的就是"界面不许把这两者渲染成同一个东西"。 */
+describe("合成用例必须与人工用例分开显示", () => {
+  it("全是合成用例时明说没有任何人工用例", async () => {
+    stubFetch(payload([
+      candidate({ name: "draft-outreach-campaign", gate_cases: 5,
+                  gate_evaluable: true, gate_underpowered: false,
+                  gate_human_cases: 0, gate_synthetic_cases: 5 }),
+    ]), posts);
+    render(<SkillsView />);
+    const el = await screen.findByTestId("gate-synthetic-draft-outreach-campaign");
+    expect(el.textContent).toMatch(/5 条自动合成/);
+    expect(el.textContent).toMatch(/未经人工审核/);
+    expect(el.textContent).toMatch(/无任何人工用例/);
+  });
+
+  it("人工+合成混合时两个数字都给出来", async () => {
+    stubFetch(payload([
+      candidate({ name: "track-order", gate_cases: 6, gate_evaluable: true,
+                  gate_underpowered: false,
+                  gate_human_cases: 1, gate_synthetic_cases: 5 }),
+    ]), posts);
+    render(<SkillsView />);
+    const el = await screen.findByTestId("gate-synthetic-track-order");
+    expect(el.textContent).toMatch(/5 条自动合成/);
+    expect(el.textContent).toMatch(/人工 1 条/);
+  });
+
+  it("样本不足与「没人审过」是两件独立的坏消息,不能报了前者就吞掉后者", async () => {
+    stubFetch(payload([
+      candidate({ name: "query-coupons", gate_cases: 2, gate_evaluable: true,
+                  gate_underpowered: true,
+                  gate_human_cases: 0, gate_synthetic_cases: 2 }),
+    ]), posts);
+    render(<SkillsView />);
+    const under = await screen.findByTestId("gate-underpowered-query-coupons");
+    expect(under.textContent).toMatch(/噪声|证据强度/);
+    expect(screen.getByTestId("gate-synthetic-query-coupons").textContent)
+      .toMatch(/未经人工审核/);
+  });
+
+  it("全是人工用例时不出现这一行,免得警告变成噪声", async () => {
+    stubFetch(payload([
+      candidate({ name: "process-return", gate_cases: 4, gate_evaluable: true,
+                  gate_underpowered: false,
+                  gate_human_cases: 4, gate_synthetic_cases: 0 }),
+    ]), posts);
+    render(<SkillsView />);
+    await screen.findByTestId("gate-ready-process-return");
+    expect(screen.queryByTestId("gate-synthetic-process-return")).toBeNull();
+  });
+
+  it("老后端没给这两个字段时不猜、不显示", async () => {
+    stubFetch(payload([
+      candidate({ name: "track-order", gate_cases: 5, gate_evaluable: true,
+                  gate_underpowered: false }),
+    ]), posts);
+    render(<SkillsView />);
+    await screen.findByTestId("gate-ready-track-order");
+    expect(screen.queryByTestId("gate-synthetic-track-order")).toBeNull();
+  });
 
   it("字段缺失(老后端/数不出来)时不显示,不编造", async () => {
     stubFetch(payload([

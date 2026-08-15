@@ -1,0 +1,48 @@
+{
+  "synthetic": true,
+  "skill": "product-recommend",
+  "generated_at": "2026-08-16T02:51:42",
+  "note": "本文件由 app.agent.skills.case_synthesis 从真实会话自动合成,**未经人工审核**;只用于 skill 转正门禁,不进回归基线 cases.json。",
+  "stats": {
+    "skill": "product-recommend",
+    "actor": "buyer",
+    "kept": 1,
+    "sessions_scanned": 73,
+    "from_trace": 0,
+    "from_keyword": 1,
+    "keywords": [
+      "推荐",
+      "有什么",
+      "想买",
+      "帮我选",
+      "看看",
+      "有没有。"
+    ],
+    "dropped_no_assertion": 1,
+    "dropped_too_short": 1,
+    "provenance": [
+      {
+        "case_id": "synth-product-recommend-2ba56cd8",
+        "session_id": "lfbg-test--1",
+        "source": "keyword"
+      }
+    ],
+    "note": "断言全部来自事实:expected_tools 取自该轮真实调用过的工具,expected_keywords 取自人工坐席回复里的已知词表命中,买家原话逐字照抄。关键词来源的用例只说明「挑了哪些真实会话」,不参与任何断言。",
+    "skill_md_found": true
+  },
+  "cases": [
+    {
+      "id": "synth-product-recommend-2ba56cd8",
+      "description": "自动合成·未经人工审核 | product-recommend | 我特别喜欢红色运动鞋,预算一千以内,你们有什么推",
+      "turns": [
+        "我特别喜欢红色运动鞋,预算一千以内,你们有什么推荐?"
+      ],
+      "related_skills": [
+        "product-recommend"
+      ],
+      "expected_tools": [
+        "query_product"
+      ]
+    }
+  ]
+}

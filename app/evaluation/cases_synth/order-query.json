@@ -1,0 +1,121 @@
+{
+  "synthetic": true,
+  "skill": "order-query",
+  "generated_at": "2026-08-16T02:51:42",
+  "note": "本文件由 app.agent.skills.case_synthesis 从真实会话自动合成,**未经人工审核**;只用于 skill 转正门禁,不进回归基线 cases.json。",
+  "stats": {
+    "skill": "order-query",
+    "actor": "buyer",
+    "kept": 5,
+    "sessions_scanned": 73,
+    "from_trace": 0,
+    "from_keyword": 5,
+    "keywords": [
+      "查订单",
+      "我的订单",
+      "订单号",
+      "什么时候到",
+      "发货了吗",
+      "物流"
+    ],
+    "dropped_no_assertion": 3,
+    "dropped_too_short": 0,
+    "provenance": [
+      {
+        "case_id": "synth-order-query-eb06b125",
+        "session_id": "c-80a48ef9ceb94c52",
+        "source": "keyword"
+      },
+      {
+        "case_id": "synth-order-query-2f96c83a",
+        "session_id": "c-026472c2fad54729",
+        "source": "keyword"
+      },
+      {
+        "case_id": "synth-order-query-dc47f7c6",
+        "session_id": "c-d0e9f8be835b46b0",
+        "source": "keyword"
+      },
+      {
+        "case_id": "synth-order-query-f631cef5",
+        "session_id": "c-3e95ccfbec874c55",
+        "source": "keyword"
+      },
+      {
+        "case_id": "synth-order-query-5982cf20",
+        "session_id": "c-63e56ccc05d04713",
+        "source": "keyword"
+      }
+    ],
+    "note": "断言全部来自事实:expected_tools 取自该轮真实调用过的工具,expected_keywords 取自人工坐席回复里的已知词表命中,买家原话逐字照抄。关键词来源的用例只说明「挑了哪些真实会话」,不参与任何断言。",
+    "skill_md_found": true
+  },
+  "cases": [
+    {
+      "id": "synth-order-query-eb06b125",
+      "description": "自动合成·未经人工审核 | order-query | 我的包裹 ORD-20240115-001 什么",
+      "turns": [
+        "我的包裹 ORD-20240115-001 什么时候到"
+      ],
+      "related_skills": [
+        "order-query"
+      ],
+      "expected_tools": [
+        "query_order",
+        "list_user_orders"
+      ]
+    },
+    {
+      "id": "synth-order-query-2f96c83a",
+      "description": "自动合成·未经人工审核 | order-query | 帮我查下 ORD-20240115-001 的物",
+      "turns": [
+        "帮我查下 ORD-20240115-001 的物流"
+      ],
+      "related_skills": [
+        "order-query"
+      ],
+      "expected_tools": [
+        "query_order"
+      ]
+    },
+    {
+      "id": "synth-order-query-dc47f7c6",
+      "description": "自动合成·未经人工审核 | order-query | 我要退货,订单号 ORD-20240115-00",
+      "turns": [
+        "我要退货,订单号 ORD-20240115-001,鞋子尺码不合适"
+      ],
+      "related_skills": [
+        "order-query"
+      ],
+      "expected_tools": [
+        "query_order"
+      ]
+    },
+    {
+      "id": "synth-order-query-f631cef5",
+      "description": "自动合成·未经人工审核 | order-query | 帮我查一下我的订单",
+      "turns": [
+        "帮我查一下我的订单"
+      ],
+      "related_skills": [
+        "order-query"
+      ],
+      "expected_tools": [
+        "list_user_orders"
+      ]
+    },
+    {
+      "id": "synth-order-query-5982cf20",
+      "description": "自动合成·未经人工审核 | order-query | 帮我查订单 ORD-20240115-001",
+      "turns": [
+        "帮我查订单 ORD-20240115-001"
+      ],
+      "related_skills": [
+        "order-query"
+      ],
+      "expected_tools": [
+        "query_order"
+      ]
+    }
+  ]
+}

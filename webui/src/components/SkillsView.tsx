@@ -44,6 +44,7 @@ function GateReadiness({ c }: { c: SkillCandidate }) {
       <div className="mt-1 text-[11px] text-amber-700 dark:text-amber-400"
            data-testid={`gate-underpowered-${c.name}`}>
         ⚠️ 门禁仅 {c.gate_cases} 条用例，结论以运行噪声为主，证据强度不足
+        <SyntheticNote c={c} />
       </div>
     );
   }
@@ -51,6 +52,29 @@ function GateReadiness({ c }: { c: SkillCandidate }) {
     <div className="mt-1 text-[11px] text-muted-foreground"
          data-testid={`gate-ready-${c.name}`}>
       门禁用例 {c.gate_cases} 条
+      <SyntheticNote c={c} />
+    </div>
+  );
+}
+
+/** 这些用例里有多少是**机器造的、没有人看过一眼的**。
+ *
+ * 自动合成解开了"新 skill 永远转不了正"的死结,代价是引入了一种新的骗法:
+ * 一个「门禁用例 5 条」的候选,如果那 5 条全是从真实会话自动合成的,它与 5 条
+ * 人工用例在证据强度上完全不是一回事——而界面上长得一模一样。
+ *
+ * 所以这一行是**必须**的,不是锦上添花:它是操作者判断"这个绿灯值多少钱"的
+ * 唯一依据。旧字段缺失(后端未升级)时返回 null,不猜、不显示。
+ */
+function SyntheticNote({ c }: { c: SkillCandidate }) {
+  const n = c.gate_synthetic_cases;
+  if (n === null || n === undefined || n <= 0) return null;
+  const human = c.gate_human_cases ?? 0;
+  return (
+    <div className="mt-0.5 text-amber-700 dark:text-amber-400"
+         data-testid={`gate-synthetic-${c.name}`}>
+      其中 {n} 条自动合成 · 未经人工审核
+      {human > 0 ? `（人工 ${human} 条）` : "（无任何人工用例）"}
     </div>
   );
 }
