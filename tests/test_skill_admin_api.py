@@ -88,15 +88,21 @@ def test_traces_map_counts_outcomes(tmp_path, monkeypatch):
     assert counts.get("tool_error", 0) == 0
 
 
-def test_traces_window_discloses_query_limit():
-    """traces 段的计数来自有界、按时间倒序的窗口(全 skill 共用一个上限),
-    高频 skill 会挤占低频 skill 的样本——响应必须把这个窗口值明示出来,
-    且断言的是端点里真正传给查询的同一个常量,不能各说各话。"""
-    from app.api.app import _TRACE_WINDOW
+def test_traces_are_no_longer_truncated_by_a_shared_window():
+    """traces 段**不再截窗口**,响应必须如实说明取样范围。
 
+    改之前是"最近 N 条轨迹"、全 skill 全结局共用一个上限。失败远少于成功,一段
+    正常运行就把窗口填满,失败被整体挤出去 —— 实测界面上 track-order 打出
+    「实战成功率 100%(success:1)」,而它真实成绩是 success 15 / tool_error 38
+    (28%),旁边的归因面板同时列着 38 次失败。**"100%" 是彻底错的。**
+
+    现在是一次 COUNT + GROUP BY,没有窗口可挤。limit=0 表示"不截断",前端据此
+    渲染成「全部轨迹」而不是「最近 0 条」。
+    """
     data = _client().get("/api/admin/skills", headers=_headers()).json()
 
-    assert data["traces_window"]["limit"] == _TRACE_WINDOW
+    assert data["traces_window"]["limit"] == 0
+    assert "全时段" in data["traces_window"]["note"]
 
 
 # ---------- 分级授权可见性(Task 15) ----------
@@ -182,3 +188,29 @@ def test_risk_and_policy_computed_from_real_content(tmp_path, monkeypatch):
         RISK_LOW, POLICY_CANARY_AB)
     assert (by_name["coupon-lookup"]["risk"], by_name["coupon-lookup"]["policy"]) == (
         RISK_MEDIUM, POLICY_GATE_THEN_WATCH)
+
+
+def test_success_rate_is_computed_over_all_traces_not_a_shared_window():
+    """**走查界面时抓到的错。**
+
+    界面上 track-order 显示「实战成功率 100%(success:1)」,而旁边的归因面板同时
+    列着「38 次失败」。真实成绩是 success 15 / tool_error 38 —— 成功率 28%。
+
+    根因:成绩原本取「最近 N 条轨迹」在内存里数,而那个窗口是所有 skill、所有结局
+    **共用**的。失败远少于成功,一段正常运行就把窗口填满,失败被整体挤出去,
+    剩下的全是成功 → 成功率算出 100%。这个错一直都在,是归因面板把它顶到了台面上。
+    """
+    from app.db import get_db
+
+    db = get_db()
+    db.record_skill_trace("s-win-fail", "u", "win-probe",
+                          [{"name": "query_order", "ok": False, "error": "boom"}],
+                          "tool_error")
+    # 再灌一批别的 skill 的成功轨迹,足以在任何"共用窗口"里把上面那条失败挤掉
+    for i in range(600):
+        db.record_skill_trace(f"s-other-{i}", "u", "win-noise", [], "success")
+
+    counts = _client().get("/api/admin/skills",
+                           headers=_headers()).json()["traces"]["win-probe"]
+    assert counts.get("tool_error") == 1, (
+        f"失败被别的 skill 的成功轨迹挤出统计了: {counts}")

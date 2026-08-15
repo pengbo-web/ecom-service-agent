@@ -487,6 +487,26 @@ class Database:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_draft_unique "
                 "ON outreach_drafts(user_id, order_id, opportunity_type) "
                 "WHERE status = 'draft'")
+
+            # ---------- 店主通知(参谋异常诊断主动推送)----------
+            # 协作 Worker 的 handle_signal() 发现异常后写入,前端轮询读取。
+            # 与 outreach_drafts 不同:通知是给人看的提醒,不是待审动作,
+            # 没有审批流程,只有已读/未读状态。
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS seller_notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    kind TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    summary TEXT NOT NULL DEFAULT '',
+                    severity TEXT NOT NULL DEFAULT 'info',
+                    read INTEGER NOT NULL DEFAULT 0,
+                    suggested_question TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_seller_notif_read "
+                "ON seller_notifications(read, created_at DESC)")
             conn.commit()
         finally:
             conn.close()
@@ -815,6 +835,33 @@ class Database:
             conn.commit()
         finally:
             conn.close()
+
+    def skill_trace_counts(self) -> dict[str, dict[str, int]]:
+        """每个 skill 各结局的**全时段**条数:`{skill: {outcome: n}}`。
+
+        **为什么不复用 `list_skill_traces` 再在内存里数。** 那个函数按 id DESC 取
+        最近 N 条,窗口是所有 skill、所有结局**共用**的。失败远少于成功,一段正常
+        运行就能把窗口填满——实测 track-order 真实成绩是 success 15 / tool_error 38
+        (成功率 28%),而按最近 500 条数出来只剩 `success: 1`,界面上打出**实战
+        成功率 100%**,旁边同时列着 38 次失败归因。两个数字互相打脸,而"100%"
+        是彻底错的。
+
+        取数是一次聚合(COUNT + GROUP BY),不搬行,几万条也是毫秒级——本来就没有
+        理由为了这个去截断窗口。
+        """
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT skill_name, outcome, COUNT(*) AS n FROM skill_traces "
+                "GROUP BY skill_name, outcome").fetchall()
+        finally:
+            conn.close()
+        out: dict[str, dict[str, int]] = {}
+        for row in rows:
+            item = dict(row)
+            name = item.get("skill_name") or ""
+            out.setdefault(name, {})[item.get("outcome") or "unknown"] = int(item["n"])
+        return out
 
     def list_skill_traces(self, skill_name: Optional[str] = None,
                           outcomes: Optional[list[str]] = None,
@@ -2420,5 +2467,80 @@ class Database:
         try:
             rows = conn.execute(sql, tuple(params)).fetchall()
             return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    # ---------- 店主通知 CRUD ----------
+
+    def add_notification(self, kind: str, title: str, summary: str = "",
+                         severity: str = "info",
+                         suggested_question: str = "") -> int:
+        """写入一条店主通知。返回新行 ID。
+
+        fail-soft 由调用方(collab.handle_signal)保证:写入失败只记 warning,
+        不打断诊断主流程。这里抛异常即可,不吞。
+        """
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "INSERT INTO seller_notifications "
+                "(kind, title, summary, severity, suggested_question, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (kind, title, summary, severity, suggested_question, self._now()),
+            )
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+
+    def list_notifications(self, unread_only: bool = False,
+                           limit: int = 20) -> list[dict]:
+        """列通知,默认按时间倒序。unread_only=True 时只返回未读。"""
+        sql = "SELECT * FROM seller_notifications"
+        params: list = []
+        if unread_only:
+            sql += " WHERE read = 0"
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        conn = self.connect()
+        try:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+    def count_unread_notifications(self) -> int:
+        """未读通知计数(前端角标用)。"""
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM seller_notifications WHERE read = 0"
+            ).fetchone()
+            return int(row["n"] or 0)
+        finally:
+            conn.close()
+
+    def mark_notification_read(self, nid: int) -> bool:
+        """标记单条通知已读。返回是否真的改了(行存在且之前未读)。"""
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE seller_notifications SET read = 1 WHERE id = ? AND read = 0",
+                (nid,),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def mark_all_notifications_read(self) -> int:
+        """一键全部已读。返回实际更新的行数。"""
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                "UPDATE seller_notifications SET read = 1 WHERE read = 0"
+            )
+            conn.commit()
+            return cur.rowcount
         finally:
             conn.close()

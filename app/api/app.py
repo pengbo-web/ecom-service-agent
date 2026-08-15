@@ -1560,12 +1560,18 @@ def create_app(session_manager: Optional[SessionManager] = None,
         except Exception:  # noqa: BLE001
             canaries = []
 
-        traces: dict[str, dict[str, int]] = {}
+        # 实战成绩:**全时段聚合,不再截窗口。**
+        #
+        # 原来是取最近 _TRACE_WINDOW 条轨迹在内存里数,而那个窗口是所有 skill、
+        # 所有结局共用的。失败远少于成功,一段正常运行就把窗口填满——实测
+        # track-order 真实成绩是 success 15 / tool_error 38(成功率 28%),按窗口
+        # 数出来只剩 `success: 1`,界面上打出**实战成功率 100%**,而旁边的归因面板
+        # 同时列着 38 次失败。两个数字互相打脸,且"100%"是彻底错的。
+        #
+        # 走查界面时才看见这一幕:归因面板把这个一直存在的错误顶到了台面上。
+        # 一次 COUNT + GROUP BY 就没有这个问题,也没有理由为它去截断。
         try:
-            for row in get_db().list_skill_traces(limit=_TRACE_WINDOW):
-                bucket = traces.setdefault(row["skill_name"], {})
-                outcome = row.get("outcome") or "unknown"
-                bucket[outcome] = bucket.get(outcome, 0) + 1
+            traces = get_db().skill_trace_counts()
         except Exception:  # noqa: BLE001
             traces = {}
 
@@ -1603,8 +1609,8 @@ def create_app(session_manager: Optional[SessionManager] = None,
             "candidates": candidates,
             "traces": traces,
             "traces_window": {
-                "limit": _TRACE_WINDOW,
-                "note": "按最近轨迹计数的窗口值,非全时段统计;窗口为所有 skill 共用,高频 skill 可能挤占低频 skill 的样本",
+                "limit": 0,   # 0 = 不截窗口(全时段聚合)
+                "note": "全时段统计(COUNT + GROUP BY,不截窗口)",
             },
             "failure_attribution": failure_attribution,
             "failure_attribution_note": (

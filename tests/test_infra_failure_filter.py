@@ -91,8 +91,31 @@ def test_blocked_calls_are_not_counted_as_failures():
     assert trace_is_infrastructure_only(calls) is False
 
 
-def test_synthesis_filters_and_reports_the_drop():
-    """过滤必须**说出来**,不能静默。
+def test_infrastructure_traces_do_not_reach_the_improver():
+    """**这条不变式没变,守它的东西变了。**
+
+    原来这里断言的是"`synthesize_skills` 的源码里出现过 `trace_is_infrastructure_only`"
+    ——它在归因分层(`attribution.py`)把这道过滤从 1 类推广到 3 类之后变红了,
+    而**行为完全正确**:基础设施故障现在由归因规则 ① 判成 `capability_limit`,
+    照样不回流。
+
+    断言源码里有没有某个函数名,守的是实现而不是行为:实现一换就红,行为坏了
+    却未必红(把那行改成 `if False and trace_is_infrastructure_only(...)` 它照样绿)。
+    改成直接验行为。
+    """
+    from app.agent.skills.attribution import CATEGORY_CAPABILITY_LIMIT, partition
+
+    trace = {"session_id": "s1", "user_id": "u1", "skill_name": "track-order",
+             "outcome": "tool_error",
+             "tool_calls": [{"name": "query_order", "ok": False, "args": {},
+                             "error": "无法连接 hmdp:ConnectError"}]}
+    r = partition([trace], [], db=object())
+    assert r["flows_back"] == [], "基础设施故障不该回流去改流程文档"
+    assert r["counts"][CATEGORY_CAPABILITY_LIMIT] == 1
+
+
+def test_synthesis_reports_the_drop_instead_of_filtering_silently():
+    """剔除必须**说出来**,而且要说清按什么理由剔的。
 
     静默过滤会让"为什么这轮没产出改进候选"变成一个查不下去的问题。
     """
@@ -101,5 +124,5 @@ def test_synthesis_filters_and_reports_the_drop():
     from app.scripts import synthesize_skills
 
     src = inspect.getsource(synthesize_skills)
-    assert "trace_is_infrastructure_only" in src
     assert "已剔除" in src, "剔除条数要打印出来"
+    assert "summarize(" in src, "每一类的条数都要报,不能只报回流了几条"

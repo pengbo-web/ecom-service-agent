@@ -389,7 +389,11 @@ export function SkillsView() {
           </div>
           {data && (
             <div className="mt-1 text-[11px] text-muted-foreground">
-              成绩取样：最近 {data.traces_window.limit} 条轨迹 —— {data.traces_window.note}
+              {/* limit=0 表示后端不再截窗口(全时段聚合)。写死"最近 N 条"会在
+                  N=0 时渲染成「最近 0 条轨迹」——一句正好相反的话。 */}
+              成绩取样：{data.traces_window.limit > 0
+                ? `最近 ${data.traces_window.limit} 条轨迹`
+                : "全部轨迹"} —— {data.traces_window.note}
             </div>
           )}
         </section>
