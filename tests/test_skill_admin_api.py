@@ -190,7 +190,8 @@ def test_risk_and_policy_computed_from_real_content(tmp_path, monkeypatch):
         RISK_MEDIUM, POLICY_GATE_THEN_WATCH)
 
 
-def test_success_rate_is_computed_over_all_traces_not_a_shared_window():
+def test_success_rate_is_computed_over_all_traces_not_a_shared_window(tmp_path,
+                                                                     monkeypatch):
     """**走查界面时抓到的错。**
 
     界面上 track-order 显示「实战成功率 100%(success:1)」,而旁边的归因面板同时
@@ -199,18 +200,27 @@ def test_success_rate_is_computed_over_all_traces_not_a_shared_window():
     根因:成绩原本取「最近 N 条轨迹」在内存里数,而那个窗口是所有 skill、所有结局
     **共用**的。失败远少于成功,一段正常运行就把窗口填满,失败被整体挤出去,
     剩下的全是成功 → 成功率算出 100%。这个错一直都在,是归因面板把它顶到了台面上。
-    """
-    from app.db import get_db
 
-    db = get_db()
-    db.record_skill_trace("s-win-fail", "u", "win-probe",
+    用独立库(与 test_traces_map_counts_outcomes 同一套 monkeypatch):第一版直接
+    写真实 ecom.db,结果是**每跑一次就往开发机的库里多灌 601 行**,断言也随之
+    从 1 变 2 变 3。测试不该改它正在测量的那个东西。
+    """
+    from app.db import Database
+
+    db = Database(str(tmp_path / "t.db"))
+    db.init_schema()
+    for i in range(30):
+        db.record_skill_trace(f"s-ok-{i}", "u", "win-probe", [], "success")
+    db.record_skill_trace("s-fail", "u", "win-probe",
                           [{"name": "query_order", "ok": False, "error": "boom"}],
                           "tool_error")
-    # 再灌一批别的 skill 的成功轨迹,足以在任何"共用窗口"里把上面那条失败挤掉
+    # 再灌一批**别的 skill** 的成功轨迹,足以在任何"共用窗口"里把上面那条失败挤掉
     for i in range(600):
-        db.record_skill_trace(f"s-other-{i}", "u", "win-noise", [], "success")
+        db.record_skill_trace(f"s-noise-{i}", "u", "win-noise", [], "success")
+    monkeypatch.setattr("app.api.app.get_db", lambda: db)
 
     counts = _client().get("/api/admin/skills",
                            headers=_headers()).json()["traces"]["win-probe"]
     assert counts.get("tool_error") == 1, (
         f"失败被别的 skill 的成功轨迹挤出统计了: {counts}")
+    assert counts.get("success") == 30
