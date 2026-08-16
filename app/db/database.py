@@ -2577,14 +2577,21 @@ class Database:
         """
         conn = self.connect()
         try:
+            # 用方言层的 RETURNING 而不是 `cur.lastrowid`:后者是 sqlite3 驱动
+            # **特有**的,psycopg 没有 —— PG 后端上这里会直接抛。
+            # `tests/test_db_dialect.py::test_driver_specific_apis_do_not_leak`
+            # 就是拦这个的(仓库里另外两处 INSERT 取 id 也都栽过同一跤,
+            # 见 bargain_deals / agent_events 两处的注释)。
             cur = conn.execute(
-                "INSERT INTO seller_notifications "
-                "(kind, title, summary, severity, suggested_question, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                self.d.returning_id(
+                    "INSERT INTO seller_notifications "
+                    "(kind, title, summary, severity, suggested_question, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)"),
                 (kind, title, summary, severity, suggested_question, self._now()),
             )
+            new_id = cur.fetchone()[0]
             conn.commit()
-            return cur.lastrowid
+            return new_id
         finally:
             conn.close()
 
