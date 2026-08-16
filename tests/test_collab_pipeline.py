@@ -19,6 +19,9 @@ def db(tmp_path, monkeypatch):
     `get_db`,那种 fixture 会直接 AttributeError,而它跟被测行为毫无关系。
     """
     from app.db import set_db
+    from app.config.settings import settings
+    # shared_context 默认已改为 redis 后端;本测试用 SQLite,显式切回。
+    monkeypatch.setattr(settings, "shared_context_backend", "sqlite")
     d = Database(db_path=str(tmp_path / "t.db"))
     d.init_schema()
     set_db(d)

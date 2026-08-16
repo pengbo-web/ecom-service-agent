@@ -111,6 +111,19 @@ def _force_local_session_backends():
     # 钉成 False。开着时 /api/chat 会给 demo 用户注入 hmdp 身份并改写 user_id,
     # 会话归属类断言(reset/翻篇/历史回显)会连带失真。
     settings.demo_mode = False
+    _orig_scb = settings.shared_context_backend
+    # 钉成 sqlite。`shared_context_backend` 默认是 **redis**,于是没有显式钉后端的
+    # 用例会去连**真实** Redis —— 本机它是降级的(连接超时后回落文件),结果是
+    # 写进 Redis 的共享上下文,sqlite 侧的时间线一条都读不到。
+    #
+    # 实测被它打红 4 条:test_shared_context 的两条 fail-soft(它们打 `get_db` 的桩,
+    # 而代码根本没走到 sqlite 分支就从 redis 返回了)、test_collab_e2e 的两条
+    # (诊断写进 redis、时间线从 sqlite 读)。
+    #
+    # 与 mcp_enabled / skill_semantic_clustering_enabled 同一条理由:**测试不该
+    # 依赖一个真实的外部服务**。要测 Redis 路径的用例自己 monkeypatch 成 redis
+    # 并注入 fakeredis(见 test_shared_context.py 的 redis 段),那会覆盖这里。
+    settings.shared_context_backend = "sqlite"
     _orig_synth = settings.eval_synth_cases_dir
     # 指到一个不存在的目录。`gate_case_ids` 现在**除了**传进去的 dataset_path,
     # 还会读 `eval_synth_cases_dir` 下真实生成的合成用例——那是仓库里的实际文件,
@@ -128,6 +141,7 @@ def _force_local_session_backends():
     yield
     set_traffic_source(None)
     settings.eval_synth_cases_dir = _orig_synth
+    settings.shared_context_backend = _orig_scb
     settings.kb_local_fallback_enabled = _orig_fb
     settings.mcp_enabled = _orig_mcp
     settings.demo_mode = _orig_demo

@@ -89,6 +89,10 @@ def orch(monkeypatch, tmp_path):
     monkeypatch.setattr("app.multi_agent.orchestrator.ToolManager", FakeToolManager)
     monkeypatch.setattr("app.multi_agent.seller_router.SellerRouter", FakeRouter)
 
+    # shared_context 默认已改为 redis 后端;测试用 SQLite,显式切回。
+    from app.config import settings as _st
+    monkeypatch.setattr(_st.settings, "shared_context_backend", "sqlite")
+
     from app.db import Database, set_db
     db = Database(db_path=str(tmp_path / "seller_orchestrator_test.db"))
     db.init_schema()

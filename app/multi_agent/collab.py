@@ -438,6 +438,28 @@ def handle_signal(event: dict) -> dict:
                      "degraded": degraded}
         sc.share(sc.KEY_DIAGNOSIS, subject, diagnosis, bus.AGENT_ANALYST, corr)
 
+        # 写入店主通知:让参谋对话界面能主动提醒异常(轮询方案,见
+        # /api/seller/notifications 端点)。fail-soft:通知写入失败不影响
+        # 诊断主流程,只记 warning。
+        try:
+            from app.db import get_db
+            kind_str = str(anomaly.get("kind") or "")
+            subj_name = str(anomaly.get("subject_name") or subject)
+            value = float(anomaly.get("value") or 0)
+            threshold = float(anomaly.get("threshold") or 1)
+            severity = "warning" if threshold > 0 and value > threshold * 1.5 else "info"
+            icon = "🔴" if severity == "warning" else "⚠️"
+            conclusion_preview = (conclusion or "")[:200]
+            get_db().add_notification(
+                kind="diagnosis",
+                title=f"{icon} {kind_str} 异常：{subj_name}",
+                summary=conclusion_preview,
+                severity=severity,
+                suggested_question=f"帮我分析一下{subj_name}的{kind_str}异常",
+            )
+        except Exception:  # noqa: BLE001 通知写入失败不影响诊断主流程
+            logger.warning("店主通知写入失败(已忽略)", exc_info=True)
+
         # 参谋只宣布"我出了一条诊断",**不决定该转给谁**。
         #
         # 改造前这里是:先判 `not degraded and kind in MARKETING_WORTHY`,再

@@ -18,8 +18,10 @@ from app.multi_agent import bus, collab, event_bus
 
 
 @pytest.fixture()
-def db(tmp_path):
+def db(tmp_path, monkeypatch):
     from app.db import set_db
+    # shared_context 默认已改为 redis 后端;本测试用 SQLite,显式切回。
+    monkeypatch.setattr(settings, "shared_context_backend", "sqlite")
     d = Database(db_path=str(tmp_path / "b.db"))
     d.init_schema()
     set_db(d)
