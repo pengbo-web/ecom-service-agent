@@ -1895,8 +1895,19 @@ def create_app(session_manager: Optional[SessionManager] = None,
         sid = (req.session_id or "").strip() or "seller-default"
         orch = seller_sessions.get_or_create(sid, user_id="seller")
         lock = seller_sessions.get_lock(sid)
+        # **必须逐帧包成 SSE 文本。** `run_seller_streaming` 与买家侧
+        # `run_agent_streaming` 一样 yield 的是 **dict**(事件协议在那一层定义),
+        # 由端点负责序列化 —— 买家侧那边写的是 `yield _sse_frame(event)`,
+        # 这里漏了,直接把 dict 交给了 StreamingResponse。
+        #
+        # 症状极具迷惑性:响应头是 200 + text/event-stream **先发出去了**,
+        # 然后 starlette 在 `chunk.encode()` 上炸 `AttributeError: 'dict' object
+        # has no attribute 'encode'`,连接被掐断且**一个数据帧都没有**。
+        # 前端拿到的是"请求成功但永远没有内容",于是一直停在「分析中…」。
+        # 这个端点从引入起就是坏的,只是此前没有前端调它。
         return StreamingResponse(
-            run_seller_streaming(orch, req.message or "", sid, lock),
+            (_sse_frame(event)
+             for event in run_seller_streaming(orch, req.message or "", sid, lock)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
