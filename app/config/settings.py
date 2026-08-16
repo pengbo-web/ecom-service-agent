@@ -22,6 +22,20 @@ class Settings(BaseSettings):
 
     # ReAct 循环
     max_react_steps: int = 5
+    # **卖家侧单独一档,因为两侧的任务形状不一样。**
+    #
+    # 买家客服一轮通常 1-2 次工具(查单 → 答),3 步够用;而参谋的 skill 声明的是
+    # 多步分析链:`daily-business-report` 要 shop_overview → product_diagnostics →
+    # anomaly_scan → review_insights **四次**,`refund-attribution` 是五步归因。
+    #
+    # 实测(.env 里 MAX_REACT_STEPS=3 时):问「最近退款率是不是有问题」,参谋在
+    # 第三步「差评佐证」处截断,得再追一句「继续」才补完归因报告。对店主来说那
+    # 就是"它没答完",而 skill 正文明明写着五步——**声明的流程比预算长,流程就
+    # 永远走不完**。
+    #
+    # 取 8 而不是更大:卖家侧工具全只读、无副作用,多跑几步的代价只是时间与 token;
+    # 但预算无限大会让一次跑偏的分析烧掉整轮预算,8 足够覆盖最长的五步链 + 少量重试。
+    seller_max_react_steps: int = 8
 
     # MCP 配置
     # 开启前需:①MCP server 常驻(mcp_server/server.py 或 compose 的 mcp-server)②身份透传已实现(P1)

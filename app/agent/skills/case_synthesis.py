@@ -206,21 +206,18 @@ def skill_keywords(skill_md: str) -> list[str]:
     ——那是**它自己声明的适用范围**,拿它去捞会话比另写一套猜测规则可靠。
     取不到就返回 [],调用方据此判定这个 skill 无法走关键词路(而不是去猜)。
     """
+    # **解析实现只有一份**,在 `matcher.extract_keywords`。
+    #
+    # 这两处曾经各写一份:本模块认三种写法(冒号 / 适用 / 包括+引号),而
+    # matcher 只认「适用关键词：」。同一个 skill 于是在两条路上被解析出不同的
+    # 关键词 —— `daily-business-report` 在这里能抽出 9 个词、在 matcher 那里是 0,
+    # 结果就是它能被合成门禁用例、却永远不会被服务端预加载。
+    # 两份解析器修一份、漏一份,是本轮反复撞到的同一种形态。
     from app.agent.skills.loader import _parse_frontmatter
+    from app.agent.skills.matcher import extract_keywords
 
     meta = _parse_frontmatter(skill_md or "")
-    desc = str((meta or {}).get("description") or "")
-    hit = _KEYWORD_PREFIX_RE.search(desc)
-    if not hit:
-        return []
-    tail = hit.group(1)
-    # 带引号时以引号为准:`关键词包括“优惠券”“有哪些券”等` 里,分隔符切法会切出
-    # 「包括“优惠券”」这种带散文的碎片,而引号内的才是作者真正声明的词。
-    quoted = _QUOTED_RE.findall(tail)
-    words = quoted if quoted else [w.strip() for w in _KEYWORD_SPLIT_RE.split(tail)]
-    # 一个字的"词"(如"退")会命中几乎所有会话,捞回来的样本与该 skill 无关
-    return [w.strip("“”\"「」『』 ") for w in words
-            if len(w.strip("“”\"「」『』 ")) >= 2]
+    return extract_keywords(str((meta or {}).get("description") or ""))
 
 
 def skill_actor(skill_md: str) -> str:

@@ -436,6 +436,11 @@ class SellerOrchestrator:
 
         sid = Path(session_path).stem if session_path else None
         self.engine = EcomAgent(session_path=session_path, session_id=sid, user_id=user_id)
+        # 卖家侧的 ReAct 预算单独一档:参谋的 skill 声明的是多步分析链
+        # (日报四次工具、退款归因五步),买家侧那个 3 步预算装不下 —— 实测参谋会
+        # 在「差评佐证」那一步截断,要店主再追一句「继续」才补完。
+        # **声明的流程比预算长,流程就永远走不完**,而这不是模型的问题。
+        self.engine.max_react_steps = settings.seller_max_react_steps
         self.router = SellerRouter(self.engine.client, self.engine.model)
         self.last_agent_key: str = SELLER_DEFAULT   # 供外部只读查询"上一轮落到哪个画像"
 

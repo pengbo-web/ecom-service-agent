@@ -395,9 +395,17 @@ class EcomAgent:
         self.memory_manager.update_short_term(self.raw_messages[-6:],
                                               all_messages=self.raw_messages)
 
-        self.raw_messages.append(
-            {"role": "assistant", "content": result.model_dump_json()}
-        )
+        # 去重:_react_loop 已经在 raw_messages 末尾追加了一条纯文本 assistant
+        # 消息;这里用 reply pipeline 润色后的 final_text 原地替换它,保证历史
+        # 里记录的是用户实际看到的版本,同时避免每轮存两条 assistant 消息。
+        if (self.raw_messages
+                and self.raw_messages[-1].get("role") == "assistant"
+                and "tool_calls" not in self.raw_messages[-1]):
+            self.raw_messages[-1]["content"] = final_text
+        else:
+            self.raw_messages.append(
+                {"role": "assistant", "content": final_text}
+            )
 
         _budget = (settings.context_window_tokens - settings.max_output_tokens
                    - settings.context_safety_buffer)
@@ -940,7 +948,25 @@ class EcomAgent:
     @classmethod
     def _requires_human_from_text(cls, text: str) -> bool:
         """回复文案里命中转人工话术即视为需要转人工,信号来源与旧版(读同一段
-        文字判断)实质相同,只是不再为"读它"单花一次 LLM 调用。"""
+        文字判断)实质相同,只是不再为"读它"单花一次 LLM 调用。
+
+        **卖家侧一律不判。** 「转人工」是买家侧的概念——把买家会话交给人工坐席;
+        店主跟参谋说话没有这个流程,参谋也没有可交接的对象。
+
+        不加这条会出一个自指的怪圈,实测撞到了:参谋的服务质量报告里本来就要写
+        「process-return 成功率 100%,**转人工率** 0%」——而「转人工」正好是
+        「转人工率」的子串,于是**参谋一提到这个指标,这一轮就被记成"它自己转人工
+        了"**。轨迹落 `handoff`,回头又被 `service_quality` 统计成卖家 skill 的
+        转人工率,而那个数字再次进入下一份报告。一个指标把自己算了进去。
+
+        实测后果:`refund-attribution` 的转人工率被算成 0.50。当前没炸是因为
+        `anomaly_scan` 有 `min_samples=5` 兜着(它只有 2 条轨迹)——样本一多就是
+        一条"参谋转人工率 50%,超告警线 40%"的假警报,而它描述的事情根本不存在。
+        """
+        from app.agent.runtime_context import ACTOR_SELLER, get_current_actor
+
+        if get_current_actor() == ACTOR_SELLER:
+            return False
         t = text or ""
         return any(marker in t for marker in cls._HUMAN_HANDOFF_MARKERS)
 

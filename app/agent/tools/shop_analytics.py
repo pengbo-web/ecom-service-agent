@@ -55,6 +55,26 @@ _DATA_SCOPE = (
     "请勿把「对话量远超订单量」这类比例失衡当成经营异常,它更可能是渠道口径差异。"
 )
 
+#: 服务质量只统计**真实买家流量**。
+#:
+#: **实测踩过一次,而且直接骗到了店主。** 走查时参谋在日报里写:
+#:
+#:     track-order 技能工具失败率:当前值 100%,告警线 30%(超出 70%)
+#:     建议:立即核查 track-order 技能配置
+#:
+#: 查那 13 次失败的来源:**13/13 全是 `dev`** —— 我自己走查时反复查同一个不属于
+#: 当前用户的订单号,归属校验按设计拒绝。真实买家 0 条。也就是说参谋拿着一批
+#: 压测/走查数据,让店主去修一份一个字都没写错的技能。
+#:
+#: 看门狗那一侧(`skill_watchdog.check_canaries`)早就按 live 过滤了,这一侧漏了
+#: ——同一批脏数据,一条路挡住、孪生路没挡。告警比自动回滚更需要挡:回滚至少
+#: 还有可信下限兜着,而一条假警报是直接送到人眼前的。
+_TRAFFIC_SCOPE = (
+    "服务质量口径:只统计真实买家流量(source=live),已排除压测/离线评测/人工走查"
+    "产生的轨迹。若某 skill 的 total 为 0,是这个窗口内没有真实买家用到它,"
+    "**不是它不工作**——不要据此判定异常或建议整改。"
+)
+
 
 def shop_overview(window_days: int = 7) -> dict:
     """店铺经营总览:订单量 / GMV / 客单价 / 退款率 / 取消率 / 咨询会话数。
@@ -171,17 +191,25 @@ def service_quality(window_days: int = 7) -> dict:
     过 skill 时才有行,当分母会失真)。是否"有情绪问题"由 anomaly.py 按阈值
     判定,本方法只负责把统计口径摆出来,不下结论。
     """
+    from app.agent.runtime_context import DECISION_SOURCES
+
+    sources = sorted(DECISION_SOURCES)
     conn = get_db().connect()
     try:
         w = _window_clause(window_days)
+        # COALESCE:`source` 列是后加的,历史行回填成 'unknown';但别的写入路径仍
+        # 可能留下 NULL,而 NULL 不等于任何值、会被 IN 静默漏掉 —— 那些行既不算
+        # live 也不算 unknown,凭空从统计里消失(与 database.skill_trace_counts
+        # 同一条口径)。
         rows = conn.execute(
             f"SELECT skill_name, COUNT(*) AS total, "
             f"  SUM(CASE WHEN outcome = ? THEN 1 ELSE 0 END) AS ok, "
             f"  SUM(CASE WHEN outcome = ? THEN 1 ELSE 0 END) AS tool_error, "
             f"  SUM(CASE WHEN outcome = ? THEN 1 ELSE 0 END) AS human "
             f"FROM skill_traces WHERE created_at >= {w} "
+            f"  AND COALESCE(source, 'unknown') IN ({','.join('?' * len(sources))}) "
             f"GROUP BY skill_name ORDER BY total DESC",
-            (OUTCOME_SUCCESS, OUTCOME_TOOL_ERROR, OUTCOME_HANDOFF)).fetchall()
+            (OUTCOME_SUCCESS, OUTCOME_TOOL_ERROR, OUTCOME_HANDOFF, *sources)).fetchall()
         skills = []
         for r in rows:
             total = int(r["total"] or 0)
@@ -197,7 +225,10 @@ def service_quality(window_days: int = 7) -> dict:
                 "other": total - ok - tool_error - human,
             })
         emotion = get_db().emotion_distribution(window_days=window_days)
+        # traffic_scope 必须进返回值,不能只写在 docstring 里:参谋 Agent 只看得到
+        # 工具返回的 JSON,口径不在里面它就无从得知(与 shop_overview 的
+        # data_scope 同一条理由)。
         return {"success": True, "window_days": int(window_days), "skills": skills,
-                "emotion": emotion}
+                "emotion": emotion, "traffic_scope": _TRAFFIC_SCOPE}
     finally:
         conn.close()

@@ -47,9 +47,14 @@ def scan(tmp_path, monkeypatch):
         conn = db.connect()
         try:
             for i in range(n):
+                # `source='live'` 是必需的:`service_quality` 现在只统计真实买家
+                # 流量(压测/走查数据曾被参谋报成"track-order 失败率 100%"的假
+                # 警报)。裸 INSERT 不带这一列会留 NULL → 按 unknown 过滤掉,
+                # 本文件全部用例都会读到空统计。这里测的是**窗口语义**,
+                # 用例造的轨迹在语义上就是真实流量。
                 conn.execute(
                     "INSERT INTO skill_traces (session_id, skill_name, outcome, "
-                    "created_at) VALUES (?, ?, ?, ?)",
+                    "created_at, source) VALUES (?, ?, ?, ?, 'live')",
                     (f"s-{skill_name}-{days_ago}-{i}", skill_name, outcome,
                      _ago(days_ago)))
             conn.commit()
