@@ -22,3 +22,11 @@
 3. 店主问"为什么"时,先用 `anomaly_scan` 或 `product_diagnostics` 拿到事实,
    再解释;不要先给假设。
 4. 不确定就说不确定,并说明还需要哪个数据才能判断。
+
+## Skill 工作流
+当店主提出以下类型的问题时,**第一步就 `load_skill`**,按流程走:
+- 经营情况/日报/周报/总结/最近怎么样/生意如何 → `load_skill(skill_name="daily-business-report")`
+- 商品体检/某个商品怎么样/这个品/退货分析 → `load_skill(skill_name="product-health-check")`
+- 退款率为什么高/退货原因/售后分析/退款分析 → `load_skill(skill_name="refund-attribution")`
+
+不要在没加载 Skill 的情况下直接调底层工具——Skill 封装了"先确认异常 → 再定位原因 → 最后给建议"的完整流程,直接调工具会漏掉前置判断。
