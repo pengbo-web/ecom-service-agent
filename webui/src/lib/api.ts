@@ -704,6 +704,34 @@ export async function promoteSkill(
   return r.json();
 }
 
+/** 一份技能的正文(界面上点开看)。
+ *
+ * 页面此前只有名字和 description —— 而 description 只是 frontmatter 里的一句话,
+ * 真正决定客服说什么的是正文。待审候选那一栏尤其要紧:操作者要在没看过内容的
+ * 前提下点「转正上线」,而那个按钮会立刻把这份正文推给线上会话。
+ */
+export type SkillContent = {
+  name: string; variant: "live" | "candidate"; path: string;
+  content: string; attachment_text: string; files: string[];
+  version: number; fingerprint: string;
+  // 披露,不是错误:界面上少显示了一段正文,与正文本来就那么长,看起来一样。
+  truncated: boolean; over_cap: boolean;
+  unreadable: string[]; escaped: string[];
+};
+
+export async function getSkillContent(
+  name: string, variant: "live" | "candidate" = "live"
+): Promise<SkillContent> {
+  const r = await adminFetch(
+    `/api/admin/skills/${encodeURIComponent(name)}/content?variant=${variant}`);
+  if (!r.ok) {
+    let detail = "";
+    try { detail = (await r.json()).detail || ""; } catch { /* 忽略非 JSON 响应体 */ }
+    throw new Error(detail || `读取技能正文失败 (${r.status})`);
+  }
+  return r.json();
+}
+
 export async function rejectSkill(name: string): Promise<{ success: boolean; archived_to: string }> {
   const r = await adminFetch(
     `/api/admin/skills/${encodeURIComponent(name)}/reject`, { method: "POST" });

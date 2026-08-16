@@ -2644,6 +2644,61 @@ def create_app(session_manager: Optional[SessionManager] = None,
             raise HTTPException(400, f"{r.get('reason') or '转正失败'}（{r.get('gate_note')}）")
         return {"success": True, **r}
 
+    @app.get("/api/admin/skills/{skill_name}/content",
+             dependencies=[Depends(admin_auth)])
+    async def admin_skill_content(skill_name: str, variant: str = "live"):
+        """读一份技能的正文(界面上点开看)。
+
+        **为什么必须有。** 这个页面之前只显示 skill 的**名字和 description**,
+        而 description 是 frontmatter 里的一句话——真正决定客服说什么的是正文。
+        待审候选那一栏尤其荒唐:操作者要在**没看过内容**的前提下点「转正上线」,
+        而那个按钮会立刻把这份正文推给线上会话。风险档、校验结论、门禁用例数
+        全都齐了,唯独缺了"它到底写了什么"。
+
+        `variant`:`live` 读正式目录,`candidate` 读 `_candidates/`。两边分开是
+        因为改进型候选与现行版同名,混起来会让人以为自己在看的是另一份。
+
+        安全:`skill_name` 过 `is_safe_skill_name`(候选名一路来自 LLM 生成的
+        frontmatter,素材是可被提示注入的顾客对话);正文经 `read_skill_tree`
+        读取——它是转正校验用的同一个读法,自带上限、UTF-8 容错,并会把经符号
+        链接逃出技能目录的路径记进 `escaped`。这些披露字段原样透出去:一份
+        **读不全**的正文与一份完整正文,不能在界面上长得一模一样。
+        """
+        from app.agent.skills.tree_text import read_skill_tree
+        from app.agent.skills.validator import is_safe_skill_name
+        from app.agent.skills.versioning import fingerprint_skill_dir, read_version
+        from app.scripts import promote_skill as ps
+
+        if not is_safe_skill_name(skill_name):
+            raise HTTPException(400, f"非法 skill 名,拒绝操作: {skill_name!r}")
+        if variant not in ("live", "candidate"):
+            raise HTTPException(400, f"variant 只能是 live 或 candidate: {variant!r}")
+
+        base = ps.DEFINITIONS_DIR if variant == "live" else ps.CANDIDATES_DIR
+        skill_dir = Path(base) / skill_name
+        if not (skill_dir / "SKILL.md").exists():
+            raise HTTPException(404, f"{variant} 目录下没有技能 {skill_name}")
+
+        tree = await run_in_threadpool(read_skill_tree, skill_dir)
+        return {
+            "name": skill_name,
+            "variant": variant,
+            "path": str(skill_dir / "SKILL.md"),
+            "content": tree["root_text"],
+            # 附带资料单独给:它们会随转正一起上线、被 read_skill_file 灌进模型
+            # 上下文,属于"要审的内容"的一部分,不该只在正文里看不见地存在。
+            "attachment_text": tree["attachment_text"],
+            "files": tree["files"],
+            "version": read_version(skill_dir),
+            "fingerprint": fingerprint_skill_dir(skill_dir),
+            # 下面四个是**披露**,不是错误。前端必须把它们显示出来:
+            # 界面上少显示了一段正文,和正文本来就那么长,看起来完全一样。
+            "truncated": bool(tree["file_truncated"]),
+            "over_cap": bool(tree["over_cap"]),
+            "unreadable": tree["unreadable"],
+            "escaped": tree["escaped"],
+        }
+
     @app.post("/api/admin/skills/{skill_name}/reject",
               dependencies=[Depends(admin_auth)])
     async def admin_reject_skill(skill_name: str):

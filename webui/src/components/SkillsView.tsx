@@ -6,6 +6,7 @@ import { distillSkillFromDoc, getSkillsOverview, uploadSkillBundle,
   type SkillsOverview } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { SkillContentViewer } from "@/components/skills/SkillContentViewer";
 import { RotateCcw } from "lucide-react";
 
 // 风险档 → 展示文案与配色。null 表示"判不了",必须按需人工复核呈现,
@@ -362,6 +363,7 @@ export function SkillsView() {
                   <FailureAttribution counts={data?.failure_attribution?.[s.name]}
                                       name={s.name} />
                   <div className="mt-1 line-clamp-2 text-xs text-muted-foreground">{s.description}</div>
+                  <SkillContentViewer name={s.name} variant="live" />
                   {/* 回滚是转正的对偶动作:没有它,「一键转正」就是一个**没有退路**
                       的按钮——而技能正文直接决定客服说什么,上线后发现不对必须能
                       立刻退回去,不该要求运营去登服务器。 */}
@@ -419,6 +421,11 @@ export function SkillsView() {
                 )}
                 <GateReadiness c={c} />
                 <div className="mt-1 font-mono text-[11px] text-muted-foreground">{c.path}</div>
+
+                {/* 候选这一栏比现行技能更需要它:下面那个「转正上线」会立刻把这份
+                    正文推给线上会话,而在此之前页面上关于内容只有一句 description。
+                    风险档、校验结论、门禁用例数全都齐了,唯独缺"它到底写了什么"。 */}
+                <SkillContentViewer name={c.name} variant="candidate" />
 
                 {/* 转正/驳回:改造前这两个动作只能登进服务器敲 CLI,7 步自进化闭环
                     因此断在最后一环。校验未过的候选不给转正按钮——转正会当场被
