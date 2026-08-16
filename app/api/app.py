@@ -1912,6 +1912,35 @@ def create_app(session_manager: Optional[SessionManager] = None,
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    @app.get("/api/seller/{session_id}/history", dependencies=[Depends(admin_auth)])
+    def seller_history(session_id: str):
+        """回显参谋会话已落盘的历史气泡(离开页面再回来,聊天记录还在)。
+
+        **这条一直缺着,而后端其实一直在存。** 参谋会话由独立的 `seller_sessions`
+        管理并落在 `app/sessions/seller/<sid>.json`,内容完好;但卖家侧没有对应的
+        history 端点,前端刷新后无处可读,只能从空白重来 —— 店主看到的是"聊天记录
+        丢了",实际是**存了但没人能取**。买家侧的 `/api/session/{id}/history` 早就
+        有了,这是又一处"一条路做对了,孪生路没做"。
+
+        复用买家侧同一套:`peek_messages`(只读,不建 agent)+ `reconstruct_bubbles`
+        (把带 tool_calls 的中间轮折成人看的气泡)。不另写一份 —— 两份气泡重建
+        逻辑必然漂移,而漂移的表现是"同一段对话在两个页面上长得不一样"。
+
+        `structured=False`:参谋的最终回复落盘是**纯文本**,不像买家侧那样包成
+        `{"reply": ...}` 的 JSON。用买家口径解析会把每一条回复都当成"中间思考"
+        跳过 —— 实测 4 条消息只重建出 1 个气泡(只剩用户那句)。
+
+        鉴权与 `/api/seller/chat` 一致(admin_auth + `_require_seller_console`):
+        参谋会话里有全店经营数据,不能比对话本身更容易拿到。
+        """
+        _require_seller_console()
+        from app.api.history import reconstruct_bubbles
+
+        sid = (session_id or "").strip() or "seller-default"
+        return {"session_id": sid,
+                "turns": reconstruct_bubbles(seller_sessions.peek_messages(sid),
+                                             structured=False)}
+
     # ---- 店主通知(参谋异常诊断主动推送,前端轮询)----
 
     @app.get("/api/seller/notifications", dependencies=[Depends(admin_auth)])
