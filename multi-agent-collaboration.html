@@ -1,0 +1,671 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多智能体协作系统流程图</title>
+<style>
+  :root {
+    --bg: #f8f9fa;
+    --surface: #ffffff;
+    --text: #1a1a2e;
+    --text-secondary: #555;
+    --border: #e0e0e0;
+    --accent: #3b82f6;
+    --accent-light: #dbeafe;
+    --green: #10b981;
+    --green-light: #d1fae5;
+    --orange: #f59e0b;
+    --orange-light: #fef3c7;
+    --red: #ef4444;
+    --red-light: #fee2e2;
+    --purple: #8b5cf6;
+    --purple-light: #ede9fe;
+    --gray: #6b7280;
+    --gray-light: #f3f4f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --text: #e2e8f0;
+      --text-secondary: #94a3b8;
+      --border: #334155;
+      --accent: #60a5fa;
+      --accent-light: #1e3a5f;
+      --green: #34d399;
+      --green-light: #064e3b;
+      --orange: #fbbf24;
+      --orange-light: #451a03;
+      --red: #f87171;
+      --red-light: #450a0a;
+      --purple: #a78bfa;
+      --purple-light: #2e1065;
+      --gray: #9ca3af;
+      --gray-light: #1f2937;
+    }
+  }
+  [data-theme="dark"] {
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --text: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --border: #334155;
+    --accent: #60a5fa;
+    --accent-light: #1e3a5f;
+    --green: #34d399;
+    --green-light: #064e3b;
+    --orange: #fbbf24;
+    --orange-light: #451a03;
+    --red: #f87171;
+    --red-light: #450a0a;
+    --purple: #a78bfa;
+    --purple-light: #2e1065;
+    --gray: #9ca3af;
+    --gray-light: #1f2937;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+    padding: 2rem 1rem;
+  }
+  .container { max-width: 1100px; margin: 0 auto; }
+  h1 {
+    font-size: 1.75rem;
+    font-weight: 700;
+    margin-bottom: 0.5rem;
+    color: var(--text);
+  }
+  .subtitle {
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+    margin-bottom: 2rem;
+  }
+  .section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    margin-bottom: 1.5rem;
+    overflow-x: auto;
+  }
+  .section h2 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin-bottom: 0.25rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .section h2 .badge {
+    font-size: 0.7rem;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 10px;
+    color: #fff;
+  }
+  .badge-blue { background: var(--accent); }
+  .badge-green { background: var(--green); }
+  .badge-orange { background: var(--orange); color: #1a1a2e; }
+  .badge-purple { background: var(--purple); }
+  .badge-red { background: var(--red); }
+  .section .desc {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    margin-bottom: 1rem;
+    line-height: 1.5;
+  }
+  .mermaid {
+    display: flex;
+    justify-content: center;
+    overflow-x: auto;
+    padding: 0.5rem 0;
+  }
+  .mermaid svg { max-width: 100%; height: auto; }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 1rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--border);
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+  }
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .note-box {
+    background: var(--accent-light);
+    border-left: 3px solid var(--accent);
+    padding: 0.75rem 1rem;
+    border-radius: 0 8px 8px 0;
+    margin-top: 1rem;
+    font-size: 0.85rem;
+    line-height: 1.5;
+  }
+  .note-box strong { color: var(--accent); }
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1.5rem;
+  }
+  .toc h3 { font-size: 0.95rem; margin-bottom: 0.5rem; }
+  .toc ol { padding-left: 1.5rem; }
+  .toc li {
+    font-size: 0.85rem;
+    margin-bottom: 0.25rem;
+  }
+  .toc a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .toc a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>🤖 多智能体协作系统 · 详细流程图</h1>
+<p class="subtitle">ecom-service-agent 项目的 Agent 架构与协作机制全解</p>
+
+<div class="toc">
+  <h3>目录</h3>
+  <ol>
+    <li><a href="#arch">整体架构总览</a></li>
+    <li><a href="#buyer">买家侧：编排器 + 画像切换</a></li>
+    <li><a href="#event-chain">协作链：signal → diagnosis → draft → 人工审批</a></li>
+    <li><a href="#routing">路由表与订阅机制</a></li>
+    <li><a href="#worker">协作 Worker 内部流程 (run_once)</a></li>
+    <li><a href="#shared-ctx">共享上下文：双向经验回流</a></li>
+    <li><a href="#safety">安全防线汇总</a></li>
+    <li><a href="#followup">跟进序列 (N7)</a></li>
+  </ol>
+</div>
+
+<!-- 1. 整体架构 -->
+<div class="section" id="arch">
+  <h2><span class="badge badge-blue">1</span> 整体架构总览</h2>
+  <p class="desc">系统分为三个平面：对话平面（买家/卖家实时对话）、协作平面（异步事件驱动）、共享记忆平面（跨 Agent 经验流通）。</p>
+  <div class="mermaid">
+graph TB
+  subgraph 对话平面["🗣️ 对话平面（实时）"]
+    direction TB
+    API["API 端点<br/>确定性分流"]
+    API -->|买家端点| MO["MultiAgentOrchestrator<br/>买家侧总控"]
+    API -->|卖家端点| SO["SellerOrchestrator<br/>卖家侧总控"]
+
+    MO --> R1["Router / QU<br/>意图分类"]
+    R1 --> P1["presale 售前"]
+    R1 --> P2["midsale 售中"]
+    R1 --> P3["aftersale 售后"]
+
+    SO --> R2["SellerRouter<br/>意图分类"]
+    R2 --> S1["analyst 参谋"]
+    R2 --> S2["growth 增长"]
+
+    P1 --> EA1["EcomAgent<br/>ReAct 引擎"]
+    P2 --> EA1
+    P3 --> EA1
+    S1 --> EA2["EcomAgent<br/>ReAct 引擎"]
+    S2 --> EA2
+  end
+
+  subgraph 协作平面["⚡ 协作平面（异步 Worker 进程）"]
+    direction LR
+    BUS["事件总线<br/>持久化 SQLite"]
+    BUS -->|signal.anomaly| HA["参谋处理器<br/>handle_signal"]
+    BUS -->|insight.diagnosis| HG["增长处理器<br/>handle_insight"]
+    BUS -->|action.drafts_ready| HH["人工审批闸"]
+  end
+
+  subgraph 共享记忆["💾 共享记忆平面"]
+    SC["Shared Context Pool<br/>共享上下文池"]
+    BH["Buyer Hints<br/>买家侧应答提示"]
+  end
+
+  EA1 -.->|"旁路埋点<br/>fail-soft"| BUS
+  HA -.->|写入| SC
+  SC -.->|每轮注入| SO
+  SC -.->|转化| BH
+  BH -.->|注入 system prompt| EA1
+
+  style 对话平面 fill:none,stroke:#3b82f6,stroke-width:2px
+  style 协作平面 fill:none,stroke:#f59e0b,stroke-width:2px
+  style 共享记忆 fill:none,stroke:#10b981,stroke-width:2px
+  </div>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:var(--accent)"></div>对话平面（实时）</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--orange)"></div>协作平面（异步）</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--green)"></div>共享记忆平面</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--gray)"></div>虚线 = 旁路/非阻塞</div>
+  </div>
+</div>
+
+<!-- 2. 买家侧编排器 -->
+<div class="section" id="buyer">
+  <h2><span class="badge badge-blue">2</span> 买家侧：编排器 + 画像切换</h2>
+  <p class="desc">MultiAgentOrchestrator.chat() 的一轮完整流程。核心设计：同一个 EcomAgent 引擎，按路由结果切换画像（system prompt + 工具子集）。</p>
+  <div class="mermaid">
+flowchart TD
+  START(["买家消息到达"]) --> ACTOR["set_current_actor(ACTOR_BUYER)<br/>设置当前角色 = 买家"]
+  ACTOR --> QU{"查询理解 QU<br/>是否启用？"}
+
+  QU -->|启用| QU_CALL["understanding.understand()<br/>一次 LLM 调用出 4 个结果"]
+  QU_CALL --> QU_RESULT["domain: presale/midsale/aftersale<br/>intent: 意图标签<br/>need_kb: 是否需要检索<br/>kb_query: 检索关键词"]
+  QU_RESULT --> KB_SUBMIT["KB 并发预取提交<br/>ThreadPoolExecutor.submit()"]
+  KB_SUBMIT --> PROFILE_SWITCH
+
+  QU -->|关闭| ROUTER["Router.route()<br/>传统 LLM 分类"]
+  ROUTER --> PROFILE_SWITCH
+
+  PROFILE_SWITCH["按 domain 选择画像"] --> P_CHECK{"命中哪个画像？"}
+  P_CHECK -->|presale| PRE["售前画像<br/>prompt + 工具子集"]
+  P_CHECK -->|midsale| MID["售中画像<br/>prompt + 工具子集"]
+  P_CHECK -->|aftersale| AFT["售后画像<br/>prompt + 工具子集"]
+
+  PRE --> ASSEMBLE["build_profile_prompt()<br/>风格块(店主可控) + 安全规则 + 领域正文"]
+  MID --> ASSEMBLE
+  AFT --> ASSEMBLE
+
+  ASSEMBLE --> INJECT["注入共享上下文<br/>buyer_hints（应答注意事项）"]
+  INJECT --> ENGINE["EcomAgent.chat()<br/>ReAct 循环"]
+
+  ENGINE --> REACT["🔄 ReAct 循环"]
+  REACT --> THINK["思考: 分析用户意图"]
+  THINK --> TOOL["调用工具: query_product / query_order / ..."]
+  TOOL --> OBSERVE["观察: 工具返回结果"]
+  OBSERVE --> CHECK{"需要继续？"}
+  CHECK -->|是| THINK
+  CHECK -->|否| PIPELINE
+
+  PIPELINE["回复管线 ReplyPipeline"] --> EVAL["评估器: 接地/准确/合规/完整"]
+  EVAL --> EVAL_OK{"合格？"}
+  EVAL_OK -->|否| REDRAFT["重写器: 依据工具结果修正"]
+  REDRAFT --> EVAL
+  EVAL_OK -->|是| POLISH["润色器: 小夕人设语气"]
+  POLISH --> SELECT["选择器: evaluate/redraft/polish/done"]
+  SELECT -->|done| REPLY(["返回最终回复"])
+  SELECT -->|其他| EVAL
+
+  style START fill:#dbeafe,stroke:#3b82f6,color:#1a1a2e
+  style REPLY fill:#d1fae5,stroke:#10b981,color:#1a1a2e
+  style REACT fill:#fef3c7,stroke:#f59e0b,color:#1a1a2e
+  style PIPELINE fill:#ede9fe,stroke:#8b5cf6,color:#1a1a2e
+  </div>
+  <div class="note-box">
+    <strong>关键设计：</strong>画像切换只是换 system prompt + ToolManager（工具子集），EcomAgent 的 ReAct 循环、记忆系统、回复管线、consent 门等全部硬化能力完全复用。切换开销 ≈ 0。
+  </div>
+</div>
+
+<!-- 3. 协作链 -->
+<div class="section" id="event-chain">
+  <h2><span class="badge badge-orange">3</span> 协作链：signal → diagnosis → draft → 人工审批</h2>
+  <p class="desc">完整的异步协作链路。买家会话只负责"发信号"（旁路，fail-soft），参谋与增长在独立 Worker 进程中异步处理，买家那一轮的延迟零增加。</p>
+  <div class="mermaid">
+flowchart LR
+  subgraph 买家会话热路径["买家会话（热路径）"]
+    direction TB
+    CHAT["客服对话进行中..."]
+    CHAT --> ANOMALY_DETECT["异常检测埋点<br/>anomaly_scan / 转人工信号"]
+    ANOMALY_DETECT --> PUBLISH["bus.publish()<br/>signal.anomaly<br/>（旁路, fail-soft）"]
+  end
+
+  subgraph 事件总线["事件总线（SQLite 持久化）"]
+    direction TB
+    BUS_DB[("events 表<br/>correlation_id 串联")]
+  end
+
+  subgraph Worker进程["协作 Worker 进程（--loop）"]
+    direction TB
+
+    subgraph 参谋处理["参谋处理器 handle_signal"]
+      direction TB
+      GATHER["_gather_facts()<br/>按 kind 拉事实包<br/>（只读查询, 0 LLM）"]
+      GATHER --> LLM_EXPLAIN["_llm_explain()<br/>LLM 归因<br/>（可降级）"]
+      LLM_EXPLAIN --> DIAG_OK{"LLM 可用？"}
+      DIAG_OK -->|是| CONCLUSION["诊断结论 = LLM 归因文本"]
+      DIAG_OK -->|否| DEGRADED["诊断结论 = 纯统计兜底<br/>degraded = true"]
+      CONCLUSION --> SHARE["sc.share() 写入共享上下文"]
+      DEGRADED --> SHARE
+      SHARE --> PUBLISH_DIAG["bus.publish()<br/>insight.diagnosis<br/>（不指定 target）"]
+    end
+
+    subgraph 路由表["路由表 resolve()"]
+      direction TB
+      ROUTE_CHECK{"_marketing_worthy?<br/>kind = refund_rate_high<br/>且 degraded = false"}
+    end
+
+    PUBLISH_DIAG --> ROUTE_CHECK
+    ROUTE_CHECK -->|是| GROWTH_QUEUE["投入增长队列"]
+    ROUTE_CHECK -->|否| SKIP["不投递（正常）"]
+
+    subgraph 增长处理["增长处理器 handle_insight"]
+      direction TB
+      FIND_OPP["find_opportunities()<br/>扫描 3 类商机<br/>unpaid / abandoned / stale"]
+      FIND_OPP --> DEDUPE["去重闸<br/>(user_id, order_id)<br/>已在待审队列中的跳过"]
+      DEDUPE --> APPLIES{"诊断适用？<br/>SKU 匹配？"}
+      APPLIES -->|是| DRAFT_DIAG["_llm_draft(诊断+商机)<br/>带诊断上下文"]
+      APPLIES -->|否| DRAFT_ONLY["_llm_draft(None+商机)<br/>只按商机情境"]
+      DRAFT_DIAG --> SAVE_DRAFT["draft_outreach()<br/>保存待审草稿"]
+      DRAFT_ONLY --> SAVE_DRAFT
+      SAVE_DRAFT --> PUBLISH_READY["bus.publish()<br/>action.drafts_ready"]
+    end
+
+    GROWTH_QUEUE --> FIND_OPP
+  end
+
+  subgraph 人工审批["🧑 人工审批"]
+    direction TB
+    REVIEW["店主在工作台<br/>审阅草稿"]
+    REVIEW --> ARB{"仲裁 check_outreach_allowed<br/>该买家能否接收？"}
+    ARB -->|可发| APPROVE["✅ 批准发送"]
+    ARB -->|不可发| REJECT["❌ 拦截<br/>（接管中/有工单）"]
+    APPROVE --> SEND["发送触达消息"]
+    SEND --> FOLLOWUP_RESULT["归因 Worker<br/>跟踪转化结果"]
+    FOLLOWUP_RESULT --> CONV{"转化？"}
+    CONV -->|是| EV_CONV["result.outreach_converted"]
+    CONV -->|否| EV_NO["result.outreach_no_change"]
+  end
+
+  PUBLISH_READY --> REVIEW
+
+  PUBLISH -.-> BUS_DB
+  BUS_DB -.-> GATHER
+
+  style 买家会话热路径 fill:none,stroke:#3b82f6,stroke-width:2px
+  style 事件总线 fill:none,stroke:#6b7280,stroke-width:2px
+  style Worker进程 fill:none,stroke:#f59e0b,stroke-width:2px
+  style 参谋处理 fill:#fef3c7,stroke:#f59e0b
+  style 增长处理 fill:#ede9fe,stroke:#8b5cf6
+  style 路由表 fill:#fee2e2,stroke:#ef4444
+  style 人工审批 fill:none,stroke:#10b981,stroke-width:2px
+  </div>
+  <div class="note-box">
+    <strong>三条刻意的克制：</strong><br/>
+    ① LLM 归因可降级 → 纯统计兜底，协作链不因模型抖动卡死<br/>
+    ② service_escalation 不触发营销 → 刚转人工的买家不应收到推销<br/>
+    ③ degraded 诊断不转营销 → 半成品文案不如等下一轮重扫
+  </div>
+</div>
+
+<!-- 4. 路由表 -->
+<div class="section" id="routing">
+  <h2><span class="badge badge-red">4</span> 路由表与订阅机制</h2>
+  <p class="desc">routing.py 是协作系统的"神经中枢"——决定什么事件该给谁处理。发布方只宣布"发生了什么"，收件人由路由表决定。</p>
+  <div class="mermaid">
+flowchart TD
+  subgraph 发布侧["发布侧（宣布发生了什么）"]
+    P1["客服会话 → signal.anomaly"]
+    P2["参谋 → insight.diagnosis"]
+    P3["增长 → action.drafts_ready"]
+    P4["人工 → result.outreach_sent"]
+    P5["归因 → result.outreach_converted/no_change"]
+  end
+
+  subgraph 路由表["路由表 SUBSCRIPTIONS"]
+    direction TB
+    R1["signal.anomaly<br/>→ analyst（参谋）<br/>优先级: 动态（转人工=紧急）"]
+    R2["insight.diagnosis<br/>→ growth（增长）<br/>条件: _marketing_worthy"]
+    R3["action.drafts_ready<br/>→ human（人工）<br/>无条件"]
+    R4["result.outreach_sent<br/>→ analyst（参谋）<br/>闭环回写"]
+    R5["result.*converted/no_change<br/>→ human（人工）<br/>低优先级"]
+  end
+
+  P1 --> R1
+  P2 --> R2
+  P3 --> R3
+  P4 --> R4
+  P5 --> R5
+
+  subgraph 消费闸["消费闸 GATES（消费那一刻判）"]
+    G1["growth: _marketing_paused<br/>未结人工工单 ≥ 阈值？<br/>→ 静默期不推销"]
+  end
+
+  R2 --> G1
+
+  subgraph 设计原则["设计原则"]
+    direction TB
+    DP1["订阅条件: 发布那一刻判<br/>纯内存, fail-closed<br/>判不清就不唤醒"]
+    DP2["消费闸: 消费那一刻判<br/>可读库, fail-open<br/>判不清就放行"]
+    DP3["路由表是调度不是授权<br/>加一行订阅 ≠ 多一分权限<br/>能力边界由工具子集+审批闸强制"]
+  end
+
+  style 发布侧 fill:#dbeafe,stroke:#3b82f6
+  style 路由表 fill:#fee2e2,stroke:#ef4444
+  style 消费闸 fill:#fef3c7,stroke:#f59e0b
+  style 设计原则 fill:#f3f4f6,stroke:#6b7280
+  </div>
+  <div class="note-box">
+    <strong>为什么是代码常量而不是数据库配置表？</strong>订阅条件是带业务语义的谓词（如"归因降级的诊断不转营销"），不是能塞进 SQL 的标量比较。改动频率极低（加 Agent 才动），每次改动都该配一次回归测试——正是代码而非配置的适用场景。
+  </div>
+</div>
+
+<!-- 5. Worker 内部流程 -->
+<div class="section" id="worker">
+  <h2><span class="badge badge-orange">5</span> 协作 Worker 内部流程 (run_once)</h2>
+  <p class="desc">Worker 进程每轮执行 run_once()，一次调用即可跑完整条链路。参谋消费完立即发布诊断，增长在同一轮内即可消费该诊断。</p>
+  <div class="mermaid">
+flowchart TD
+  START(["run_once() 开始"]) --> RECLAIM["_reclaim_stale(300s)<br/>回收崩溃 Worker 遗留的<br/>processing 事件"]
+  RECLAIM --> CONSUME_A["bus.consume(analyst, handle_signal)<br/>认领参谋事件"]
+
+  CONSUME_A --> CLAIM_A["claim_events(target=analyst)<br/>原子认领一批 pending 事件"]
+  CLAIM_A --> GATE_A{"消费闸检查<br/>（参谋无闸，直接放行）"}
+  GATE_A --> HANDLE_A["handle_signal(event)"]
+
+  HANDLE_A --> FACTS["_gather_facts(kind)<br/>按异常类型拉事实包"]
+  FACTS --> LLM_E["_llm_explain(anomaly, facts)<br/>LLM 归因"]
+  LLM_E --> DIAG["写共享上下文 + 发布诊断"]
+  DIAG --> INLINE_PUBLISH["同步发布 insight.diagnosis<br/>路由表判定 → 投入增长队列"]
+
+  INLINE_PUBLISH --> PARALLEL_A{"collab_parallel<br/>启用且 > 1 条？"}
+  PARALLEL_A -->|是| THREAD_A["ThreadPoolExecutor<br/>事件间并行处理"]
+  PARALLEL_A -->|否| SERIAL_A["逐条串行处理"]
+
+  THREAD_A --> CONSUME_G
+  SERIAL_A --> CONSUME_G
+
+  CONSUME_G["bus.consume(growth, handle_insight)<br/>认领增长事件<br/>（包含刚发布的诊断）"]
+  CONSUME_G --> CLAIM_G["claim_events(target=growth)"]
+  CLAIM_G --> GATE_G{"消费闸: _marketing_paused<br/>未结工单 ≥ 阈值？"}
+  GATE_G -->|拦截| SKIPPED["标记 skipped<br/>本轮不处理"]
+  GATE_G -->|放行| HANDLE_G["handle_insight(event)"]
+
+  HANDLE_G --> SCAN["扫描 3 类商机<br/>unpaid / abandoned / stale"]
+  SCAN --> DEDUP["去重闸: (user_id, order_id)"]
+  DEDUP --> RELEVANCE["相关性闸: 诊断适用此商机？"]
+  RELEVANCE --> DRAFT_LLM["_llm_draft() 并行起草<br/>L2: 商机间并行"]
+
+  DRAFT_LLM --> BUDGET{"LLM 预算<br/>是否耗尽？"}
+  BUDGET -->|是| DEGRADE_D["跳过该商机<br/>（复用异常降级路径）"]
+  BUDGET -->|否| LLM_CALL["LLM 起草触达话术<br/>（带诊断/不带诊断）"]
+  LLM_CALL --> SAVE["draft_outreach() 保存草稿"]
+  SAVE --> PUBLISH_READY["发布 action.drafts_ready<br/>→ 路由表 → 人工审批"]
+
+  PUBLISH_READY --> DONE(["返回统计<br/>{claimed, done, failed, skipped}"])
+
+  style START fill:#dbeafe,stroke:#3b82f6,color:#1a1a2e
+  style DONE fill:#d1fae5,stroke:#10b981,color:#1a1a2e
+  style HANDLE_A fill:#fef3c7,stroke:#f59e0b
+  style HANDLE_G fill:#ede9fe,stroke:#8b5cf6
+  style GATE_G fill:#fee2e2,stroke:#ef4444
+  </div>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:var(--orange)"></div>参谋处理（L1 事件间并行）</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--purple)"></div>增长处理（L2 商机间并行）</div>
+    <div class="legend-item"><div class="legend-dot" style="background:var(--red)"></div>消费闸（状态拦截）</div>
+  </div>
+  <div class="note-box">
+    <strong>两层并行可叠加：</strong>L1 并行的是"N 条事件"，L2 并行的是"一条诊断下的 N 个商机"。并发度共享同一个 <code>collab_max_parallel</code> 上限（而非各设一个），避免 8×8=64 线程同时写 SQLite 互相等锁。
+  </div>
+</div>
+
+<!-- 6. 共享上下文 -->
+<div class="section" id="shared-ctx">
+  <h2><span class="badge badge-green">6</span> 共享上下文：双向经验回流</h2>
+  <p class="desc">参谋的诊断结论通过两条路径流通：① 向上注入卖家画像（店主下次开口时读到）；② 转化为买家侧应答提示（客服下次遇到该商品时更谨慎）。</p>
+  <div class="mermaid">
+flowchart TD
+  subgraph 参谋产出["参谋产出"]
+    DIAG["诊断结论<br/>{kind, subject, conclusion, facts, degraded}"]
+  end
+
+  DIAG --> PATH1["路径 ① → 卖家侧注入"]
+  DIAG --> PATH2["路径 ② → 买家侧转化"]
+
+  subgraph 卖家侧["路径① 卖家侧（SellerOrchestrator）"]
+    direction TB
+    SC_SHARE["sc.share(KEY_DIAGNOSIS, subject)<br/>写入共享上下文池"]
+    SC_SHARE --> SC_STORE[("Shared Context<br/>SQLite")]
+    SC_STORE --> SC_READ["sc.recent_entries(limit=5)<br/>每轮读取最近 5 条"]
+    SC_READ --> SC_RENDER["render_context_block()<br/>带数据围栏渲染"]
+    SC_RENDER --> SC_INJECT["拼到画像 prompt 后面<br/>参谋/增长都能读到"]
+  end
+
+  subgraph 买家侧["路径② 买家侧（buyer_hints）"]
+    direction TB
+    BH_READ["recent_entries(KEY_DIAGNOSIS)<br/>读取商品级诊断"]
+    BH_READ --> BH_MATCH{"当前咨询商品<br/>== 诊断商品？"}
+    BH_MATCH -->|是| BH_KIND["hint_for(kind, category)<br/>查固定文案表"]
+    BH_MATCH -->|否| BH_SHOP{"店铺级诊断？<br/>subject == shop"}
+    BH_SHOP -->|是| BH_KIND
+    BH_SHOP -->|否| BH_SKIP["不注入"]
+    BH_KIND --> BH_RENDER["render_buyer_hints()<br/>渲染应答注意事项"]
+    BH_RENDER --> BH_INJECT["注入买家 system prompt<br/>「不要向顾客复述这段话」"]
+  end
+
+  PATH1 --> SC_SHARE
+  PATH2 --> BH_READ
+
+  style 参谋产出 fill:#fef3c7,stroke:#f59e0b
+  style 卖家侧 fill:none,stroke:#10b981,stroke-width:2px
+  style 买家侧 fill:none,stroke:#3b82f6,stroke-width:2px
+  </div>
+  <div class="note-box">
+    <strong>为什么不能直接把诊断注入买家上下文？</strong><br/>
+    诊断里的 <code>conclusion</code> 是 LLM 写给店主的经营判断（如"退款率 30%，主因尺码不准"）。如果直接注入买家 prompt，客服可能说出"我们这款鞋退款率确实偏高"——把内部经营数据泄露给顾客。<br/><br/>
+    <strong>解决方案：</strong>buyer_hints 走确定性映射——按异常 kind 查固定文案表，产出的提示里没有任何数字、不含诊断结论原文。泄露风险从"靠模型自觉"变成"结构上不可能"。
+  </div>
+</div>
+
+<!-- 7. 安全防线 -->
+<div class="section" id="safety">
+  <h2><span class="badge badge-red">7</span> 安全防线汇总</h2>
+  <p class="desc">多 Agent 协作中的多层安全机制。每层独立生效，互为兜底。</p>
+  <div class="mermaid">
+flowchart TD
+  subgraph 对话侧防线["对话侧防线"]
+    direction TB
+    S1["安全规则 SAFETY_RULES<br/>不代客下单/不编造/不承诺时效<br/>拼接顺序: 风格块 → 安全规则 → 领域正文"]
+    S2["回复管线 ReplyPipeline<br/>评估器检查草稿是否接地<br/>不基于工具结果 = 不合格"]
+    S3["承诺守卫 CommitmentGuard<br/>防止 LLM 擅自承诺退款/时效"]
+    S4["consent 门<br/>风险动作需用户确认"]
+  end
+
+  subgraph 协作侧防线["协作侧防线"]
+    direction TB
+    C1["路由表是调度不是授权<br/>加订阅 ≠ 加权限"]
+    C2["消费闸 GATES<br/>静默期不推销"]
+    C3["相关性闸<br/>诊断必须匹配商机 SKU"]
+    C4["去重闸<br/>(user_id, order_id) 不重复排队"]
+  end
+
+  subgraph 投递侧防线["投递侧防线"]
+    direction TB
+    D1["人工审批闸<br/>草稿必须经人批准才能发"]
+    D2["冲突仲裁 check_outreach_allowed<br/>接管中/有工单 = 不可发"]
+    D3["数据围栏 render_context_block<br/>防止注入攻击"]
+  end
+
+  subgraph 兜底机制["兜底机制"]
+    direction TB
+    F1["参谋工具全只读<br/>没有任何写动作"]
+    F2["营销产物恒为待审草稿<br/>不能自己发"]
+    F3["LLM 预算上限<br/>防跑飞"]
+    F4["fail-soft 全程<br/>任何一环失败不打断主链路"]
+  end
+
+  style 对话侧防线 fill:#dbeafe,stroke:#3b82f6
+  style 协作侧防线 fill:#fef3c7,stroke:#f59e0b
+  style 投递侧防线 fill:#fee2e2,stroke:#ef4444
+  style 兜底机制 fill:#f3f4f6,stroke:#6b7280
+  </div>
+</div>
+
+<!-- 8. 跟进序列 -->
+<div class="section" id="followup">
+  <h2><span class="badge badge-purple">8</span> 跟进序列 (N7)</h2>
+  <p class="desc">一次触达不是终点——买家没反应时，系统自动推进跟进链，但产物仍然是待审草稿（不自动发送）。</p>
+  <div class="mermaid">
+flowchart TD
+  START(["草稿被批准并发送"]) --> START_FU["start_followup()<br/>创建跟进链<br/>(user_id, kind, max_steps)"]
+  START_FU --> WAIT["等待 interval_hours"]
+  WAIT --> CHECK_OPEN{"商机还开着？<br/>_opportunity_still_open"}
+
+  CHECK_OPEN -->|已关闭| STOP1["停止: converted<br/>商机已消失"]
+  CHECK_OPEN -->|还开着| CHECK_CONV{"上次触达已转化？<br/>_last_touch_converted"}
+
+  CHECK_CONV -->|已转化| STOP2["停止: converted<br/>触达已生效"]
+  CHECK_CONV -->|未转化| CHECK_SERVICE{"check_outreach_allowed<br/>买家能接收？"}
+
+  CHECK_SERVICE -->|接管中/有工单| STOP3["停止: in_service<br/>人工处理中"]
+  CHECK_SERVICE -->|可接收| CHECK_STEPS{"达到 max_steps？"}
+
+  CHECK_STEPS -->|是| STOP4["停止: max_steps<br/>达到步数上限"]
+  CHECK_STEPS -->|否| DRAFT_NEXT["_llm_draft() 起草下一步话术"]
+  DRAFT_NEXT --> SAVE_DRAFT["保存为待审草稿"]
+  SAVE_DRAFT --> HUMAN["人工审批"]
+  HUMAN --> APPROVED{"批准？"}
+  APPROVED -->|是| SEND["发送"]
+  APPROVED -->|否| REJECTED["丢弃"]
+  SEND --> ADVANCE["advance_followup()<br/>step + 1"]
+  ADVANCE --> WAIT
+
+  style START fill:#dbeafe,stroke:#3b82f6,color:#1a1a2e
+  style STOP1 fill:#fee2e2,stroke:#ef4444,color:#1a1a2e
+  style STOP2 fill:#fee2e2,stroke:#ef4444,color:#1a1a2e
+  style STOP3 fill:#fee2e2,stroke:#ef4444,color:#1a1a2e
+  style STOP4 fill:#fee2e2,stroke:#ef4444,color:#1a1a2e
+  style DRAFT_NEXT fill:#ede9fe,stroke:#8b5cf6
+  </div>
+  <div class="note-box">
+    <strong>终止条件全部确定性：</strong>商机消失、已转化、人工接管中、达到步数上限——全部由已落库的状态判定，不问模型。自动化只负责调度，不负责发送。
+  </div>
+</div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'default',
+    flowchart: {
+      useMaxWidth: true,
+      htmlLabels: true,
+      curve: 'basis',
+      nodeSpacing: 30,
+      rankSpacing: 40
+    },
+    themeVariables: {
+      fontSize: '13px',
+      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
+    }
+  });
+</script>
+</body>
+</html>
