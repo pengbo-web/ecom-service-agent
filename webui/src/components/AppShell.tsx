@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
 export type View = "shop" | "chat" | "cart" | "orders" | "dash" | "seat" | "eval"
-  | "mem" | "skills" | "ops" | "collab" | "kb";
+  | "mem" | "skills" | "ops" | "collab" | "kb" | "analyst-chat";
 
 type Tab = { v: View; icon: React.ReactNode; label: string; hint: string };
 
@@ -32,6 +32,7 @@ const GROUPS: { title: string; tabs: Tab[] }[] = [
   {
     title: "经营侧",
     tabs: [
+      { v: "analyst-chat", icon: <MessageSquare className="h-4 w-4" />, label: "参谋对话", hint: "与经营参谋对话式交互" },
       { v: "ops", icon: <BarChart3 className="h-4 w-4" />, label: "经营控制台", hint: "诊断 / 商机 / 触达审批" },
       { v: "collab", icon: <Network className="h-4 w-4" />, label: "多智能体协作", hint: "协作链时间线与编排规则" },
     ],

@@ -2,15 +2,27 @@ import { useCallback, useState } from "react";
 import { splitSSEFrames, type SSEEvent } from "@/lib/sse";
 import { authHeaders } from "@/lib/api";
 
-export function useChatStream(opts: { sessionId: string; userId: string; currentItemId?: string; onEvent: (e: SSEEvent) => void }) {
+export function useChatStream(opts: {
+  sessionId: string; userId: string; currentItemId?: string;
+  endpoint?: string;  // 默认 "/api/chat"(买家);参谋传 "/api/seller/stream"
+  onEvent: (e: SSEEvent) => void;
+}) {
   const [streaming, setStreaming] = useState(false);
+  const url = opts.endpoint || "/api/chat";
+  // 非默认端点(如卖家侧)走 admin_auth,需携带 X-Admin-Token
+  const isAdmin = url !== "/api/chat";
 
   const send = useCallback(async (message: string, confirm = false) => {
     setStreaming(true);
     try {
-      const resp = await fetch("/api/chat", {
+      const baseHeaders = { "Content-Type": "application/json", ...authHeaders() };
+      // 卖家端点额外携带 admin_token(与 adminFetch 同一口径)
+      const headers = isAdmin
+        ? { ...baseHeaders, ...(localStorage.getItem("admin_token") ? { "X-Admin-Token": localStorage.getItem("admin_token")! } : {}) }
+        : baseHeaders;
+      const resp = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json", ...authHeaders() },
+        headers,
         body: JSON.stringify({ session_id: opts.sessionId, message, confirm, user_id: opts.userId,
           current_item_id: opts.currentItemId || "" }),
       });
@@ -35,7 +47,7 @@ export function useChatStream(opts: { sessionId: string; userId: string; current
     } finally {
       setStreaming(false);
     }
-  }, [opts]);
+  }, [opts, url, isAdmin]);
 
   return { send, streaming };
 }

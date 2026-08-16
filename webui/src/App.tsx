@@ -12,6 +12,7 @@ import { SkillsView } from "@/components/SkillsView";
 import { OperationsView } from "@/components/OperationsView";
 import { CollabView } from "@/components/CollabView";
 import { KnowledgeView } from "@/components/KnowledgeView";
+import { AnalystChatView } from "@/components/AnalystChatView";
 import { LoginCard } from "@/components/LoginCard";
 import { adminFetch, openConversation, getUserId, setUserId, me, clearToken,
   getConfig, getToken, setToken, createUser, login, createOrder, getCart,
@@ -113,8 +114,10 @@ export default function App() {
       setView("orders");
       refreshCartCount();   // 后端下单成功后会把该商品的购物车行标记为 converted
       alert(`下单成功！订单号 ${r.order_id}（${r.status_label}），实付 ¥${r.total}`);
-    } catch {
-      alert("下单失败，请确认已登录、商品仍在售");
+    } catch (e) {
+      // 同 CartView:服务端的说明比一句通用的"下单失败"有用得多——
+      // 「已发出但未收到确认,请去我的订单查看」与「商品已下架」要买家做的事完全不同。
+      alert((e as Error)?.message || "下单失败，请确认已登录、商品仍在售");
     } finally {
       buyingRef.current = false;
       setBuying(false);
@@ -159,6 +162,7 @@ export default function App() {
       {view === "eval" && <EvalView />}
       {view === "mem" && <MemoryView sessionId={sessionId} userId={userId} />}
       {view === "skills" && <SkillsView />}
+      {view === "analyst-chat" && <AnalystChatView sessionId={`seller-${authedUser || "default"}`} />}
       {view === "ops" && <OperationsView />}
       {view === "collab" && <CollabView />}
       {view === "kb" && <KnowledgeView />}
