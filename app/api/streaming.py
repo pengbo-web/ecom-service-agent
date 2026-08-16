@@ -1,5 +1,6 @@
 """把阻塞式 agent.chat() 桥接成 SSE 事件生成器（W2 tracer + W3 guardrails/consent 可选）。"""
 
+import contextvars
 import json
 import queue
 import threading
@@ -81,7 +82,19 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
                         session_id: str = "", guard_pipeline=None,
                         hitl=None, confirm: bool = False,
                         hmdp_token: str = "",
-                        current_item_id: str = "") -> Iterator[dict]:
+                        current_item_id: str = "",
+                        traffic_source: str | None = None) -> Iterator[dict]:
+    """`traffic_source`:本轮流量来源,**显式传参,不靠 contextvar 传过来**。
+
+    踩过的坑:端点返回 `StreamingResponse` + **同步**生成器,Starlette 用
+    `iterate_in_threadpool` 驱动它 —— 每次 `next()` 都在一份新拷贝的上下文里跑,
+    生成器体内 `yield` 之前设的 contextvar,下一次恢复时已经没了。于是带
+    `X-Traffic-Source: loadtest` 打一轮,轨迹照样落成 `live`,这个头等于没有
+    (实测五种取值全部落 live)。
+
+    与下面那两句 `set_current_token` / `set_current_item` 是同一类问题的同一种
+    解法:**跨执行边界的东西显式带过去,别指望隐式上下文。**
+    """
     q: "queue.Queue" = queue.Queue()
 
     # 本轮授权的风险动作:显式 confirm 标志,或用户这轮说了确认语(退款/成交等才放行)
@@ -335,6 +348,12 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
         set_current_token(hmdp_token or None)
         from app.agent.runtime_context import set_current_item
         set_current_item(current_item_id or None)
+        # 流量来源:轨迹就是在这个线程里落库的,在这里设才作数(见函数 docstring)。
+        # 传 None 时不动它 —— 别把上游可能已经设好的值(比如评测沙箱的 eval)
+        # 覆盖成默认的 live。
+        if traffic_source:
+            from app.agent.runtime_context import set_traffic_source
+            set_traffic_source(traffic_source)
         real_client = getattr(agent, "client", None)
         agent.event_sink = sink
         try:
@@ -359,7 +378,85 @@ def run_agent_streaming(agent, user_input: str, tracer=None,
             agent.event_sink = None
             q.put(_SENTINEL)
 
-    threading.Thread(target=worker, daemon=True).start()
+    # **把请求上下文一并带进工作线程。** `threading.Thread` 不继承 contextvar,
+    # 于是线程里读到的全是默认值 —— 本文件里那句 `set_current_user(...)`
+    # (标着 P0-1)正是为此手工补的。流量来源(`X-Traffic-Source`)同样是在端点
+    # 里设的:不带过来的话,压测流量会以默认值 `live` 落进 skill_traces,而看门狗
+    # 拿它做自动回滚判定。
+    #
+    # copy_context 是**纯增量**的:它只给线程一个起始快照,线程内既有的显式
+    # set_* 照常执行并覆盖它,所以不会改变任何现有行为。
+    threading.Thread(target=contextvars.copy_context().run,
+                     args=(worker,), daemon=True).start()
+
+    while True:
+        event = q.get()
+        if event is _SENTINEL:
+            yield {"type": "done"}
+            return
+        yield event
+
+
+# ---- 卖家侧 SSE 流式对话 ----
+#
+# 与买家侧 run_agent_streaming() 平行的简化版本。差异:
+# - 无 guard_pipeline(店主是管理者,不需要输出护栏)
+# - 无 consent/confirm 流程(参谋只做只读分析,不触发风险动作)
+# - 无 HITL 转人工(店主不需要转接自己)
+# - 无增量脱敏(经营数据不含买家 PII)
+# 复用同一个 queue-bridge 模式:orch.chat() 在子线程阻塞执行,通过
+# event_sink 回调将 progress/stage/tool_call 等事件推入队列,主线程
+# 从队列消费并 yield SSE 帧。reply 和 metadata 由 _run() 在 chat()
+# 返回后显式推入(与现有 /api/seller/chat 的做法一致)。
+
+
+def run_seller_streaming(orch, message: str, session_id: str,
+                          lock) -> Iterator[dict]:
+    """卖家侧 SSE 流式对话(参谋/增长)。
+
+    参数:
+        orch: SellerOrchestrator 实例(由 seller_sessions.get_or_create 返回)
+        message: 店主本轮输入
+        session_id: 卖家会话 ID(仅用于错误日志,不做 HITL/consent 判断)
+        lock: 会话锁(seller_sessions.get_lock 返回,防同一会话并发)
+
+    事件协议与买家侧一致(progress/stage/route/tool_call/reply/metadata/done),
+    前端可复用同一 SSE 解析器(lib/sse.ts 的 splitSSEFrames)。
+    """
+    q: "queue.Queue" = queue.Queue()
+
+    def sink(ev: dict) -> None:
+        """event_sink 回调:引擎执行期间的 progress/stage/tool_call/route
+        等事件经此推入队列。reply 和 metadata 由 _run() 在 chat() 返回后
+        显式推入——orch.chat() 本身不发这两类事件。"""
+        q.put(ev)
+
+    def _run():
+        with lock:
+            orch.event_sink = sink
+            try:
+                result = orch.chat(message)
+                # SellerOrchestrator.chat() 返回 CustomerServiceResponse
+                # pydantic 对象(与买家侧 streaming.py 的 result.reply 同一
+                # 读法),result.reply 是字符串。
+                q.put({"type": "reply", "content": result.reply})
+                q.put({"type": "metadata",
+                       "agent_key": getattr(orch, "last_agent_key", "analyst")})
+            except Exception as exc:  # noqa: BLE001
+                q.put({"type": "error", "message": str(exc)})
+            finally:
+                orch.event_sink = None
+            try:
+                orch.save()
+            except Exception:  # noqa: BLE001 落盘失败不吞掉已生成的回复
+                import logging
+                logging.getLogger(__name__).exception(
+                    "卖家会话落盘失败 sid=%s", session_id)
+        q.put(_SENTINEL)
+
+    # 同上:卖家侧编排也跑在裸线程里,上下文要带过去。
+    threading.Thread(target=contextvars.copy_context().run,
+                     args=(_run,), daemon=True).start()
 
     while True:
         event = q.get()

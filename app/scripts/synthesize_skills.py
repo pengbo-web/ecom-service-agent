@@ -238,7 +238,10 @@ def main() -> None:
         except ValueError:
             print(f"忽略非法参数: {sys.argv[1]}，使用默认 limit=50")
 
-    samples = get_db().list_recent_archives(limit)
+    # 只用可当作真实语料的归档:压测/评测对话蒸馏出来的 skill 是在学自己的
+    # 回声(见 runtime_context.SAMPLING_SOURCES)。
+    from app.agent.runtime_context import SAMPLING_SOURCES
+    samples = get_db().list_recent_archives(limit, sources=list(SAMPLING_SOURCES))
     if not samples:
         print("没有可用的归档会话样本，退出。")
         return
@@ -280,6 +283,7 @@ def main() -> None:
             trace_cap = limit * 4
             failed_traces = get_db().list_skill_traces(
                 outcomes=["handoff", "tool_error"], limit=trace_cap,
+                sources=list(SAMPLING_SOURCES),
             )
             # 归因分层:**只让可修的信号回流。** 这一段此前只有一道过滤
             # (纯基础设施故障),现在推广到三类 + 一个"判不出"。

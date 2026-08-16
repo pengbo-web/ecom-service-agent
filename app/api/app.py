@@ -51,6 +51,38 @@ _DIST_DIR = _WEB_DIR / "dist"
 # 这个常量,保证"披露的数字"与"实际查询用的数字"不会走偏。
 _TRACE_WINDOW = 500
 
+
+def _resolve_traffic_source(header_value: str | None) -> str:
+    """把请求头解析成流量来源。**只接受"降级",不接受自称 live。**
+
+    默认已经是 `live`(见 `runtime_context` 里 SOURCE_* 的注释),所以这个头唯一
+    的合法用途是让压测/评测/走查脚本把自己标出来。反过来若允许请求方把任意流量
+    标成 `live`,这个字段就变成一个**可伪造的"真实性证明"**——而看门狗正是拿它
+    做自动回滚判定的。拼错的值也一律忽略,不静默变成一个新来源。
+    """
+    from app.agent.runtime_context import SOURCE_LIVE, TRAFFIC_SOURCES
+
+    value = (header_value or "").strip().lower()
+    if value and value != SOURCE_LIVE and value in TRAFFIC_SOURCES:
+        return value
+    return SOURCE_LIVE
+
+
+def _mark_traffic_source(header_value: str | None) -> str:
+    """解析并就地设置;**返回解析结果**,供调用方带进别的执行上下文。
+
+    为什么要有返回值:`/api/chat` 返回的是 `StreamingResponse`,真正干活的生成器
+    **在端点函数返回之后**才被消费,跑在另一个 ASGI 上下文里 —— 端点体内设的
+    contextvar 到不了那里。实测:带 `X-Traffic-Source: loadtest` 打一轮,轨迹
+    照样落成 `live`,这个头等于没有。所以端点把结果作为**普通字符串**捕获进闭包,
+    由生成器自己再设一次。
+    """
+    from app.agent.runtime_context import set_traffic_source
+
+    value = _resolve_traffic_source(header_value)
+    set_traffic_source(value)
+    return value
+
 # 上传技能包的体积上限(压缩包本身,解压后另有 bundle 模块的三重上限)
 _MAX_UPLOAD_BYTES = 5_000_000
 _UPLOAD_CHUNK_BYTES = 65536   # 分块读上传体的块大小(配合上限,避免整包先进内存)
@@ -1075,6 +1107,13 @@ def create_app(session_manager: Optional[SessionManager] = None,
 
     @app.post("/api/chat")
     def chat(req: ChatRequest, request: Request):
+        # 流量来源标注:压测/走查脚本带 `X-Traffic-Source` 头把自己的流量标出来,
+        # 免得它被算进实战成功率、被蒸馏成 skill 语料、被看门狗当成回滚依据。
+        #
+        # **只允许往"非真实"方向标,不允许自称 live。** 默认就是 live,所以这个
+        # 头唯一能做的是给自己降级;要是允许它把任意流量标成 live,这个字段就成了
+        # 一个可以被请求方伪造的"真实性证明",而看门狗恰恰要拿它做自动回滚判定。
+        _traffic_src = _mark_traffic_source(request.headers.get("X-Traffic-Source"))
         # demo 模式:仅当当前登录用户是 demo 客户(或其别名 1011)时,才注入其 hmdp 身份 →
         # 聊真实订单。其它客户(?user=xxx)按自身身份聊,不塌缩成同一 hmdp 身份。
         _demo_tokens = {str(settings.demo_hmdp_user_id): settings.demo_hmdp_token, "1011": "demo-hmdp-token-1011"}
@@ -1189,6 +1228,11 @@ def create_app(session_manager: Optional[SessionManager] = None,
         agent = manager.get_or_create(req.session_id, req.user_id)
 
         def event_stream():
+            # 流量来源**刻意不在这里设**。这是个同步生成器,Starlette 用
+            # `iterate_in_threadpool` 驱动它:每次 `next()` 都在一份新拷贝的
+            # 上下文里跑,`yield` 之前设的 contextvar 到下一次恢复就没了 ——
+            # 实测五种取值全部落成 `live`,那个头等于没有。改成显式传给
+            # `run_agent_streaming`,由真正写轨迹的那个 worker 线程自己设。
             yield _sse_frame({"type": "conversation", "conversation_id": active_id,
                               "status": "rotated" if rotated else "active"})
             # 会话级并发锁:同一会话串行(单实例进程内锁/多实例 Redis 分布式锁)
@@ -1203,6 +1247,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
                     session_id=req.session_id, guard_pipeline=guard_pipeline,
                     hitl=hitl, confirm=req.confirm, hmdp_token=req.hmdp_token,
                     current_item_id=req.current_item_id,
+                    traffic_source=_traffic_src,
                 ):
                     yield _sse_frame(event)
 
@@ -1570,10 +1615,23 @@ def create_app(session_manager: Optional[SessionManager] = None,
         #
         # 走查界面时才看见这一幕:归因面板把这个一直存在的错误顶到了台面上。
         # 一次 COUNT + GROUP BY 就没有这个问题,也没有理由为它去截断。
+        #
+        # **成绩必须带口径。** 实测 976 轮里真实买家只有 62 轮,其余是 u1/压测/
+        # 评测/人工走查,而在加 source 列之前表里没有任何东西能把它们分开。
+        # 一个不带口径的"成功率 28%",读的人无从判断它讲的是线上还是压测。
+        # 这里同时给三样:全量成绩、只算真实流量的成绩、以及来源分布。
+        traces: dict[str, dict[str, int]] = {}
+        traces_live: dict[str, dict[str, int]] = {}
+        trace_sources: dict[str, int] = {}
         try:
-            traces = get_db().skill_trace_counts()
+            from app.agent.runtime_context import DECISION_SOURCES
+
+            db = get_db()
+            traces = db.skill_trace_counts()
+            traces_live = db.skill_trace_counts(sources=list(DECISION_SOURCES))
+            trace_sources = db.skill_trace_source_counts()
         except Exception:  # noqa: BLE001
-            traces = {}
+            traces, traces_live, trace_sources = {}, {}, {}
 
         # 失败归因:**这个 skill 的失败里,有多少根本不该算在它头上。**
         #
@@ -1612,6 +1670,14 @@ def create_app(session_manager: Optional[SessionManager] = None,
                 "limit": 0,   # 0 = 不截窗口(全时段聚合)
                 "note": "全时段统计(COUNT + GROUP BY,不截窗口)",
             },
+            # 只算真实流量的成绩,以及全库来源分布。前端据此在成功率旁边写清口径:
+            # 一个 28% 到底是真实买家打出来的还是压测打出来的,必须一眼能看出来。
+            "traces_live": traces_live,
+            "trace_sources": trace_sources,
+            "trace_sources_note": (
+                "live=真实买家/店主 · loadtest=压测 · eval=离线评测/门禁沙箱 · "
+                "simulated=多轮模拟 · dev=人工走查 · unknown=source 字段加上之前的历史行"
+                "(判不出,不补成 live)。看门狗的自动转正/回滚只认 live。"),
             "failure_attribution": failure_attribution,
             "failure_attribution_note": (
                 "失败轨迹按可修性分类:knowledge_gap=skill 缺知识(唯一会回流自改进的一类)/ "

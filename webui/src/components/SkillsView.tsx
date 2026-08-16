@@ -121,6 +121,62 @@ function FailureAttribution({ counts, name }:
   );
 }
 
+/** 这个成功率是**谁打出来的**。
+ *
+ * 实测 976 轮轨迹里真实买家只有 62 轮，其余是测试固定用户、压测、评测沙箱、
+ * 人工走查 —— 而在 `source` 字段落地之前，表里没有任何东西能把它们分开。
+ * 一个不带口径的「实战成功率 28%」，读的人无从判断它讲的是线上还是压测，
+ * 而看门狗恰恰拿同一批数据做自动回滚判定。
+ *
+ * 真实流量占比越低，这个数字越不该被当作线上指标读 —— 所以低占比时给警示色。
+ * 后端没给这个字段（老版本）时整行不显示，不猜。
+ */
+function TrafficScope({ all, liveMap, name }:
+  { all: Record<string, number>;
+    liveMap?: Record<string, Record<string, number>>; name: string }) {
+  // 判据是**整张表在不在**，不是这个 skill 的条目在不在。
+  // 二者混为一谈会让"这个 skill 真实流量为 0"被当成"后端没给字段"而整行不显示——
+  // 而那恰恰是最该显示的一种情况(成功率完全由压测/走查构成)。
+  if (!liveMap) return null;
+  const total = Object.values(all).reduce((a, b) => a + b, 0);
+  const liveTotal = Object.values(liveMap[name] || {}).reduce((a, b) => a + b, 0);
+  if (!total) return null;
+  const risky = liveTotal === 0 || liveTotal / total < 0.5;
+  return (
+    <span className={`ml-1.5 ${risky ? "text-amber-700 dark:text-amber-400" : ""}`}
+          data-testid={`traffic-scope-${name}`}>
+      {liveTotal === 0
+        ? "· 其中真实流量 0 轮，这个数字不能当线上指标读"
+        : `· 其中真实流量 ${liveTotal} 轮`}
+    </span>
+  );
+}
+
+/** 全库轨迹的来源构成。放在成绩取样那一行，说明整页数字的底子是什么。 */
+const SOURCE_LABEL: Record<string, string> = {
+  live: "真实", loadtest: "压测", eval: "评测",
+  simulated: "模拟", dev: "走查", unknown: "未标注",
+};
+
+function TrafficSources({ sources }: { sources?: Record<string, number> }) {
+  if (!sources || !Object.keys(sources).length) return null;
+  const total = Object.values(sources).reduce((a, b) => a + b, 0);
+  const live = sources.live || 0;
+  return (
+    <span data-testid="trace-sources">
+      ｜来源：{Object.entries(sources)
+        .sort((a, b) => b[1] - a[1])
+        .map(([k, v]) => `${SOURCE_LABEL[k] || k} ${v}`)
+        .join(" · ")}
+      {live === 0 && total > 0 && (
+        <span className="ml-1 text-amber-700 dark:text-amber-400">
+          （尚无标记为真实流量的轨迹，看门狗的自动转正/回滚因此不会动作）
+        </span>
+      )}
+    </span>
+  );
+}
+
 function RiskBadge({ risk }: { risk: string | null }) {
   const r = (risk && RISK_LABEL[risk]) || RISK_UNKNOWN;
   return <span className={`rounded px-1.5 py-0.5 text-[11px] ${r.cls}`}>{r.text}</span>;
@@ -357,6 +413,9 @@ export function SkillsView() {
                       <span className="text-xs text-muted-foreground">
                         实战成功率 {rate(counts)}（{Object.entries(counts)
                           .map(([k, v]) => `${k}:${v}`).join(" · ")}）
+                        <TrafficScope all={counts}
+                                      liveMap={data?.traces_live}
+                                      name={s.name} />
                       </span>
                     )}
                   </div>
@@ -396,6 +455,7 @@ export function SkillsView() {
               成绩取样：{data.traces_window.limit > 0
                 ? `最近 ${data.traces_window.limit} 条轨迹`
                 : "全部轨迹"} —— {data.traces_window.note}
+              <TrafficSources sources={data.trace_sources} />
             </div>
           )}
         </section>

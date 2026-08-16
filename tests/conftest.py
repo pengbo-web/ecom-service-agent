@@ -118,7 +118,15 @@ def _force_local_session_backends():
     # 造了一个只有 1 条用例的 tmp 数据集,却断言出 6 条,因为仓库里真的有 5 条
     # track-order 合成用例。测试要看到合成用例时自行 monkeypatch 这个值。
     settings.eval_synth_cases_dir = "app/evaluation/_no_synth_cases_in_tests"
+    # 流量来源 contextvar 归位。全量测试是**同一个线程串着跑的**,任何一处设了
+    # 不还,后面所有测试写出去的轨迹都带那个标 —— 实测评测沙箱裸设 `eval` 之后,
+    # 6 个看门狗 CLI 用例集体变红(它们按 live 过滤,一条都取不到),而单独跑全过。
+    # 根因已经在 Sandbox 里用 traffic_source_scope 修掉了,这一句是**第二道**:
+    # 下次再有谁忘了还,不会变成一场跨文件的排查。
+    from app.agent.runtime_context import set_traffic_source
+    set_traffic_source(None)
     yield
+    set_traffic_source(None)
     settings.eval_synth_cases_dir = _orig_synth
     settings.kb_local_fallback_enabled = _orig_fb
     settings.mcp_enabled = _orig_mcp

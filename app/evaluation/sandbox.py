@@ -103,6 +103,22 @@ class Sandbox:
 
     def run(self, case: EvalCase) -> RunTrace:
         """跑一条用例，返回采集到的运行轨迹。"""
+        # **评测跑出来的轨迹不是线上流量。** 沙箱里跑一遍用例会照常落
+        # `skill_traces`,而看门狗拿那张表算成功率、`rate < 0.6 → 自动回滚`。
+        # 门禁一次要跑两遍全量用例(候选 + 现行),也就是说**跑一次门禁就可能把
+        # 一份没问题的 skill 的成绩打下来,进而在下一轮 --check 里被自动回滚**。
+        # 实测那 41 条 `ab*`/`ev*`/`trk*` 失败正是这么来的。
+        #
+        # **用 scope 而不是裸 set:跑完要还回去。** 第一版裸设不还,生产上看不出
+        # 问题(每个请求一个上下文),但只要在同一线程里"先跑一次评测再干别的",
+        # 后面所有轨迹都会被记成 eval。实测:全量测试里 6 个看门狗 CLI 用例集体
+        # 变红,而它们单独跑全过——因为评测沙箱在它们之前跑过一次。
+        from app.agent.runtime_context import SOURCE_EVAL, traffic_source_scope
+
+        with traffic_source_scope(SOURCE_EVAL):
+            return self._run_inner(case)
+
+    def _run_inner(self, case: EvalCase) -> RunTrace:
         trace = RunTrace(case_id=case.id, turns=list(case.turns))
         session_path = self.session_path_for(case.id)
 

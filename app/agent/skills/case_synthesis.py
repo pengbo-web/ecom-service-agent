@@ -544,8 +544,14 @@ def synthesize_and_save(skill_name: str, *, db=None, skills_dir: str | None = No
             skill_md = path.read_text(encoding="utf-8")
             break
 
-    traces = db.list_skill_traces(skill_name=skill_name, limit=trace_limit)
-    archives = db.list_recent_archives(limit=archive_limit)
+    # 只从**可当作真实语料**的流量里采样(见 runtime_context.SAMPLING_SOURCES):
+    # 压测对话是模板化重复句,评测对话是我们自己写的用例 —— 拿它们蒸馏门禁用例
+    # 等于学自己的回声。`unknown`(历史行)保留,否则既有 87 条归档语料全部作废。
+    from app.agent.runtime_context import SAMPLING_SOURCES
+    sources = list(SAMPLING_SOURCES)
+    traces = db.list_skill_traces(skill_name=skill_name, limit=trace_limit,
+                                  sources=sources)
+    archives = db.list_recent_archives(limit=archive_limit, sources=sources)
 
     cases, stats = synthesize_gate_cases(
         skill_name, traces=traces, archives=archives, skill_md=skill_md,

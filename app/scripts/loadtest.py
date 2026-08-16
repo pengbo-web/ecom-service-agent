@@ -47,7 +47,11 @@ def _login(user: str) -> dict:
         get_db().create_user(user, f"压测 {user}")
     with httpx.Client(base_url=BASE, timeout=30) as c:
         tok = c.post("/api/auth/login", json={"user_id": user}).json()["token"]
-    return {"Authorization": f"Bearer {tok}"}
+    # **把压测流量标出来。** 不标的话它会以默认的 `live` 落进 skill_traces,
+    # 而看门狗拿那张表算成功率、`rate < 0.6 → 自动回滚` —— 一轮压测就能把一份
+    # 没问题的 skill 从线上换掉。实测那 41 条 `ab*`/`trk*` 失败正是这么来的。
+    # 服务端只接受"往非真实方向标",所以这个头不可能被用来伪造真实性。
+    return {"Authorization": f"Bearer {tok}", "X-Traffic-Source": "loadtest"}
 
 
 def _order_count(user: str) -> int:

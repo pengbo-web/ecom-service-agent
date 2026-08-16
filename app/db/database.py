@@ -13,6 +13,22 @@ from app.db import dialect
 logger = logging.getLogger(__name__)
 
 
+def _traffic_source() -> str:
+    """当前这一轮流量的来源(见 `app/agent/runtime_context.py` 里的长注释)。
+
+    取不到时按 `"unknown"` —— **不假装是真实流量**。写库这一侧宁可少认一条 live,
+    也不能凭空给一条来路不明的记录盖上"真实买家"的章:看门狗会拿这个章去做
+    自动回滚。
+
+    延迟导入:`app.db` 在依赖链底层,顶层 import agent 层会成环。
+    """
+    try:
+        from app.agent.runtime_context import get_traffic_source
+        return get_traffic_source()
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
 class Database:
     """业务数据层。**一份实现,两套后端**(PG3)。
 
@@ -419,6 +435,23 @@ class Database:
                         "UPDATE skill_traces SET skill_fingerprint = 'unknown' "
                         "WHERE skill_fingerprint IS NULL")
                     conn.commit()
+                # 兼容旧库:skill_traces / session_archive 补 source 列(流量来源)。
+                #
+                # **历史行一律 'unknown',不是 'live'。** 这是本次迁移里唯一要紧的
+                # 一个决定:字段加上之前那 976 轮里,真实买家只有 62 轮,其余是
+                # u1 / 压测 / 评测 / 人工走查,而当时**没有任何东西能把它们分开**。
+                # 把它们补成 'live' 等于凭空断言"这些都是真实流量",而看门狗会拿
+                # 这个断言去做自动回滚 —— 那正是加这个字段要防的事。
+                # 判不出就写判不出;要给历史行分类,走 app/scripts/backfill_traffic_source.py
+                # (显式规则表 + 先看后写)。
+                for table in ("skill_traces", "session_archive"):
+                    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+                    if "source" not in cols:
+                        conn.execute(
+                            f"ALTER TABLE {table} ADD COLUMN source TEXT DEFAULT 'unknown'")
+                        conn.execute(
+                            f"UPDATE {table} SET source = 'unknown' WHERE source IS NULL")
+                        conn.commit()
                 # 兼容旧库:outreach_drafts 补触达归因三列(N3:发送基线/判定结果/判定
                 # 时间)。outcome 老行补 'pending'——它们从未被判定过,不能默认成
                 # 任何一个具体结论,而 pending_attribution 只挑 outcome='pending' 的
@@ -735,15 +768,22 @@ class Database:
             conn.close()
 
     def archive_session(self, session_id: str, user_id: str,
-                        messages: list, summary: Optional[str]) -> None:
-        """会话冷归档:把完整会话写入 session_archive(审计/离线分析,永久留存)。"""
+                        messages: list, summary: Optional[str],
+                        source: str | None = None) -> None:
+        """会话冷归档:把完整会话写入 session_archive(审计/离线分析,永久留存)。
+
+        `source` 与 `skill_traces` 同口径:归档是**门禁用例合成与失败改进的语料源**,
+        一段压测对话被当成真实买家语料蒸馏进 SKILL.md,和一条压测轨迹被算进成功率
+        一样糟 —— 只是后者立刻显形,前者要等到线上说错话才显形。
+        """
+        source = source or _traffic_source()
         conn = self.connect()
         try:
             conn.execute(
                 "INSERT INTO session_archive (session_id, user_id, messages, summary, "
-                "msg_count, archived_at) VALUES (?, ?, ?, ?, ?, ?)",
+                "msg_count, archived_at, source) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (session_id, user_id, json.dumps(messages, ensure_ascii=False),
-                 summary, len(messages or []), self._now()),
+                 summary, len(messages or []), self._now(), source),
             )
             conn.commit()
         finally:
@@ -784,16 +824,27 @@ class Database:
         finally:
             conn.close()
 
-    def list_recent_archives(self, limit: int = 50) -> list[dict]:
+    def list_recent_archives(self, limit: int = 50,
+                             sources: Optional[list[str]] = None) -> list[dict]:
         """H3 离线合成入口用:按 id DESC 取近 N 条会话归档,messages json.loads 成 list。
 
         坏 JSON（messages 字段无法解析）的记录直接跳过，不让单条脏数据崩离线脚本。
+
+        `sources`:只取这些来源的归档。归档是**门禁用例合成与失败改进的语料源**,
+        一段压测对话被当成真实买家语料蒸馏进 SKILL.md,和一条压测轨迹被算进成功率
+        一样糟——只是后者立刻显形,前者要等到线上说错话才显形。
         """
+        sql = "SELECT * FROM session_archive"
+        params: list = []
+        if sources:
+            sql += (" WHERE COALESCE(source, 'unknown') IN "
+                    f"({','.join('?' * len(sources))})")
+            params.extend(sources)
+        sql += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
         conn = self.connect()
         try:
-            rows = conn.execute(
-                "SELECT * FROM session_archive ORDER BY id DESC LIMIT ?", (limit,),
-            ).fetchall()
+            rows = conn.execute(sql, tuple(params)).fetchall()
             results = []
             for row in rows:
                 item = dict(row)
@@ -810,7 +861,8 @@ class Database:
     def record_skill_trace(self, session_id: str, user_id: str, skill_name: str,
                            tool_calls: list[dict], outcome: str,
                            variant: str = "live", skill_version: int = 0,
-                           skill_fingerprint: str = "unknown") -> None:
+                           skill_fingerprint: str = "unknown",
+                           source: str | None = None) -> None:
         """记录一轮 skill 执行轨迹。variant 区分现行版/灰度候选,供 A/B 判定。
 
         skill_version:本轮**加载那一刻**的技能目录版本号,0=未知(老调用方/历史行
@@ -822,21 +874,39 @@ class Database:
         读到"1"——指纹不依赖任何创建候选的地方打标,直接对被服务的树现算内容哈希,
         天然能把两批不同候选的轨迹分开归因(这正是本列存在的理由)。
         """
+        source = source or _traffic_source()
         conn = self.connect()
         try:
             conn.execute(
                 "INSERT INTO skill_traces (session_id, user_id, skill_name, tool_calls, "
-                "outcome, created_at, variant, skill_version, skill_fingerprint) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "outcome, created_at, variant, skill_version, skill_fingerprint, source) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (session_id, user_id, skill_name,
                  json.dumps(tool_calls or [], ensure_ascii=False), outcome,
-                 self._now(), variant, skill_version, skill_fingerprint or "unknown"),
+                 self._now(), variant, skill_version, skill_fingerprint or "unknown",
+                 source),
             )
             conn.commit()
         finally:
             conn.close()
 
-    def skill_trace_counts(self) -> dict[str, dict[str, int]]:
+    def skill_trace_source_counts(self) -> dict[str, int]:
+        """全库轨迹按流量来源分布 `{source: n}`。给界面披露口径用。
+
+        **界面上必须显示它。** 一个"成功率 28%"旁边如果没有"其中真实流量 N 轮",
+        看的人无从判断这个数字讲的是线上还是压测。
+        """
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT COALESCE(source, 'unknown') AS source, COUNT(*) AS n "
+                "FROM skill_traces GROUP BY COALESCE(source, 'unknown')").fetchall()
+        finally:
+            conn.close()
+        return {str(dict(r)["source"]): int(dict(r)["n"]) for r in rows}
+
+    def skill_trace_counts(self, sources: Optional[list[str]] = None
+                           ) -> dict[str, dict[str, int]]:
         """每个 skill 各结局的**全时段**条数:`{skill: {outcome: n}}`。
 
         **为什么不复用 `list_skill_traces` 再在内存里数。** 那个函数按 id DESC 取
@@ -848,12 +918,24 @@ class Database:
 
         取数是一次聚合(COUNT + GROUP BY),不搬行,几万条也是毫秒级——本来就没有
         理由为了这个去截断窗口。
+
+        `sources`:只统计这些来源的轨迹(如 `["live"]`)。传 None = 不过滤(全部)。
+        调用方**必须显式决定**要不要过滤,并把口径写在界面上:一个不带口径的
+        成功率,读的人无从判断它讲的是线上还是压测。
         """
+        sql = "SELECT skill_name, outcome, COUNT(*) AS n FROM skill_traces"
+        params: list = []
+        if sources:
+            # COALESCE:老库补列时历史行已回填成 'unknown',但别的写入路径仍可能
+            # 留下 NULL —— NULL 不等于任何值,会被 IN 静默漏掉,于是那些行既不算
+            # live 也不算 unknown,凭空从统计里消失。
+            sql += (" WHERE COALESCE(source, 'unknown') IN "
+                    f"({','.join('?' * len(sources))})")
+            params.extend(sources)
+        sql += " GROUP BY skill_name, outcome"
         conn = self.connect()
         try:
-            rows = conn.execute(
-                "SELECT skill_name, outcome, COUNT(*) AS n FROM skill_traces "
-                "GROUP BY skill_name, outcome").fetchall()
+            rows = conn.execute(sql, tuple(params)).fetchall()
         finally:
             conn.close()
         out: dict[str, dict[str, int]] = {}
@@ -865,9 +947,18 @@ class Database:
 
     def list_skill_traces(self, skill_name: Optional[str] = None,
                           outcomes: Optional[list[str]] = None,
-                          limit: int = 200) -> list[dict]:
-        """按 id DESC 取轨迹;可按 skill 名与结局过滤。tool_calls 反序列化成 list,
-        坏 JSON 的行跳过(与 list_recent_archives 同口径,单条脏数据不崩离线脚本)。"""
+                          limit: int = 200,
+                          sources: Optional[list[str]] = None) -> list[dict]:
+        """按 id DESC 取轨迹;可按 skill 名、结局、**流量来源**过滤。
+
+        tool_calls 反序列化成 list,坏 JSON 的行跳过(与 list_recent_archives
+        同口径,单条脏数据不崩离线脚本)。
+
+        `sources` 默认 None = 不过滤。**判定类调用方必须显式传 `["live"]`**——
+        看门狗在压测流量上算出的成功率会把一份没问题的 skill 自动回滚掉
+        (见 runtime_context 里 SOURCE_* 的注释)。默认不过滤是刻意的:它保证
+        既有调用方行为不被悄悄改掉,逼每一处都被显式检视一遍。
+        """
         sql = "SELECT * FROM skill_traces"
         clauses: list[str] = []
         params: list = []
@@ -877,6 +968,10 @@ class Database:
         if outcomes:
             clauses.append(f"outcome IN ({','.join('?' * len(outcomes))})")
             params.extend(outcomes)
+        if sources:
+            clauses.append("COALESCE(source, 'unknown') IN "
+                           f"({','.join('?' * len(sources))})")
+            params.extend(sources)
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY id DESC LIMIT ?"

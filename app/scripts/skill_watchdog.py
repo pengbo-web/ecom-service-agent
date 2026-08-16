@@ -26,6 +26,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
+from app.agent.runtime_context import DECISION_SOURCES  # noqa: E402
 from app.agent.skills import risk as risk_mod  # noqa: E402
 from app.agent.skills.tree_text import classify_tree_risk, validate_skill_tree  # noqa: E402
 from app.agent.skills.watchdog import (  # noqa: E402
@@ -254,9 +255,19 @@ def check_canaries(definitions_dir: str, candidates_dir: str, archive_dir: str,
 
         # 只取本轮灰度开始之后的轨迹:同一 skill 之前被废弃/已收口的灰度会留下
         # variant=canary 的旧行,混进来会污染本候选的成功率与样本数。
+        # **只认真实流量。** 这是本函数里唯一会自动改动线上的判定:
+        # `evaluate_absolute` 的 `rate < 0.6 → ROLLBACK` 会把一份 skill 从线上换掉。
+        # 而 skill_traces 里混着压测(`ab*`)、评测(门禁每跑一次就是两遍全量用例)、
+        # 人工走查 —— 实测 976 轮里真实买家只有 62 轮。拿那 914 轮去决定要不要
+        # 回滚线上技能,是这个字段存在的全部理由。
+        #
+        # 副作用是"样本变少":真实流量不够时判 `wait` 而不是拿合成流量凑数。
+        # 那正是想要的 —— 与 AB_SANITY_FLOOR 同一条取舍:**停下来,而不是在
+        # 不可信的基线上做不可白做的动作。**
         started_at = str(row.get("started_at") or "")
         traces = [
-            t for t in db.list_skill_traces(skill_name=skill_name, limit=1000)
+            t for t in db.list_skill_traces(skill_name=skill_name, limit=1000,
+                                            sources=list(DECISION_SOURCES))
             if str(t.get("created_at") or "") >= started_at
         ]
 

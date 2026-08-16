@@ -112,10 +112,14 @@ def main(argv=None) -> int:
                 if p.exists():
                     skill_md = p.read_text(encoding="utf-8")
                     break
+            # 与 synthesize_and_save 同口径,否则 --dry-run 看到的和真跑的不一样
+            from app.agent.runtime_context import SAMPLING_SOURCES
+            _src = list(SAMPLING_SOURCES)
             cases, stats = synthesize_gate_cases(
-                name, traces=db.list_skill_traces(skill_name=name, limit=500),
-                archives=db.list_recent_archives(limit=300), skill_md=skill_md,
-                max_cases=args.max_cases)
+                name, traces=db.list_skill_traces(skill_name=name, limit=500,
+                                                  sources=_src),
+                archives=db.list_recent_archives(limit=300, sources=_src),
+                skill_md=skill_md, max_cases=args.max_cases)
             stats["skill_md_found"] = bool(skill_md)
         else:
             stats = synthesize_and_save(name, db=db, max_cases=args.max_cases)

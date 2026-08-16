@@ -400,6 +400,13 @@ export type SkillsOverview = {
   // 老后端不返回这个字段,前端按缺失处理(不显示,不猜)。
   failure_attribution?: Record<string, Record<string, number>>;
   failure_attribution_note?: string;
+  // 只算真实流量(source=live)的成绩，以及全库来源分布。
+  // 实测 976 轮里真实买家只有 62 轮，其余是测试用户/压测/评测/走查 —— 一个不带
+  // 口径的「成功率 28%」，读的人无从判断它讲的是线上还是压测，而看门狗恰恰拿
+  // 同一批数据做自动回滚。老后端不返回这两个字段，前端按缺失处理(不显示，不猜)。
+  traces_live?: Record<string, Record<string, number>>;
+  trace_sources?: Record<string, number>;
+  trace_sources_note?: string;
   canaries: SkillCanary[];
 };
 
