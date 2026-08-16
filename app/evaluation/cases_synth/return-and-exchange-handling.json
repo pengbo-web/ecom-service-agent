@@ -1,7 +1,7 @@
 {
   "synthetic": true,
   "skill": "return-and-exchange-handling",
-  "generated_at": "2026-08-16T02:51:42",
+  "generated_at": "2026-08-16T14:51:13",
   "note": "本文件由 app.agent.skills.case_synthesis 从真实会话自动合成,**未经人工审核**;只用于 skill 转正门禁,不进回归基线 cases.json。",
   "stats": {
     "skill": "return-and-exchange-handling",
@@ -17,6 +17,7 @@
       "质量问题",
       "无理由。"
     ],
+    "keyword_blocked": "",
     "dropped_no_assertion": 8,
     "dropped_too_short": 2,
     "provenance": [

@@ -59,7 +59,12 @@ def _report(stats: dict) -> None:
         why = []
         if not stats.get("skill_md_found", True):
             why.append("找不到 SKILL.md")
-        if stats.get("actor") == "seller":
+        if stats.get("keyword_blocked"):
+            # 卖家侧被挡掉关键词路。这条理由要说全:不是"没素材",是**按关键词
+            # 捞会捞到买家提问,据此生成的用例是错的而不只是弱的**。
+            why.append("卖家侧 skill,关键词路已禁用(会捞到买家会话,生成的用例是错的);"
+                       "当前无该 skill 的执行轨迹")
+        elif stats.get("actor") == "seller":
             why.append("卖家侧 skill:归档语料目前只有买家会话")
         if not stats.get("keywords"):
             why.append("frontmatter 未声明关键词(无法走关键词采样)")

@@ -65,6 +65,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from app.agent.runtime_context import ACTOR_BUYER
 from app.agent.skills.canary import VARIANT_CANARY
 from app.agent.skills.execution_trace import LOAD_SKILL_TOOL
 from app.agent.skills.validator import is_safe_skill_name
@@ -348,8 +349,29 @@ def synthesize_gate_cases(skill_name: str, *, traces: list[dict],
 
     trace_sids = [s for s in sessions_from_traces(skill_name, traces) if s in by_session]
     keywords = skill_keywords(skill_md)
-    keyword_sids = [s for s in sessions_from_keywords(keywords, archives or [])
-                    if s not in trace_sids]
+
+    # **关键词路不得跨 actor。**(实测缺陷,见下)
+    #
+    # `session_archive` 里目前只有**买家**会话。而卖家侧 skill 的关键词与买家话题
+    # 高度重叠 —— `refund-attribution` 是店铺参谋的「退款率为什么升高」分析技能,
+    # 声明的关键词是「退款、退货、售后、退款率」,于是它从买家会话里捞到了
+    # 5 条「我要退货,订单号 ORD-…」,断言 `query_order` / `search_knowledge`。
+    #
+    # 那不是弱证据,是**错的**:门禁会拿买家提问去评一个参谋技能,而那些用例
+    # 跑在买家沙箱里,这个卖家 skill 根本不会被加载。一条错的裁判尺比没有更糟。
+    #
+    # 轨迹路天然没有这个问题:轨迹记着"这个 skill 确实在那一轮跑过",actor 由
+    # 事实保证。所以卖家侧只走轨迹路,并把原因如实报出来 —— 不是一句"0 条"。
+    keyword_blocked = ""
+    if actor != ACTOR_BUYER and keywords:
+        keyword_blocked = (
+            f"{skill_name} 是卖家侧 skill,而归档语料目前只有买家会话;"
+            "关键词与买家话题高度重叠(退款/退货/售后),按关键词捞会捞到买家提问,"
+            "据此生成的用例是错的而不只是弱的。卖家侧只用轨迹采样。")
+        keyword_sids: list[str] = []
+    else:
+        keyword_sids = [s for s in sessions_from_keywords(keywords, archives or [])
+                        if s not in trace_sids]
 
     cases: list[dict] = []
     provenance: list[dict] = []
@@ -392,6 +414,7 @@ def synthesize_gate_cases(skill_name: str, *, traces: list[dict],
         "from_trace": sum(1 for p in provenance if p["source"] == SOURCE_TRACE),
         "from_keyword": sum(1 for p in provenance if p["source"] == SOURCE_KEYWORD),
         "keywords": keywords,
+        "keyword_blocked": keyword_blocked,
         "dropped_no_assertion": dropped_no_assertion,
         "dropped_too_short": dropped_too_short,
         "provenance": provenance,

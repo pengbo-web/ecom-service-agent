@@ -348,3 +348,78 @@ def test_corrupt_synth_file_degrades_to_no_synthetic_cases(tmp_path):
 
 def test_missing_file_is_not_an_error(tmp_path):
     assert load_synth_cases("never-synthesised", root=tmp_path) == []
+
+
+# --------------------------------------------------------------------------
+# 关键词路不得跨 actor
+# --------------------------------------------------------------------------
+
+SELLER_MD = ('---\nname: refund-attribution\nactor: seller\n'
+             'description: 当店主询问退款率为什么升高、退货原因、售后分析时使用。'
+             '关键词：退款、退货、退款率、售后\n---\n正文')
+
+
+def test_seller_skill_never_samples_buyer_sessions_by_keyword():
+    """**实测缺陷,而且是错的而不只是弱的。**
+
+    `refund-attribution` 是店铺参谋的「退款率为什么升高」分析技能,声明的关键词是
+    「退款、退货、售后」——与买家话题高度重叠。而 `session_archive` 里目前只有
+    买家会话,于是它捞到了 5 条「我要退货,订单号 ORD-…」,断言 `query_order`。
+
+    那不是弱证据:门禁会拿买家提问去评一个参谋技能,而那些用例跑在买家沙箱里,
+    这个卖家 skill 根本不会被加载。**一条错的裁判尺比没有更糟。**
+    """
+    archives = [_archive("s1", [_msg("user", "我要退货,订单号 ORD-1,鞋子尺码不合适"),
+                                _msg("assistant", "好", tools=["query_order"])])]
+    cases, stats = synthesize_gate_cases("refund-attribution", traces=[],
+                                         archives=archives, skill_md=SELLER_MD,
+                                         known_tools=KNOWN)
+    assert cases == []
+    assert stats["from_keyword"] == 0
+    assert stats["keyword_blocked"], "挡掉了却没说为什么"
+    assert "错的" in stats["keyword_blocked"]
+
+
+def test_seller_skill_still_uses_its_own_traces():
+    """轨迹路天然没有跨 actor 问题:轨迹记着"这个 skill 确实在那一轮跑过",
+    actor 由事实保证。挡掉关键词路不能把轨迹路一起挡了。"""
+    archives = [_archive("s1", [_msg("user", "这个月退款率为什么升高了"),
+                                _msg("assistant", "我查一下", tools=["query_order"])])]
+    cases, stats = synthesize_gate_cases(
+        "refund-attribution", traces=[_trace("s1", "refund-attribution")],
+        archives=archives, skill_md=SELLER_MD, known_tools=KNOWN)
+    assert len(cases) == 1 and stats["from_trace"] == 1
+
+
+def test_buyer_skill_keeps_the_keyword_path():
+    """别把买家侧也一起挡了——关键词路正是死结对"全新买家 skill"解开的那一支。"""
+    md = '---\nname: order-query\ndescription: 查订单。关键词：查订单\n---\n正文'
+    archives = [_archive("s1", [_msg("user", "帮我查订单 ORD-1 到哪了"),
+                                _msg("assistant", "好", tools=["query_order"])])]
+    cases, stats = synthesize_gate_cases("order-query", traces=[], archives=archives,
+                                         skill_md=md, known_tools=KNOWN)
+    assert len(cases) == 1 and stats["from_keyword"] == 1
+    assert not stats["keyword_blocked"]
+
+
+def test_no_synth_file_on_disk_mixes_actors():
+    """**仓库级不变量。** 已经落盘的合成用例里,卖家侧 skill 不该有任何
+    来自关键词的用例(这条能抓到"改了代码但没重新生成"的残留文件)。"""
+    import json as _json
+    from pathlib import Path
+
+    from app.config.settings import Settings
+
+    # 读**字段默认值**而不是 `settings.eval_synth_cases_dir`:conftest 把后者钉到
+    # 一个不存在的目录做测试隔离,照读会让这条仓库级不变量永远 skip —— 一条永远
+    # 跳过的测试比没有更糟,它在报告里长得像"通过了"。
+    root = Path(Settings.model_fields["eval_synth_cases_dir"].default)
+    if not root.exists():
+        pytest.skip("还没有生成过合成用例(先跑 python -m app.scripts.synth_gate_cases --all)")
+    for path in root.glob("*.json"):
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        stats = data.get("stats") or {}
+        if stats.get("actor") == "seller":
+            assert stats.get("from_keyword", 0) == 0, (
+                f"{path.name}: 卖家侧 skill 存在关键词来源的用例,"
+                "多半是代码改了但没重新跑 synth_gate_cases")

@@ -1,7 +1,7 @@
 {
   "synthetic": true,
   "skill": "query-coupons",
-  "generated_at": "2026-08-16T02:51:42",
+  "generated_at": "2026-08-16T14:51:13",
   "note": "本文件由 app.agent.skills.case_synthesis 从真实会话自动合成,**未经人工审核**;只用于 skill 转正门禁,不进回归基线 cases.json。",
   "stats": {
     "skill": "query-coupons",
@@ -16,6 +16,7 @@
       "能领哪些",
       "在哪里领"
     ],
+    "keyword_blocked": "",
     "dropped_no_assertion": 0,
     "dropped_too_short": 0,
     "provenance": [
