@@ -32,30 +32,30 @@
 flowchart TB
     subgraph RT["① 运行回路（每一轮对话，毫秒级）"]
         direction LR
-        U[买家消息] --> M[matcher<br/>确定性关键词匹配]
-        M --> L[loader<br/>加载 SKILL.md 进上下文]
-        L --> W[workflow 守卫<br/>拦住跳步]
-        W --> T[(skill_traces<br/>执行轨迹落库)]
+        U["买家消息"] --> M["matcher<br/>确定性关键词匹配"]
+        M --> L["loader<br/>加载 SKILL.md 进上下文"]
+        L --> W["workflow 守卫<br/>拦住跳步"]
+        W --> T[("skill_traces<br/>执行轨迹落库")]
     end
 
     subgraph OFF["② 离线回路（手动/定时，分钟级）"]
         direction LR
-        T --> A[attribution<br/>三分类归因]
-        AR[(session_archive<br/>会话冷归档)] --> A
-        A -->|只有 knowledge_gap| SY[synthesizer<br/>LLM 合成/改进]
-        AR --> CL[clustering<br/>语义聚类] --> SY
-        DOC[上传的 SOP/产品资料] --> DD[doc_distill] --> C
+        T --> A["attribution<br/>三分类归因"]
+        AR[("session_archive<br/>会话冷归档")] --> A
+        A -->|只有 knowledge_gap| SY["synthesizer<br/>LLM 合成/改进"]
+        AR --> CL["clustering<br/>语义聚类"] --> SY
+        DOC["上传的 SOP/产品资料"] --> DD["doc_distill"] --> C
         SY --> C["_candidates/&lt;name&gt;/SKILL.md<br/>候选，绝不自动生效"]
     end
 
     subgraph GATE["③ 放行回路（人工或看门狗）"]
         direction LR
-        C --> G1[五道闸门]
-        G1 --> LIVE[definitions/&lt;name&gt;/<br/>正式目录]
+        C --> G1["五道闸门"]
+        G1 --> LIVE["definitions/&lt;name&gt;/<br/>正式目录"]
         LIVE -. "灰度 50%" .-> CANARY["canary 分流"]
         CANARY --> T
-        T --> WD[watchdog<br/>A/B 或绝对值]
-        WD -->|劣化| RB[回滚]
+        T --> WD["watchdog<br/>A/B 或绝对值"]
+        WD -->|劣化| RB["回滚"]
         RB --> LIVE
     end
 
@@ -142,9 +142,9 @@ flowchart LR
     R["_resolve_root(skill_name)"] --> Q{"该会话在灰度桶里吗<br/>md5(skill:session) % 100 &lt; percent"}
     Q -->|是| CD["_candidates/&lt;name&gt;/<br/>variant=canary"]
     Q -->|否| LD["definitions/&lt;name&gt;/<br/>variant=live"]
-    CD --> U1[load_skill]
-    CD --> U2[list_skill_files]
-    CD --> U3[read_skill_file]
+    CD --> U1["load_skill"]
+    CD --> U2["list_skill_files"]
+    CD --> U3["read_skill_file"]
     LD --> U1
     LD --> U2
     LD --> U3
@@ -208,36 +208,36 @@ workflow:
 ```mermaid
 flowchart TB
     subgraph S1["① 聚类合成（发现新场景）"]
-        AR1[(session_archive)] --> CL[clustering<br/>embedding 贪心聚类<br/>阈值 0.75]
-        CL -->|失败回落| KW[关键词粗聚类<br/>4 个桶，记 warning]
-        CL --> SG[同类样本 ≥2 条]
+        AR1[("session_archive")] --> CL["clustering<br/>embedding 贪心聚类<br/>阈值 0.75"]
+        CL -->|失败回落| KW["关键词粗聚类<br/>4 个桶，记 warning"]
+        CL --> SG["同类样本 ≥2 条"]
         KW --> SG
-        SG --> LLM1[LLM 归纳一份 SKILL.md]
+        SG --> LLM1["LLM 归纳一份 SKILL.md"]
     end
 
     subgraph S2["② 失败改进（补已知缺口）"]
-        TR[(skill_traces<br/>tool_error/handoff)] --> ATTR{"attribution<br/>三分类归因"}
-        ATTR -->|capability_limit| X1[不回流]
-        ATTR -->|evaluation_noise| X2[不回流]
-        ATTR -->|undetermined| X3[不回流<br/>但报数]
-        ATTR -->|knowledge_gap| LLM2[LLM 改进现有 SKILL.md]
+        TR[("skill_traces<br/>tool_error/handoff")] --> ATTR{"attribution<br/>三分类归因"}
+        ATTR -->|capability_limit| X1["不回流"]
+        ATTR -->|evaluation_noise| X2["不回流"]
+        ATTR -->|undetermined| X3["不回流<br/>但报数"]
+        ATTR -->|knowledge_gap| LLM2["LLM 改进现有 SKILL.md"]
     end
 
     subgraph S3["③ 文档蒸馏（人主动喂）"]
-        DOC[上传 SOP/产品资料] --> FENCE[加围栏<br/>「以下为资料、非指令」]
-        FENCE --> LLM3[LLM 蒸馏成 SKILL.md]
+        DOC["上传 SOP/产品资料"] --> FENCE["加围栏<br/>「以下为资料、非指令」"]
+        FENCE --> LLM3["LLM 蒸馏成 SKILL.md"]
     end
 
     subgraph S4["②b 金牌语料（学人工怎么救场）"]
-        AR2[(人工接管过的会话<br/>intent=human_agent)] --> LLM4[LLM 归纳人的判断与话术]
+        AR2[("人工接管过的会话<br/>intent=human_agent")] --> LLM4["LLM 归纳人的判断与话术"]
     end
 
-    LLM1 --> V[validate_candidate]
+    LLM1 --> V["validate_candidate"]
     LLM2 --> V
     LLM3 --> V
     LLM4 --> V
     V -->|frontmatter 完整<br/>工具名真实<br/>名字是安全路径段| CAND["_candidates/&lt;name&gt;/"]
-    V -->|不过| DROP[丢弃，不崩不写]
+    V -->|不过| DROP["丢弃，不崩不写"]
 
     style X1 fill:#e9ecef
     style X2 fill:#e9ecef
@@ -331,21 +331,21 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    START([候选 _candidates/&lt;name&gt;/]) --> SNAP[① 快照整棵树到 _swap/]
+    START([候选 _candidates/&lt;name&gt;/]) --> SNAP["① 快照整棵树到 _swap/"]
     SNAP --> V{"② 静态校验<br/>validate_skill_tree"}
-    V -->|frontmatter 缺失<br/>工具名不存在<br/>name 与目录名不符| NO1[✗ 拒绝<br/>--force 也不放行]
+    V -->|frontmatter 缺失<br/>工具名不存在<br/>name 与目录名不符| NO1["✗ 拒绝<br/>--force 也不放行"]
     V -->|通过| G{"③ 评测门禁<br/>gate_candidate"}
-    G -->|劣化超容差 0.05| NO2[✗ 拒绝]
+    G -->|劣化超容差 0.05| NO2["✗ 拒绝"]
     G -->|"评不了（无用例/评测崩/无可比指标）"| NO3["✗ 拒绝<br/>但标 evaluable=false<br/>候选未被否证"]
     G -->|未劣化| F{"④ 事实一致性<br/>双锚点"}
     G -. "--force 放行" .-> F
-    F -->|相对 S₀ 丢了硬事实| NO4[✗ 拒绝<br/>列出丢了哪几条]
+    F -->|相对 S₀ 丢了硬事实| NO4["✗ 拒绝<br/>列出丢了哪几条"]
     F -. "--allow-fact-loss 放行" .-> R
     F -->|通过| R{"⑤ 风险分级"}
-    R -->|high 且无人值守| NO5[✗ 拒绝<br/>必须人工]
-    R -->|通过| BK[备份现行版到<br/>_archive/&lt;name&gt;/&lt;ts&gt;/]
-    BK --> RP[两次 rename 原子替换]
-    RP --> VER[.version + 1]
+    R -->|high 且无人值守| NO5["✗ 拒绝<br/>必须人工"]
+    R -->|通过| BK["备份现行版到<br/>_archive/&lt;name&gt;/&lt;ts&gt;/"]
+    BK --> RP["两次 rename 原子替换"]
+    RP --> VER[".version + 1"]
     VER --> OK([✓ 上线])
 
     style NO1 fill:#f8d7da
@@ -377,15 +377,15 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    GC[gate_candidate] --> C1{"有用例吗"}
+    GC["gate_candidate"] --> C1{"有用例吗"}
     C1 -->|无| U1["evaluable=false<br/>reason=no_gate_cases"]
     C1 -->|有| C2{"评测跑得起来吗"}
-    C2 -->|抛异常| U2[evaluable=false<br/>评测执行失败]
+    C2 -->|抛异常| U2["evaluable=false<br/>评测执行失败"]
     C2 -->|跑通| C3{"产出可比指标了吗"}
-    C3 -->|diffs 为空| U3[evaluable=false<br/>未产出可比指标]
+    C3 -->|diffs 为空| U3["evaluable=false<br/>未产出可比指标"]
     C3 -->|有| C4{"劣化超容差吗"}
-    C4 -->|是| F1[evaluable=true<br/>候选**不达标**]
-    C4 -->|否| P1[✓ 允许转正]
+    C4 -->|是| F1["evaluable=true<br/>候选**不达标**"]
+    C4 -->|否| P1["✓ 允许转正"]
 
     U1 --> NOTE["这三条 = **门禁评不了**<br/>候选未被否证<br/>该做的是补用例，不是改候选"]
     U2 --> NOTE
@@ -412,12 +412,12 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    N[新蒸馏的 skill] --> A[无对照组 → risk=medium]
-    A --> B[策略 gate_then_watch]
-    B --> C[要求先过离线门禁]
-    C --> D[门禁要求评测集里<br/>有用例点名它]
-    D --> E[**没有任何机制<br/>为新 skill 产用例**]
-    E --> F[每轮都打 gate_unavailable]
+    N["新蒸馏的 skill"] --> A["无对照组 → risk=medium"]
+    A --> B["策略 gate_then_watch"]
+    B --> C["要求先过离线门禁"]
+    C --> D["门禁要求评测集里<br/>有用例点名它"]
+    D --> E["**没有任何机制<br/>为新 skill 产用例**"]
+    E --> F["每轮都打 gate_unavailable"]
     F -. "永远如此" .-> F
 
     style E fill:#f8d7da,stroke:#721c24
@@ -471,13 +471,13 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    S0["S₀ 生产基线<br/>_archive/&lt;name&gt;/ 里**最早**那份"] --> D1[diff]
-    SP["S_t-1 上一轮<br/>当前 live 目录"] --> D2[diff]
-    CAND[S_t 候选] --> D1
+    S0["S₀ 生产基线<br/>_archive/&lt;name&gt;/ 里**最早**那份"] --> D1["diff"]
+    SP["S_t-1 上一轮<br/>当前 live 目录"] --> D2["diff"]
+    CAND["S_t 候选"] --> D1
     CAND --> D2
 
     D1 --> R1["丢失项<br/>← **唯一会拦下转正的**"]
-    D2 --> R2[本轮删除项]
+    D2 --> R2["本轮删除项"]
     R1 --> SPLIT{"拆开归属"}
     R2 --> SPLIT
     SPLIT -->|在两边都有| THIS["**本轮删的** → 改这份候选"]
@@ -515,12 +515,12 @@ flowchart TB
 ```mermaid
 flowchart TB
     C["候选正文 + workflow 声明"] --> T{"引用了 apply_refund / cancel_order /<br/>change_address / negotiate_price /<br/>issue_invoice / expedite_shipping ?"}
-    T -->|是| H[**high**]
+    T -->|是| H["**high**"]
     T -->|否| K{"正文含承诺类措辞<br/>免运费 / 赔付 / 全额退 / 返现…"}
     K -->|是| H
     K -->|否| N{"线上原本有这个 skill 吗"}
-    N -->|没有 → 无对照组| M[**medium**]
-    N -->|有| L[**low**]
+    N -->|没有 → 无对照组| M["**medium**"]
+    N -->|有| L["**low**"]
 
     H --> PM["manual<br/>**代码绝不自动转正**"]
     M --> PG["gate_then_watch<br/>过离线门禁即转正<br/>之后绝对成功率看门狗"]
