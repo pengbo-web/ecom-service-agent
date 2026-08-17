@@ -54,7 +54,8 @@ class EventBus(Protocol):
     """
 
     def publish(self, event_type: str, payload: dict, source: str, target: str,
-                correlation_id: str, priority: int = 0) -> int: ...
+                correlation_id: str, priority: int = 0,
+                status: str = "pending") -> int: ...
 
     def claim(self, target: str, limit: int = 20) -> list[dict]: ...
 
@@ -86,9 +87,11 @@ class SqliteEventBus:
     """
 
     def publish(self, event_type: str, payload: dict, source: str, target: str,
-                correlation_id: str, priority: int = 0) -> int:
+                correlation_id: str, priority: int = 0,
+                status: str = "pending") -> int:
         return get_db().publish_event(event_type, payload, source, target,
-                                      correlation_id, priority=priority)
+                                      correlation_id, priority=priority,
+                                      status=status)
 
     def claim(self, target: str, limit: int = 20) -> list[dict]:
         return get_db().claim_events(target, limit=limit)
@@ -195,12 +198,13 @@ class InMemoryEventBus:
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     def publish(self, event_type: str, payload: dict, source: str, target: str,
-                correlation_id: str, priority: int = 0) -> int:
+                correlation_id: str, priority: int = 0,
+                status: str = "pending") -> int:
         with self._lock:
             row = {"id": self._next_id, "event_type": event_type,
                    "payload": dict(payload or {}), "source_agent": source,
                    "target_agent": target, "correlation_id": correlation_id,
-                   "status": "pending", "priority": int(priority),
+                   "status": str(status), "priority": int(priority),
                    "created_at": self._now(), "consumed_at": None}
             self._next_id += 1
             self._rows.append(row)

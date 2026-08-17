@@ -2534,6 +2534,11 @@ def create_app(session_manager: Optional[SessionManager] = None,
             "success": True,
             "failed_count": bus.failed_count(),
             "failed": bus.failed(limit=limit),
+            # 无订阅者终止记录:**不是**故障指标,所以不进 healthy 的判定,但它是
+            # "哪些信号产出的结论没有任何下游"的唯一量化线索。放在这个端点里是
+            # 因为它和 failed 补的是同一类缺口——一条链没往下走,在此之前没有任何
+            # 人会发现。区别只在于 failed 是"试了但炸了"、这个是"压根没人订阅"。
+            "no_subscriber": db.no_subscriber_stats(limit=limit),
             "worker": {
                 "name": WORKER_NAME,
                 "last_success_at": last_ok,

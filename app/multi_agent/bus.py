@@ -35,6 +35,17 @@ AGENT_HUMAN = "human"         # 人工闸:需要人来看的事件投给它
 # 重投,而它们的重试语义完全不同(起草可以重来,静默重复写是幂等的)。
 AGENT_GUARD = "guard"
 
+#: 事件的终止状态之一:**发布时没有任何订阅者**。
+#:
+#: 与 done/failed 并列,补的是状态机原本表达不了的第三种结局——"这条链正当地
+#: 走到了尽头"。done = 有人处理完了;failed = 有人试了但炸了;
+#: no_subscriber = 压根没人订阅,而这**不是故障**(一个暂时没人订阅的事件是
+#: 完全合法的)。
+#:
+#: 刻意不做成 pending:它不是待办,没人会来认领它。也刻意不复用 done:
+#: 那会让"处理完了"和"没人处理"在统计里合成一件事,而它们的处置完全不同。
+STATUS_NO_SUBSCRIBER = "no_subscriber"
+
 # 事件类型
 EV_SIGNAL_ANOMALY = "signal.anomaly"        # 客服侧/扫描器发现异常
 EV_INSIGHT_DIAGNOSIS = "insight.diagnosis"  # 参谋出诊断结论
@@ -101,10 +112,31 @@ def publish(event_type: str, payload: dict, source: str,
             from app.multi_agent.routing import resolve
             targets = resolve(event_type, payload or {})
         if not targets:
-            # 不是错误:没人订阅这类事件(或条件谓词全判否)。记 debug 而非
-            # warning——把它当异常刷日志,会让"新事件类型上线"和"营销条件
-            # 没命中"这两件正常的事看起来像故障。
-            logger.debug("协作事件无订阅者,未投递 event=%s corr=%s", event_type, corr)
+            # **落一条墓碑,不静默返回。**
+            #
+            # 改造前这里只有一句 `logger.debug` 就 return 了,后果是实测到的:
+            # 库里有 462 条 tool_error_rate_high、288 条 service_escalation 信号,
+            # 参谋**确实**都归因了(shared_context 里躺着 diagnosis:track-order),
+            # 但这些诊断发出来时没有下游订阅者,于是**事件表里一行都没有**。
+            # 排查时只能靠 shared_context 反推参谋到底干没干活——而一条链"正当地
+            # 走到了尽头"与"根本没跑起来"在事件表上长得一模一样。
+            #
+            # 状态机原本只能表达"跑完了(done)"和"炸了(failed)",表达不了
+            # "合法地没往下走"。`no_subscriber` 补的就是这一格。
+            #
+            # target_agent 写空串:这条记录**没有**收件人,那正是它要说的事。
+            # 空串进不了 claim(没有 Agent 叫 ''),也进不了 reclaim/failed
+            # (状态不对),所以它对既有工作流零影响——详见 publish_event。
+            logger.info("协作事件无订阅者,已落终止记录 event=%s corr=%s",
+                        event_type, corr)
+            try:
+                get_event_bus().publish(event_type, payload or {}, source, "",
+                                        corr, priority=0, status=STATUS_NO_SUBSCRIBER)
+            except Exception as exc:  # noqa: BLE001 墓碑写不下去不该影响调用方
+                logger.warning("无订阅者终止记录写入失败(已忽略) corr=%s: %s", corr, exc)
+            # 仍然返回 None:调用方的语义是"这条链有没有起来",而它确实没起来。
+            # 墓碑是给**人**看的,不改变调用方的判断——现有调用方都只拿返回值
+            # 做真值判断,改成返回 corr 会让"发出去了"和"没人接"混成一件事。
             return None
         eb = get_event_bus()
         for t, prio in targets:

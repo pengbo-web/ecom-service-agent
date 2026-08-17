@@ -1389,7 +1389,7 @@ class Database:
     # ---------- 多 Agent 协作总线(持久化 append-only 事件) ----------
     def publish_event(self, event_type: str, payload: dict, source_agent: str,
                       target_agent: str, correlation_id: str,
-                      priority: int = 0) -> int:
+                      priority: int = 0, status: str = "pending") -> int:
         """发布一条协作事件,返回自增 id。
 
         总线是**持久化**的:进程重启不丢事件,且 correlation_id 把一条协作链
@@ -1398,6 +1398,17 @@ class Database:
         priority 越大越先被认领(见 claim_events);默认 0 = 普通。取值由总线
         路由表声明(见 app/multi_agent/routing.py 的 Subscription.priority),
         不由发布方现场决定——"这条有多急"是编排层的判断,不是生产方的判断。
+
+        `status` 只为**一种**非常规写入而存在:`'no_subscriber'` 的终止记录
+        (见 `bus.publish`)。它不是一条待办,而是一条"这条链到此为止"的墓碑,
+        所以刻意**不**落成 pending。
+
+        这个取值进不了任何一条工作流查询,三处都按 status/target 精确作用域:
+          claim_events    `target_agent = ? AND status = 'pending'`
+          reclaim_stale   `status = 'processing'`
+          list/count_failed `status = 'failed'`
+        `list_events`(时间线)不带 status 过滤,所以墓碑**只出现在给人看的地方**
+        ——这正是它存在的全部目的。
         """
         conn = self.connect()
         try:
@@ -1405,9 +1416,10 @@ class Database:
                 self.d.returning_id(
                     "INSERT INTO agent_events (event_type, payload, source_agent, "
                     "target_agent, correlation_id, status, priority, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)"),
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"),
                 (event_type, json.dumps(payload or {}, ensure_ascii=False),
-                 source_agent, target_agent, correlation_id, int(priority), self._now()))
+                 source_agent, target_agent, correlation_id, str(status),
+                 int(priority), self._now()))
             # 先取回再 commit:RETURNING 的结果在游标里,提交会重置它。
             new_id = int(cur.fetchone()["id"])
             conn.commit()
@@ -1590,6 +1602,46 @@ class Database:
             row = conn.execute(
                 "SELECT * FROM worker_heartbeats WHERE name = ?", (name,)).fetchone()
             return dict(row) if row else None
+        finally:
+            conn.close()
+
+    def no_subscriber_stats(self, limit: int = 20) -> dict:
+        """无订阅者终止记录的统计与样例(见 `bus.STATUS_NO_SUBSCRIBER`)。
+
+        为什么值得单独有一个出口:这类记录数**不是**故障指标,但它是"哪些信号
+        产出的结论没有任何下游"的唯一量化线索。实测形态是 462 条
+        tool_error_rate_high 的诊断无人订阅——参谋归因了、写进了共享上下文,
+        然后链就到此为止。那不是 bug,但它是一个明确的产品缺口:一个工具失败率
+        告警的正确下游是工程处置,而那个 Agent 不存在。
+
+        **按 event_type 分组而不是只给总数**:总数只会告诉运维"有一堆链断了",
+        分组才指得出断在哪一类事件上——而那正是"该不该给它加个订阅者"这个决定
+        需要的信息。
+        """
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT event_type, COUNT(*) AS n FROM agent_events "
+                "WHERE status = ? GROUP BY event_type ORDER BY n DESC",
+                ("no_subscriber",)).fetchall()
+            by_type = [{"event_type": r["event_type"], "count": int(r["n"])}
+                       for r in rows]
+            recent = conn.execute(
+                "SELECT * FROM agent_events WHERE status = ? "
+                "ORDER BY id DESC LIMIT ?",
+                ("no_subscriber", max(1, int(limit)))).fetchall()
+            items = []
+            for row in recent:
+                item = dict(row)
+                # payload 反序列化与 list_events 同一姿态:坏 JSON 退成空 dict,
+                # 不让一条脏数据把整个可见性端点打成 500。
+                try:
+                    item["payload"] = json.loads(item["payload"]) if item["payload"] else {}
+                except (json.JSONDecodeError, TypeError):
+                    item["payload"] = {}
+                items.append(item)
+            return {"total": sum(x["count"] for x in by_type),
+                    "by_event_type": by_type, "recent": items}
         finally:
             conn.close()
 
