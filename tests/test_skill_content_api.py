@@ -34,6 +34,28 @@ def _get(name, variant=None):
     return _client().get(f"/api/admin/skills/{name}/content{q}", headers=_headers())
 
 
+def _some_candidate() -> str:
+    """磁盘上任意一个待审候选的名字。
+
+    **不能写死一个名字。** 候选目录是**转正流程会消费的可变工作区**:
+    `promote_skill` 把候选搬进 `definitions/` 之后,那个名字就不再是候选了。
+    这个测试原本写死 `order-query`,而它在本仓库里真的被转正过一次——测试于是
+    404,症状看起来像"读正文这个接口坏了",实际是接口完全正常、只是那份候选
+    已经上线了。断言要钉的是"候选能读到正文",不是"某个特定候选存在"。
+    """
+    from pathlib import Path
+
+    from app.scripts.promote_skill import CANDIDATES_DIR
+
+    d = Path(CANDIDATES_DIR)
+    names = sorted(x.name for x in d.iterdir()
+                   if x.is_dir() and not x.name.startswith("_")
+                   and (x / "SKILL.md").is_file()) if d.is_dir() else []
+    if not names:
+        pytest.skip("磁盘上当前没有待审候选,这条断言无从验证")
+    return names[0]
+
+
 # --------------------------------------------------------------------------
 # 正常读
 # --------------------------------------------------------------------------
@@ -50,10 +72,13 @@ def test_reads_the_live_skill_body():
 
 
 def test_reads_a_candidate_body():
-    r = _get("order-query", variant="candidate")
+    name = _some_candidate()
+    r = _get(name, variant="candidate")
     assert r.status_code == 200
     assert r.json()["variant"] == "candidate"
-    assert "name: order-query" in r.json()["content"]
+    # 拿到的必须是**正文**(frontmatter 在开头),而且确实是这份候选而不是别的
+    assert r.json()["content"].startswith("---")
+    assert f"name: {name}" in r.json()["content"]
 
 
 def test_live_and_candidate_are_separate_reads():
