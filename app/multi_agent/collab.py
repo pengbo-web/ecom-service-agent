@@ -121,6 +121,10 @@ _FACTS_BY_KIND: dict[str, tuple[str, ...]] = {
     # "退款率高"配上"差评集中在尺码偏小"才是一条能落地的诊断
     "refund_rate_high": ("shop_overview", "product_diagnostics", "review_insights"),
     "bad_review_rate_high": ("shop_overview", "review_insights"),
+    # 履约延迟:要看这个商品的履约明细(积压多少单、最老那单多久了)。
+    # **不拉 review_insights**——差评讲的是商品本身,与发不出货无关,
+    # 多给一个无关维度只会让归因把两件事混起来说。
+    "fulfillment_delay_high": ("shop_overview", "fulfillment_diagnostics"),
     # 服务质量类:工具失败率 / 转人工率 / 激烈情绪占比,都要看服务侧指标
     "tool_error_rate_high": ("shop_overview", "service_quality"),
     "human_rate_high": ("shop_overview", "service_quality"),
@@ -149,6 +153,8 @@ def _gather_facts(kind: str, window_days: int = 7) -> dict:
         "service_quality": lambda: shop_analytics.service_quality(
             window_days=window_days),
         "review_insights": lambda: review_insights(window_days=window_days),
+        "fulfillment_diagnostics": lambda: shop_analytics.fulfillment_diagnostics(
+            window_days=window_days),
     }
     facts: dict = {}
     for name in _FACTS_BY_KIND.get(kind, _DEFAULT_FACTS):
@@ -277,7 +283,8 @@ def _buyer_profile_block(user_id: str) -> str:
 
 # 能走到营销侧的诊断只有 refund_rate_high 这一种(见 routing.py 的
 # `_MARKETING_WORTHY_KINDS`),而它的 `subject` 恒为**一个具体 SKU**。
-_SKU_SCOPED_DIAGNOSIS_KINDS = frozenset({"refund_rate_high", "bad_review_rate_high"})
+_SKU_SCOPED_DIAGNOSIS_KINDS = frozenset({"refund_rate_high", "bad_review_rate_high",
+                                         "fulfillment_delay_high"})
 
 
 def _diagnosis_applies_to(diagnosis: Optional[dict], opportunity: dict) -> bool:
@@ -303,6 +310,12 @@ def _diagnosis_applies_to(diagnosis: Optional[dict], opportunity: dict) -> bool:
     商机情境写,仍然正确),也不能对买家说一件关于别的商品的事。
 
     非 SKU 级的诊断(如店铺级情绪异常)按适用处理:它确实对所有买家成立。
+
+    ---
+
+    **本函数只回答"这条诊断讲的是不是这件商品",不回答"它能不能当审批依据"。**
+    后者是 `_diagnosis_explains_opportunity`——两个判据不同,合成一个布尔就必然在
+    其中一侧出错(实测的错落在依据那一侧,见那个函数的 docstring)。
     """
     kind = (diagnosis or {}).get("kind") or ""
     if kind not in _SKU_SCOPED_DIAGNOSIS_KINDS:
@@ -316,6 +329,50 @@ def _diagnosis_applies_to(diagnosis: Optional[dict], opportunity: dict) -> bool:
     # 挡掉了,而且是静默的。见 app/agent/tools/product_ref.py。
     from app.agent.tools.product_ref import matches_any_item
     return matches_any_item(subject, opportunity.get("skus"))
+
+
+#: 商机类型 → 哪些诊断 kind 能**解释这条商机为什么存在**。
+#:
+#: 不是"相关"就够,必须是**因果**:草稿的 `reason` 是店主点批准时读的那一栏,它要
+#: 回答"为什么有这条草稿"。一条讲退款率的诊断解释不了"这单为什么滞留 212 小时"。
+#:
+#: 现在只有一条:履约延迟解释订单滞留。退款率/差评率**不解释任何商机**——它们说的是
+#: "这个商品有质量或尺码问题",而商机说的是"这个人没付款/没发货",两者没有因果。
+#: 所以在 `fulfillment_delay_high` 落地之前,所有依据都会回落到
+#: `_opportunity_reason`,这**正是正确行为**:实测的 draft 41 依据从"尺码偏大导致
+#: 6 笔退款、建议加尺码提醒"换成"滞留 212h · ¥899",后者才是这条草稿存在的原因。
+_DIAGNOSIS_EXPLAINS: dict[str, frozenset[str]] = {
+    "stale_pending_order": frozenset({"fulfillment_delay_high"}),
+}
+
+
+def _diagnosis_explains_opportunity(diagnosis: Optional[dict],
+                                    opportunity: dict) -> bool:
+    """这条诊断能不能当**这条商机的审批依据**。
+
+    **实测缺陷:** draft 41 是 `stale_pending_order`(订单 DEMO-010 待发货滞留),
+    正文写的是催发货,而「依据」栏是——
+
+      「最可能的原因是该款跑鞋存在普遍性的尺码偏大问题,导致 6 笔退款全部集中于
+        『尺码不准,偏大一码』…建议立即在商品详情页添加尺码提醒」
+
+    商品对得上(都是 HMDP-1),所以 `_diagnosis_applies_to` 判了适用。但**问题类型
+    对不上**:这条依据讲的是退款,草稿讲的是发货,而店主正是靠这一栏决定批不批。
+    SKU 相符是必要条件,不是充分条件。
+
+    判定要求两个条件同时成立:
+      1. 诊断确实讲的是这件商品(复用 `_diagnosis_applies_to`);
+      2. 诊断的 kind 在 `_DIAGNOSIS_EXPLAINS[商机类型]` 里。
+
+    **未登记的商机类型判不适用**,不是判适用:白名单缺一条的后果是"少引用一条
+    诊断,依据退化成商机自身的可读理由"——仍然正确;反过来默认适用的后果是"给
+    审批人一条误导性依据",而那是不可逆动作的唯一人工关口。
+    """
+    if not _diagnosis_applies_to(diagnosis, opportunity):
+        return False
+    kind = str((diagnosis or {}).get("kind") or "")
+    opp_kind = str(opportunity.get("kind") or "")
+    return kind in _DIAGNOSIS_EXPLAINS.get(opp_kind, frozenset())
 
 
 def _opportunity_reason(opportunity: dict) -> str:
@@ -469,6 +526,12 @@ def handle_signal(event: dict) -> dict:
         #
         # 好处不是审美:想让"库存预警 Agent"也订阅诊断,只需在路由表加一行,
         # 不必碰参谋的代码——而参谋的代码里本来就没有任何与库存有关的东西。
+        # (这条已经兑现过一次:`AGENT_GUARD` 订阅 `signal.anomaly` 时,客服侧
+        #  埋点与扫描器两个发布点、以及本函数,一行都没改。)
+        #
+        # `forwarded=False` 现在**会留一条痕**:`bus.publish` 无订阅者时落一条
+        # `no_subscriber` 终止记录(见 bus.STATUS_NO_SUBSCRIBER)。所以"这条诊断
+        # 没有下游"从此在事件表里查得到,不再只能靠共享上下文反推。
         #
         # `forwarded` 语义随之变化:从"我决定转了"变成"路由表判定有下游"。
         # 字段名保留(外部有断言),但读的时候要按新语义理解。
@@ -622,9 +685,16 @@ def handle_insight(event: dict) -> dict:
             # 相关性闸:诊断与这条商机无关时,起草**不带**诊断上下文,reason 也换成
             # 商机自身的依据。少了这一步,一条关于商品 A 的诊断会让草稿对 B 商品的
             # 买家说出 A 的结论(实测见 `_diagnosis_applies_to`)。
-            applies = _diagnosis_applies_to(diagnosis, opp)
+            # 两道相关性判定,**判据不同,不能共用一个布尔**:
+            #   informs  = 诊断讲的是不是这件商品 → 决定要不要拿它做内容指导
+            #   explains = 诊断能不能解释这条商机为什么存在 → 决定要不要拿它当依据
+            # "该商品尺码偏大"对一条讲同款商品的催付款文案是有用的内容指导,但它
+            # 解释不了"这单为什么滞留 212 小时"。合成一个布尔时,错落在依据那一侧
+            # (实测 draft 41,见 `_diagnosis_explains_opportunity`)。
+            informs = _diagnosis_applies_to(diagnosis, opp)
+            explains = _diagnosis_explains_opportunity(diagnosis, opp)
             try:
-                content = _llm_draft(diagnosis if applies else None, opp)
+                content = _llm_draft(diagnosis if informs else None, opp)
             except Exception:  # noqa: BLE001
                 logger.exception("起草失败,跳过该商机(order_id=%s user_id=%s)",
                                  opp.get("order_id"), opp.get("user_id"))
@@ -638,7 +708,7 @@ def handle_insight(event: dict) -> dict:
             res = draft_outreach(user_id=opp.get("user_id", ""), content=content,
                                  kind=opp.get("kind") or "stale_pending_order",
                                  order_id=opp.get("order_id", ""),
-                                 reason=(diagnosis.get("conclusion", "") if applies
+                                 reason=(diagnosis.get("conclusion", "") if explains
                                          else _opportunity_reason(opp)))
             if not res.get("success"):
                 return False       # 含 P2 唯一约束拒绝(已有待审草稿)这一支
