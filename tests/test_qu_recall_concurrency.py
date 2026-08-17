@@ -28,7 +28,10 @@ def _orch(tmp_path, monkeypatch, name="s.json"):
 
 
 def _fixed_understand(qu: QueryUnderstanding):
-    return lambda user_input, history, client, model: qu
+    # `**_kw` 吸收 understand() 后加的关键字参数(如 outreach_hint):这些桩关心
+    # 的是「understand 被调了、返回什么」,不是它的完整签名。写死位置参数的后果
+    # 是真实函数每加一个可选参数,这一族测试就集体 TypeError。
+    return lambda user_input, history, client, model, **_kw: qu
 
 
 def _fixed_kb_fetch(rows, backend="local"):
@@ -120,7 +123,7 @@ def test_switch_off_falls_back_to_fully_serial(tmp_path, monkeypatch):
                             need_kb=True, kb_query="退货政策是什么", source="llm")
     calls = []
 
-    def fake_understand(user_input, history, client, model):
+    def fake_understand(user_input, history, client, model, **_kw):
         calls.append(user_input)
         return qu
     monkeypatch.setattr("app.agent.understanding.understand", fake_understand)
@@ -158,7 +161,7 @@ def test_prefetch_does_not_block_understand_call(tmp_path, monkeypatch):
 
     monkeypatch.setattr("app.agent.recall.kb.kb_fetch_rows", stuck_kb_fetch)
     monkeypatch.setattr("app.agent.understanding.understand",
-                        lambda user_input, history, client, model: QueryUnderstanding(
+                        lambda user_input, history, client, model, **_kw: QueryUnderstanding(
                             domain="aftersale", intent="政策咨询",
                             need_kb=True, kb_query=user_input, source="llm"))
     # engine 侧也不能被"等 KB 检索"卡住到发不出 route 事件——react_loop 桩掉,

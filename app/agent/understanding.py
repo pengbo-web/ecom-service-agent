@@ -171,8 +171,25 @@ def _match_rules(text: str) -> QueryUnderstanding | None:
     return None
 
 
-def understand(user_input: str, history: list[dict], client, model: str) -> QueryUnderstanding:
-    """三层查询理解;任何失败兜底为"多检索、走默认"。"""
+def understand(user_input: str, history: list[dict], client, model: str,
+               outreach_hint: str = "") -> QueryUnderstanding:
+    """三层查询理解;任何失败兜底为"多检索、走默认"。
+
+    `outreach_hint` 是一行确定性前情:店铺刚主动给这位顾客发过一条什么情境的
+    消息(见 `outreach_context.router_hint`)。
+
+    **为什么必须显式传进来**:下面的 `context` 只取最近 5 条 **user** 消息,
+    而营销触达是 assistant 消息——它对这一步**完全不可见**。实测后果:一条催付款
+    触达之后,买家回「好啊,帮我看看」,这一步判成 `intent=订单事务 → aftersale`,
+    而 aftersale 手上没有 `query_coupons`、没有 `place_order`,既讲不清随触达发出
+    的那张券,也帮不了买家把这单付掉。
+
+    补一行前情比在编排层做"回落偏好"有效得多:回落只在这一步**判不出域**时才生效,
+    而它几乎总能判出一个域——只是判错了。让它拿到那个缺失的事实,判定权仍在这里。
+
+    **已知边界**:短句先走 `_match_rules`(确定性规则,`source=rule`),那条路不看
+    前情。可接受——规则是逐字匹配的固定表,不是猜;真要收窄,该改的是规则表本身。
+    """
     text = (user_input or "").strip()
     if len(text) <= _RULE_MAX_CHARS:
         matched = _match_rules(text)
@@ -181,6 +198,9 @@ def understand(user_input: str, history: list[dict], client, model: str) -> Quer
 
     users = [m.get("content", "") for m in (history or []) if m.get("role") == "user"]
     context = "\n".join(f"- {u}" for u in users[-5:] if u) or "(无)"
+    if outreach_hint:
+        # 拼在最前:它是这一轮的前提,而不是"最近对话"里的一条。
+        context = f"{outreach_hint}\n{context}"
     req = dict(
         model=model, temperature=0.0, max_tokens=200,   # 多两个字段(emotion/emotion_level)
         messages=[{"role": "user",
