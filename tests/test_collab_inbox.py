@@ -27,17 +27,28 @@ def db(tmp_path):
     return d
 
 
-def test_human_target_has_no_consumer_in_the_worker():
+def test_human_target_has_no_consumer_in_the_worker(monkeypatch):
     """把前提钉住:worker 确实不消费 human。
 
     如果哪天有人给 human 加了消费方,这条会红——那时待办面板的定位要重新想,
     而不是让两套机制同时改同一批事件。
-    """
-    from app.multi_agent import collab
 
-    src = inspect.getsource(collab.run_once)
-    assert "AGENT_ANALYST" in src and "AGENT_GROWTH" in src
-    assert "AGENT_HUMAN" not in src
+    **改成行为断言而不是读源码文本。** 原版是 `"AGENT_HUMAN" not in getsource(...)`,
+    它把"worker 不消费 human"这个行为与"函数源码里不出现这个词"绑在了一起——
+    在 docstring 里提一句 human 就会让它红,而行为没有任何变化。反过来更糟:
+    有人用字符串字面量 `"human"` 加一个消费方,这条断言照样是绿的。
+    """
+    from app.multi_agent import bus, collab
+
+    consumed: list[str] = []
+    monkeypatch.setattr(bus, "consume",
+                        lambda target, handler, limit=20: consumed.append(target)
+                        or {"claimed": 0, "done": 0, "failed": 0})
+    monkeypatch.setattr(collab, "_reclaim_stale", lambda *_a, **_k: 0)
+    collab.run_once()
+    assert bus.AGENT_HUMAN not in consumed
+    # 顺带钉住顺序:风控是负向动作,必须抢在参谋归因(几十秒)之前落地
+    assert consumed == [bus.AGENT_GUARD, bus.AGENT_ANALYST, bus.AGENT_GROWTH]
 
 
 def test_lists_only_pending_events_for_that_target(db):

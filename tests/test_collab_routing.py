@@ -137,9 +137,29 @@ def test_new_agent_needs_no_expert_code_change(db, monkeypatch):
     assert targets == {bus.AGENT_GROWTH, "inventory"}
 
 
-def test_publish_with_no_subscriber_returns_none_and_writes_nothing(db):
+def test_publish_with_no_subscriber_returns_none_but_leaves_a_tombstone(db):
+    """**行为变了,断言跟着变。** 原来这里断言"什么都不写",而那正是被修掉的缺陷:
+    一条链"正当地走到了尽头"与"根本没跑起来"在事件表上长得一模一样(实测 462 条
+    tool_error_rate_high 的诊断就是这么隐形的)。
+
+    返回值仍是 None——调用方的语义是"这条链有没有起来",而它确实没起来。墓碑是
+    给人看的,不改变调用方的判断。
+    """
     assert bus.publish("nobody.subscribes", {}, bus.AGENT_SERVICE) is None
-    assert db.list_events() == []
+    rows = db.list_events()
+    assert len(rows) == 1
+    assert rows[0]["status"] == bus.STATUS_NO_SUBSCRIBER
+    assert rows[0]["target_agent"] == ""      # 没有收件人,而那正是它要说的事
+
+
+def test_tombstone_does_not_enter_the_work_queue(db):
+    """墓碑不是待办也不是故障:进 claim 会变成永远没人处理的僵尸,进 failed 会把
+    "没人订阅"报成故障。两条查询本来就按 status/target 精确作用域,这里钉住它。"""
+    bus.publish("nobody.subscribes", {}, bus.AGENT_SERVICE)
+    assert db.claim_events("", limit=10) == []
+    assert db.claim_events(bus.AGENT_ANALYST, limit=10) == []
+    assert db.count_failed_events() == 0
+    assert db.reclaim_stale_events(older_than_seconds=0) == 0
 
 
 def test_explicit_target_bypasses_routing_table(db):

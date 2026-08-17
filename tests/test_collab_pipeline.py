@@ -338,9 +338,19 @@ def test_degraded_diagnosis_is_not_forwarded_to_marketing(db):
     with patch.object(collab, "_llm_explain", side_effect=RuntimeError("llm down")):
         stats = collab.run_once()
     assert stats["analyst"]["done"] == 1
-    forwarded = [e for e in db.list_events() if e["event_type"] == bus.EV_INSIGHT_DIAGNOSIS]
+    # 降级诊断确实**没有被投给任何 Agent**——这是这条测试的本意。
+    forwarded = [e for e in db.list_events()
+                 if e["event_type"] == bus.EV_INSIGHT_DIAGNOSIS
+                 and e["status"] != bus.STATUS_NO_SUBSCRIBER]
     assert forwarded == []
     assert db.list_outreach_drafts() == []
+    # 但它会留一条墓碑:"归因降级了所以没往下走"这件事本身必须在事件表里看得见,
+    # 否则它和"这条链根本没跑起来"无法区分(见 bus.STATUS_NO_SUBSCRIBER)。
+    tombstones = [e for e in db.list_events()
+                  if e["status"] == bus.STATUS_NO_SUBSCRIBER]
+    assert len(tombstones) == 1
+    assert tombstones[0]["event_type"] == bus.EV_INSIGHT_DIAGNOSIS
+    assert tombstones[0]["payload"]["degraded"] is True
 
 
 def test_attach_correlation_failure_does_not_lose_drafts_or_fail_event(db, monkeypatch):

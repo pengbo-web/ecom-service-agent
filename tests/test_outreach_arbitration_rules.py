@@ -372,10 +372,19 @@ def test_rate_limit_surfaces_in_the_approve_response(api, monkeypatch, interval_
     assert d.get_outreach_draft(did)["status"] == "draft"
 
 
-def test_run_once_consumes_guard_before_analyst():
-    """顺序钉子:风控排在参谋后面就失去意义(归因几十秒里推广可能已被批准发出)。"""
-    import inspect
+def test_run_once_consumes_guard_before_analyst(monkeypatch):
+    """顺序钉子:风控排在参谋后面就失去意义(归因几十秒里推广可能已被批准发出)。
 
-    from app.multi_agent import collab
-    src = inspect.getsource(collab.run_once)
-    assert src.index("AGENT_GUARD") < src.index("AGENT_ANALYST") < src.index("AGENT_GROWTH")
+    断言**实际调用顺序**,不读源码文本。原版比的是 `getsource` 里三个名字出现的
+    位置,而 docstring 里为解释这个顺序而提到它们,恰好就会让断言看的是注释而不是
+    代码——它红过一次,而行为完全正确。
+    """
+    from app.multi_agent import bus, collab
+
+    consumed: list[str] = []
+    monkeypatch.setattr(bus, "consume",
+                        lambda target, handler, limit=20: consumed.append(target)
+                        or {"claimed": 0, "done": 0, "failed": 0})
+    monkeypatch.setattr(collab, "_reclaim_stale", lambda *_a, **_k: 0)
+    collab.run_once()
+    assert consumed == [bus.AGENT_GUARD, bus.AGENT_ANALYST, bus.AGENT_GROWTH]
