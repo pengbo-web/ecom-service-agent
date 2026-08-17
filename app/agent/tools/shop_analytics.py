@@ -167,6 +167,60 @@ def product_diagnostics(window_days: int = 7, top_n: int = 5) -> dict:
         conn.close()
 
 
+def fulfillment_diagnostics(window_days: int = 7, top_n: int = 20) -> dict:
+    """按商品的**履约**诊断:已付款订单里有多少卡在待发货、卡了多久。
+
+    补的是一个真实的盲区:`stale_pending_order` 是产出草稿最多的商机类型,但在此
+    之前**没有任何异常规则会为它产生 `signal.anomaly`**——也就是说"待发货积压"这件
+    事永远不会自己触发一次归因,只能等某条**退款率**异常恰好跑到同一个商品身上,
+    再把那条与发货无关的诊断挂上去当依据(实测 draft 41,见
+    `collab._diagnosis_explains_opportunity`)。
+
+    **滞留的判定必须复用 growth 的那两个常量**(`_STALE_PENDING_STATUS` /
+    `_STALE_PENDING_HOURS`),不能在这里另写一个小时数。两处各定一个的后果是信号
+    与草稿对"什么叫滞留"意见不一致:扫描说这个商品积压了,商机集合里却一条都找不
+    到(或反过来),而两边各自看都自洽,极难查。
+
+    分母口径与 `product_diagnostics` 一致(按 `order_items ⋈ orders` 以 sku 分组,
+    多商品订单会被每个 SKU 各计一次),所以同一张报表里两个比率可以直接对着看。
+    只统计**已付款**(status 已推进到 pending)的订单——未支付的单子不发货是买家
+    的原因,不是履约问题,混进来会让这个指标失去意义。
+    """
+    from app.agent.tools.growth import _STALE_PENDING_HOURS, _STALE_PENDING_STATUS
+
+    conn = get_db().connect()
+    try:
+        w = _window_clause(window_days)
+        stale_before = dialect.now_minus(int(_STALE_PENDING_HOURS), "hours")
+        rows = conn.execute(
+            f"SELECT oi.sku AS sku, MAX(oi.name) AS name, "
+            f"       COUNT(DISTINCT o.order_id) AS orders, "
+            f"       COUNT(DISTINCT CASE WHEN o.status = ? "
+            f"            AND o.created_at <= {stale_before} "
+            f"            THEN o.order_id END) AS stale, "
+            f"       MIN(CASE WHEN o.status = ? THEN o.created_at END) AS oldest "
+            f"FROM order_items oi JOIN orders o ON o.order_id = oi.order_id "
+            f"WHERE o.created_at >= {w} AND oi.sku IS NOT NULL AND oi.sku != '' "
+            f"GROUP BY oi.sku ORDER BY stale DESC, orders DESC LIMIT ?",
+            (_STALE_PENDING_STATUS, _STALE_PENDING_STATUS, max(1, int(top_n)))
+        ).fetchall()
+        products = []
+        for r in rows:
+            orders = int(r["orders"] or 0)
+            stale = int(r["stale"] or 0)
+            products.append({
+                "sku": r["sku"], "name": r["name"], "orders": orders,
+                "stale_orders": stale, "stale_rate": _rate(stale, orders),
+                # 最老那单的下单时间,给归因一个"积压有多久"的量级参照。
+                "oldest_pending_at": r["oldest"],
+            })
+        return {"success": True, "window_days": int(window_days),
+                "stale_after_hours": int(_STALE_PENDING_HOURS),
+                "pending_status": _STALE_PENDING_STATUS, "products": products}
+    finally:
+        conn.close()
+
+
 def service_quality(window_days: int = 7) -> dict:
     """服务质量:按 skill 的执行成功率 / 工具失败率 / 转人工率。
 

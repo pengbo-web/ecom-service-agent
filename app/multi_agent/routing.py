@@ -84,7 +84,12 @@ def _marketing_worthy(payload: dict) -> bool:
 #: 值得唤醒营销的异常类型。与 `AUTONOMOUS_DRAFT_KINDS`(营销扫哪些商机)是
 #: 两件事:这里说的是"什么异常配得上一次营销动作",那里说的是"被唤醒之后去
 #: 捞哪几类人"。
-_MARKETING_WORTHY_KINDS = frozenset({"refund_rate_high"})
+_MARKETING_WORTHY_KINDS = frozenset({"refund_rate_high",
+                                     # 履约延迟是**唯一能解释滞留订单商机**的诊断
+                                     # (见 collab._DIAGNOSIS_EXPLAINS)。它进来之前,
+                                     # 滞留订单的草稿只能借一条退款率诊断当依据,
+                                     # 而两者没有因果关系(实测 draft 41)。
+                                     "fulfillment_delay_high"})
 
 
 #: 优先级档位。只设三档,不搞 0-100 的连续值——连续值会让每次新增订阅都要
@@ -116,7 +121,10 @@ def _anomaly_priority(payload: dict) -> int:
 #: `order_items.sku` 比较——比较永远不成立,于是这条闸变成永远不触发的死代码,
 #: **不报错、不留日志**。这个仓库在 `render_buyer_hints` 上已经栽过一次同样
 #: 形态的跤,所以宁可把判据写死在表里,也不用"kind 里带 rate 就算"这种推断。
-_PAUSE_WORTHY_KINDS = frozenset({"refund_rate_high", "bad_review_rate_high"})
+_PAUSE_WORTHY_KINDS = frozenset({"refund_rate_high", "bad_review_rate_high",
+                                 # 发不出去的货就别再推广——这条比另外两条更直接:
+                                 # 积压时继续催付款/催下单,只会把积压做得更大。
+                                 "fulfillment_delay_high"})
 
 
 def _pause_worthy(payload: dict) -> bool:

@@ -11,7 +11,9 @@ from __future__ import annotations
 
 from app.agent.tools import reviews as rv
 from app.agent.tools import shop_analytics as sa
-from app.agent.tools.shop_analytics import product_diagnostics, service_quality
+from app.agent.tools.shop_analytics import (fulfillment_diagnostics,
+                                            product_diagnostics,
+                                            service_quality)
 
 # product_diagnostics 只返回"退款单数 DESC、下单量 DESC"的前 N 名,这个 N 具名
 # 成常量而不是留在调用处的字面量 20——下面 products_truncated 的判断和这次调用
@@ -32,6 +34,10 @@ def _thresholds() -> dict:
         "min_samples": int(getattr(settings, "anomaly_min_samples", 5)),
         "angry_rate": float(getattr(settings, "anomaly_angry_rate", 0.20)),
         "bad_review_rate": float(getattr(settings, "anomaly_bad_review_rate", 0.30)),
+        # 履约:已付款却卡在待发货的比例。阈值比退款率宽——积压 25% 已经是
+        # 明确的履约问题,而退款率 15% 才算异常,两者的正常基线本来不同。
+        "stale_fulfillment_rate": float(
+            getattr(settings, "anomaly_stale_fulfillment_rate", 0.25)),
         # 服务健康专用的判定窗口(见 settings.anomaly_service_window_days 那段
         # 注释里的实测教训)。放进 _thresholds 而不是单独取一次:它和上面几条
         # 一样是"判异常的口径",应当跟着 thresholds 一起出现在返回值里,让看到
@@ -119,6 +125,22 @@ def anomaly_scan(window_days: int = 7) -> dict:
                 p["refund_rate"], t["refund_rate"],
                 {"orders": p["orders"], "refunds": p["refunds"],
                  "top_reason": top_reason, "refund_reasons": p["refund_reasons"]},
+            ))
+
+    # 履约:已付款却卡在待发货的比例。补的是"产出草稿最多的商机类型
+    # (stale_pending_order)此前没有任何异常规则会为它发信号"这个盲区——那导致
+    # 滞留订单的草稿只能借一条**退款率**诊断当依据,而两者没有因果关系。
+    # 滞留口径由 growth 的常量决定,不在这里另定(见 fulfillment_diagnostics)。
+    ful = fulfillment_diagnostics(window_days=window_days, top_n=PRODUCT_SCAN_LIMIT)
+    for p in ful.get("products", []):
+        if (p["orders"] >= t["min_samples"]
+                and p["stale_rate"] >= t["stale_fulfillment_rate"]):
+            anomalies.append(_finding(
+                "fulfillment_delay_high", p["sku"], p["name"],
+                p["stale_rate"], t["stale_fulfillment_rate"],
+                {"orders": p["orders"], "stale_orders": p["stale_orders"],
+                 "stale_after_hours": ful.get("stale_after_hours"),
+                 "oldest_pending_at": p["oldest_pending_at"]},
             ))
 
     products_total = _scanned_sku_total(window_days)
