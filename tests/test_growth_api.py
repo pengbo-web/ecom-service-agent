@@ -454,7 +454,7 @@ def test_approve_blocked_when_buyer_in_manual_takeover(client, draft, monkeypatc
     monkeypatch.setattr(client.app.state, "deliver_outreach",
                         lambda d: sent.append(1) or True)
     monkeypatch.setattr("app.multi_agent.arbitration.check_outreach_allowed",
-                        lambda user_id, hitl=None, db=None:
+                        lambda user_id, hitl=None, db=None, draft=None:
                             (False, arb.BLOCK_MANUAL, "该买家的会话正由人工客服接管中"))
     r = client.post(f"/api/admin/growth/drafts/{draft}/approve", headers=AUTH)
     assert r.status_code == 200

@@ -88,16 +88,30 @@ def test_scan_does_not_call_llm(db, monkeypatch):
 
 
 def test_scan_and_publish_shares_one_correlation_id(db):
-    """同一次扫描出的多条异常属于同一条协作链,便于时间线聚合。"""
-    _orders(db, "P001", 20, refunds=6)
+    """同一次扫描出的多条异常属于同一条协作链,便于时间线聚合。
+
+    **`published` 数的是信号,`len(events)` 数的是投递记录,扇出之后两者不再相等。**
+    `signal.anomaly` 现在有两个订阅者(见 `routing.SUBSCRIPTIONS`),而扇出发生在
+    写入时——路由表算出 N 个订阅者就插 N 行。`publish` 一条信号仍只返回一个
+    correlation_id,所以 `published` 仍然按信号计数。
+    """
+    _orders(db, "P001", 20, refunds=6)          # → refund_rate_high(subject 是 SKU)
     for _ in range(9):
         db.record_skill_trace("s", "u", "track-order", [], "tool_error")
     db.record_skill_trace("s", "u", "track-order", [], "success")
     out = anomaly.scan_and_publish(window_days=7)
     assert out["published"] >= 2
     events = db.list_events(correlation_id=out["correlation_id"])
-    assert len(events) == out["published"]
-    assert {e["target_agent"] for e in events} == {"analyst"}
+    by_target: dict[str, list] = {}
+    for e in events:
+        by_target.setdefault(e["target_agent"], []).append(e)
+    # 参谋订阅**所有**异常;风控只订阅 subject 是商品 SKU 的那些
+    # (refund_rate_high / bad_review_rate_high),所以 tool_error_rate_high
+    # 不该出现在 guard 那一侧。
+    assert set(by_target) == {"analyst", "guard"}
+    assert len(by_target["analyst"]) == out["published"]
+    assert {e["payload"]["kind"] for e in by_target["guard"]} == {"refund_rate_high"}
+    assert len(events) == out["published"] + len(by_target["guard"])
 
 
 # ---- 边界值:>= 的两类比较都必须精确钉在边界上,不能悄悄退化成 > ----

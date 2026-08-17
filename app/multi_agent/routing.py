@@ -29,10 +29,11 @@ import logging
 from dataclasses import dataclass
 from typing import Callable, Optional
 
-from app.multi_agent.bus import (AGENT_ANALYST, AGENT_GROWTH, AGENT_HUMAN,
-                                 EV_DRAFTS_READY, EV_INSIGHT_DIAGNOSIS,
-                                 EV_OUTREACH_CONVERTED, EV_OUTREACH_NO_CHANGE,
-                                 EV_OUTREACH_SENT, EV_SIGNAL_ANOMALY)
+from app.multi_agent.bus import (AGENT_ANALYST, AGENT_GROWTH, AGENT_GUARD,
+                                 AGENT_HUMAN, EV_DRAFTS_READY,
+                                 EV_INSIGHT_DIAGNOSIS, EV_OUTREACH_CONVERTED,
+                                 EV_OUTREACH_NO_CHANGE, EV_OUTREACH_SENT,
+                                 EV_SIGNAL_ANOMALY)
 
 logger = logging.getLogger(__name__)
 
@@ -104,12 +105,52 @@ def _anomaly_priority(payload: dict) -> int:
     return P_URGENT if payload.get("kind") == "service_escalation" else P_NORMAL
 
 
+#: 哪些异常的 `subject` 是**商品 SKU**——只有这些才谈得上"暂停推广该商品"。
+#:
+#: 这张表必须按 subject 的**语义**来定,不能按"听起来严重不严重":
+#:   refund_rate_high / bad_review_rate_high  → subject 是 sku      ✅
+#:   tool_error_rate_high / human_rate_high   → subject 是 skill 名 ❌
+#:   service_escalation                       → subject 是会话 id   ❌
+#:   angry_rate_high                          → subject 是 "shop"   ❌
+#: 放错一个,静默记录的 subject 就会是个技能名或会话号,而它要跟
+#: `order_items.sku` 比较——比较永远不成立,于是这条闸变成永远不触发的死代码,
+#: **不报错、不留日志**。这个仓库在 `render_buyer_hints` 上已经栽过一次同样
+#: 形态的跤,所以宁可把判据写死在表里,也不用"kind 里带 rate 就算"这种推断。
+_PAUSE_WORTHY_KINDS = frozenset({"refund_rate_high", "bad_review_rate_high"})
+
+
+def _pause_worthy(payload: dict) -> bool:
+    """这条异常信号该不该触发商品级推广静默。**纯函数**(不读库、不调模型)。
+
+    只看 kind 与 subject 两个字段:kind 在白名单里,且 subject 非空(拿不到商品
+    就无从静默)。**不在这里判"静默功能开没开"**——那是
+    `settings.collab_promotion_pause_hours`,读它意味着路由结果随配置漂移,而
+    路由发生在发布那一刻、写进事件表就固定了。开关放在处理器里,事件照投、照
+    消费、照留痕,关掉时只是不写那条会拦人的记录(见 `collab.handle_guard`)。
+    """
+    if str(payload.get("kind") or "") not in _PAUSE_WORTHY_KINDS:
+        return False
+    return bool(str(payload.get("subject") or "").strip())
+
+
 #: 事件类型 → 订阅者列表。**新增一个 Agent 只需在这里加一行。**
 SUBSCRIPTIONS: dict[str, list[Subscription]] = {
-    # 客服侧埋点与确定性扫描发出的异常 → 参谋归因
+    # 客服侧埋点与确定性扫描发出的异常 → **同时**投给参谋和风控两个节点。
+    #
+    # 这是本表里唯一一处真正的扇出(在此之前 6 个事件 6 条订阅,全是 1:1,
+    # 扇出/谓词/优先级三套机制里只有优先级有真实用户)。两个分支并行、互不
+    # 依赖、失败隔离:
+    #   参谋 → 想明白"为什么"(要调 LLM,慢,可能降级)
+    #   风控 → 立刻"少做一件事"(纯确定性写库,快,不该等归因结论)
+    #
+    # 顺序上风控**不能**排在参谋后面:等归因跑完(实测几十秒)才暂停推广,那几十
+    # 秒里正好可能有人点批准把这条推广发出去。负向动作要抢在前面,这也是给它
+    # P_URGENT 的理由——它不需要更"重要",它需要更"早"。
     EV_SIGNAL_ANOMALY: [
         Subscription(AGENT_ANALYST, priority=_anomaly_priority,
                      reason="所有异常信号都由参谋归因;转人工类优先"),
+        Subscription(AGENT_GUARD, when=_pause_worthy, priority=P_URGENT,
+                     reason="商品级经营异常先暂停该商品推广,不等归因结论"),
     ],
     # 参谋的诊断 → 营销(带条件)
     EV_INSIGHT_DIAGNOSIS: [

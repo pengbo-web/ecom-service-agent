@@ -482,6 +482,61 @@ def handle_signal(event: dict) -> dict:
     return {"subject": subject, "degraded": degraded, "forwarded": forwarded}
 
 
+def handle_guard(event: dict) -> dict:
+    """风控处理器:商品出经营异常时暂停该商品的推广。**只做负向动作。**
+
+    这是 `signal.anomaly` 扇出的第二个分支,与参谋归因并行。它刻意保持**极简**:
+    纯确定性写库,不调 LLM、不查商品明细、不做判断——理由是它必须比归因**快**。
+    归因实测几十秒,那几十秒里正好可能有人点批准把这个出问题的商品推广发出去;
+    静默这件事晚一秒都是白做的。
+
+    **关掉时不是不消费,而是不写记录。** `collab_promotion_pause_hours <= 0` 时
+    照样认领事件、照样在时间线上留下一条 done——这样"扇出跑通了"这件事的可观测
+    性不依赖某个部署方是否采纳了这条策略;真正被关掉的只是"写一条会拦人的记录"。
+
+    幂等:同商品重复写静默是安全的(生效期取最晚那条,见
+    `Database.active_promotion_pauses`),所以这里不做"已有静默就跳过"的检查——
+    做了反而会丢掉"这次是哪条链要求静默的"这个回溯线索。
+    """
+    from datetime import datetime, timedelta
+
+    from app.config.settings import settings
+
+    anomaly = event.get("payload") or {}
+    corr = event.get("correlation_id") or ""
+    subject = str(anomaly.get("subject") or "").strip()
+    kind = str(anomaly.get("kind") or "")
+
+    hours = int(getattr(settings, "collab_promotion_pause_hours", 0) or 0)
+    if hours <= 0:
+        logger.info("商品静默策略未开启(collab_promotion_pause_hours=0),"
+                    "本条只留痕不写记录 subject=%s kind=%s", subject, kind)
+        return {"subject": subject, "paused": False, "reason": "策略未开启"}
+    if not subject:
+        # 路由谓词已经挡掉空 subject,这里是第二道:谓词是纯函数、只看 payload,
+        # 而事件可能是历史行被 reclaim 回来的(那时谓词可能还不是现在这版)。
+        return {"subject": "", "paused": False, "reason": "无商品标识"}
+
+    until = (datetime.now() + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+    subject_name = str(anomaly.get("subject_name") or subject)
+    reason = f"{kind}(商品:{subject_name})"
+    try:
+        from app.db import get_db
+        pause_id = get_db().add_promotion_pause(
+            subject=subject, until=until, kind=kind, reason=reason,
+            correlation_id=corr)
+    except Exception as exc:  # noqa: BLE001 抛出去让这条事件判 failed 并可重投
+        # 这里**不**吞异常(与参谋侧的店主通知相反):通知写失败只是少一条提醒,
+        # 而静默写失败意味着一个正在出问题的商品**仍然可以被推广**。让它变成
+        # failed,`retry_failed_event` 就能把它捞回来重投。
+        logger.error("商品静默写入失败 subject=%s corr=%s: %s", subject, corr, exc)
+        raise
+    logger.info("商品推广已静默至 %s subject=%s kind=%s pause_id=%s",
+                until, subject, kind, pause_id)
+    return {"subject": subject, "paused": True, "until": until,
+            "pause_id": pause_id}
+
+
 def handle_insight(event: dict) -> dict:
     """营销处理器:找商机 → 逐个起草 → 通知人工审批。**不发送**。
 
@@ -699,22 +754,31 @@ def run_once(limit: int = 20,
     是刻意的:回收在前,被放回 pending 的事件在**本轮**就能被重新认领,而不用等
     到下一轮。
 
-    本函数在同一次调用里顺序做两件事:先 `bus.consume(AGENT_ANALYST, ...)`
-    认领并处理参谋段事件——`handle_signal` 对值得营销的诊断会同步
-    `bus.publish(EV_INSIGHT_DIAGNOSIS, target=AGENT_GROWTH)` 并当场提交;
-    紧接着本函数再 `bus.consume(AGENT_GROWTH, ...)` 认领营销段事件,这时刚
-    发布的 insight.diagnosis 已经落库可见,会在**同一次** `run_once()` 里
-    被立刻消费掉,生成草稿。
+    本函数在同一次调用里顺序做三件事:
+
+    1. `bus.consume(AGENT_GUARD, ...)` —— **必须排在最前**。一条
+       `signal.anomaly` 现在扇出两条投递记录(参谋 + 风控,见
+       `routing.SUBSCRIPTIONS`),而风控做的是负向动作:暂停出问题商品的推广。
+       它排在参谋后面就失去意义了——归因实测几十秒,那几十秒里正好可能有人点
+       批准把这个商品的推广发出去。**负向动作要抢在正向动作之前落地**,这也是
+       它在路由表里拿 `P_URGENT` 的同一个理由:不是更重要,是更早。
+    2. `bus.consume(AGENT_ANALYST, ...)` —— 参谋归因。`handle_signal` 出诊断后
+       会 `bus.publish(EV_INSIGHT_DIAGNOSIS)` 并当场提交(投给谁由路由表定,
+       参谋自己不知道)。
+    3. `bus.consume(AGENT_GROWTH, ...)` —— 营销段。上一步刚发布的
+       insight.diagnosis 此时已落库可见,会在**同一次** `run_once()` 里被立刻
+       消费掉,生成草稿。
 
     也就是说:对一条新到的 signal.anomaly,调用一次 `run_once()` 就足以
     走完全链路,不需要连续调两次去"分段推进";再调一次只会看到队列已空
     (`claimed == 0`),这正是幂等消费的体现,不代表还有下一段要跑。
-    返回两段各自的消费统计 {claimed, done, failed[, persist_failed]},外加本轮
+    返回三段各自的消费统计 {claimed, done, failed[, persist_failed]},外加本轮
     回收的滞留事件条数 `reclaimed`。
     """
     reclaimed = _reclaim_stale(reclaim_after_seconds)
     return {
         "reclaimed": reclaimed,
+        "guard": bus.consume(bus.AGENT_GUARD, handle_guard, limit=limit),
         "analyst": bus.consume(bus.AGENT_ANALYST, handle_signal, limit=limit),
         "growth": bus.consume(bus.AGENT_GROWTH, handle_insight, limit=limit),
     }

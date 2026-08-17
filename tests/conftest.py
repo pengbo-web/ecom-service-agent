@@ -94,6 +94,17 @@ def _force_local_session_backends():
     # 那张库积着几十条历史工单——闸一开,全部协作测试里的营销消费都被静默拦停,
     # 症状是"草稿数为 0",完全看不出跟工单有关。专项测试自行开启并打桩计数。
     settings.collab_marketing_pause_open_handoffs = 0
+    _orig_interval = settings.outreach_min_interval_hours
+    # 钉成 0(=关),与上面那条同一个理由的另一种形态。**生产默认是 1 小时**,
+    # 但既有用例里"同一买家连批两条草稿"是常见写法(如
+    # test_approve_does_not_start_second_chain_for_same_user_and_kind),它们测的
+    # 是别的规则,被频次闸拦掉后症状是 sent=False——看起来像投递坏了,完全看不出
+    # 跟频次有关。专项用例(test_outreach_arbitration_rules.py)自行开启。
+    settings.outreach_min_interval_hours = 0
+    _orig_promo_pause = settings.collab_promotion_pause_hours
+    # 钉成 0(=不写静默记录)。开着的话每次协作测试跑完 refund_rate_high 链路都会
+    # 留下真实静默记录,后续同商品的投递用例会被跨用例污染。
+    settings.collab_promotion_pause_hours = 0
     _orig_mcp = settings.mcp_enabled
     # 钉成 False(= 字段默认值)。**本机 .env 设了 MCP_ENABLED=true**,于是每个
     # 建 Agent 的测试都会去连 `127.0.0.1:9123` 这个**独立进程**:
@@ -146,6 +157,8 @@ def _force_local_session_backends():
     settings.mcp_enabled = _orig_mcp
     settings.demo_mode = _orig_demo
     settings.collab_marketing_pause_open_handoffs = _orig_pause
+    settings.outreach_min_interval_hours = _orig_interval
+    settings.collab_promotion_pause_hours = _orig_promo_pause
     settings.skill_semantic_clustering_enabled = _orig_cluster
     settings.reply_pipeline_enabled = _orig_rp
     settings.langfuse_enabled = _orig_lf

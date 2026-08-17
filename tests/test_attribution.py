@@ -205,7 +205,7 @@ def test_approve_writes_no_baseline_when_arbitration_refuses(client, draft, monk
                         lambda dr: sent.append(1) or True)
     monkeypatch.setattr(
         "app.multi_agent.arbitration.check_outreach_allowed",
-        lambda user_id, hitl=None, db=None:
+        lambda user_id, hitl=None, db=None, draft=None:
             (False, arb.BLOCK_MANUAL, "该买家的会话正由人工客服接管中"))
 
     r = client.post(f"/api/admin/growth/drafts/{draft}/approve", headers=AUTH)

@@ -540,6 +540,27 @@ class Database:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_seller_notif_read "
                 "ON seller_notifications(read, created_at DESC)")
+            # 商品级推广静默。由总线的 guard 分支在收到 signal.anomaly 时写入
+            # (见 collab.handle_guard),投递侧仲裁读取。
+            #
+            # 为什么要落表而不是在闸里现算"最近有没有该商品的异常":静默是一个
+            # **对外动作被拦掉**的原因,它必须能被回溯——店主问"为什么这条没发
+            # 出去",答案得指得出一行记录,而不是重新跑一遍当时的判断。
+            # correlation_id 让这行记录能挂回产生它的那条协作链。
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS promotion_pauses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subject TEXT NOT NULL,
+                    kind TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    correlation_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    until TEXT NOT NULL
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_promo_pause_subject "
+                "ON promotion_pauses(subject, until DESC)")
             conn.commit()
         finally:
             conn.close()
@@ -1912,6 +1933,73 @@ class Database:
                 (status, reviewed_by, self._now(), draft_id))
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
+
+    def last_outreach_sent_at(self, user_id: str) -> Optional[str]:
+        """该买家最近一条**已投递**营销消息的时间;从未发过返回 None。
+
+        只认 `status='sent'`。draft/approved 都不算——只有真的投递出去的消息才
+        构成"刚被打扰过"这个事实,而 approved 有可能投递失败后被退回 draft
+        (见 `revert_outreach_to_pending`),把它算进来会让一次失败的投递白白
+        冻结这个买家一小时。
+
+        用 MAX() 而不是 ORDER BY ... LIMIT 1:`sent_at` 上没有索引,两种写法都
+        是全表扫这个用户的行,MAX 少一次排序,且不依赖行序。
+        """
+        uid = (user_id or "").strip()
+        if not uid:
+            return None
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT MAX(sent_at) AS t FROM outreach_drafts "
+                "WHERE user_id = ? AND status = 'sent' AND sent_at IS NOT NULL",
+                (uid,)).fetchone()
+            return (dict(row).get("t") or None) if row else None
+        finally:
+            conn.close()
+
+    def add_promotion_pause(self, subject: str, until: str, kind: str = "",
+                            reason: str = "", correlation_id: str = "") -> int:
+        """写一条商品级推广静默记录,返回新行 id。
+
+        不做"同商品已有静默就跳过"的去重:一条链一条记录,重复的静默是**幂等
+        的**(生效期取最晚的那条,见 `active_promotion_pauses`),而合并写入会
+        丢掉"这次是哪条链要求静默的"这个回溯线索。表本身极小(商品数 ×
+        异常次数),不值得为省几行牺牲可追溯性。
+        """
+        conn = self.connect()
+        try:
+            cur = conn.execute(
+                self.d.returning_id(
+                    "INSERT INTO promotion_pauses "
+                    "(subject, kind, reason, correlation_id, created_at, until) "
+                    "VALUES (?, ?, ?, ?, ?, ?)"),
+                (str(subject or ""), str(kind or ""), str(reason or ""),
+                 str(correlation_id or ""), self._now(), str(until)))
+            new_id = cur.fetchone()[0]
+            conn.commit()
+            return int(new_id)
+        finally:
+            conn.close()
+
+    def active_promotion_pauses(self, now: Optional[str] = None) -> list[dict]:
+        """当前仍生效(until > now)的静默记录,晚到期的在前。
+
+        **只按时间过滤,不在 SQL 里按商品过滤**:静默记录的 subject 来自
+        `order_items.sku`(如 `HMDP-1`),而调用方手里的商品标识可能是别的渠道
+        格式(hmdp product.id `1`)。这个仓库已经在 `render_buyer_hints` 上栽过
+        一次同样的跤——裸字符串相等永远不成立,而且**不报错、只是永远匹配不上**。
+        所以商品比较交给调用方用 `product_ref.same_item` 归一后做,SQL 这层只
+        负责"还没过期"这一个确定性条件。
+        """
+        conn = self.connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM promotion_pauses WHERE until > ? "
+                "ORDER BY until DESC", (now or self._now(),)).fetchall()
+            return [dict(r) for r in rows]
         finally:
             conn.close()
 

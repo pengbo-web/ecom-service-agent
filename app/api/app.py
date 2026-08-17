@@ -2285,8 +2285,11 @@ def create_app(session_manager: Optional[SessionManager] = None,
         # 必须在**认领之前**判,否则会出现"认领成功→仲裁拒绝→退回"的多余翻转,
         # 白白消耗掉这条草稿的一次幂等机会。
         from app.multi_agent.arbitration import check_outreach_allowed
+        # 传 draft 是为了让**商品级**静默那条规则能生效(它要拿草稿的 order_id
+        # 反查 SKU)。跟进序列那个调用点手上只有 outreach_followups 行、没有商品
+        # 维度,所以那边不传——不传等于那条规则不适用,而不是拒绝。
         allowed, arb_code, arb_reason = check_outreach_allowed(
-            draft.get("user_id", ""), hitl=hitl)
+            draft.get("user_id", ""), hitl=hitl, draft=draft)
         if not allowed:
             # block_code 是新增的机器可读字段(BLOCK_MANUAL/BLOCK_OPEN_HANDOFF/
             # BLOCK_UNKNOWN),只在这里追加,不改动既有的 success/sent/reason

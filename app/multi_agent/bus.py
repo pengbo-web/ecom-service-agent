@@ -28,6 +28,12 @@ AGENT_SERVICE = "service"     # 客服服务 Agent(C 端)
 AGENT_ANALYST = "analyst"     # 店铺参谋 Agent(B 端只读)
 AGENT_GROWTH = "growth"       # 营销增长 Agent(B 端草稿型)
 AGENT_HUMAN = "human"         # 人工闸:需要人来看的事件投给它
+# 风控/静默节点(B 端,只做**负向**动作):收到经营异常时暂停对应商品的推广。
+# 单独立成一个节点而不是塞进 growth,是因为它与 growth 的取向相反——growth 决定
+# "多做一件事"(起草触达)、guard 决定"少做一件事"(停掉推广)。合在一个消费者里,
+# "起草失败"与"静默失败"会共用同一条事件记录的 status,一个失败会连带另一个被
+# 重投,而它们的重试语义完全不同(起草可以重来,静默重复写是幂等的)。
+AGENT_GUARD = "guard"
 
 # 事件类型
 EV_SIGNAL_ANOMALY = "signal.anomaly"        # 客服侧/扫描器发现异常
