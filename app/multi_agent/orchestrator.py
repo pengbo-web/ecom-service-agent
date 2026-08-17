@@ -75,6 +75,11 @@ class MultiAgentOrchestrator:
         self.client = self.engine.client
         self._turn_stream_eligible = False   # E1:见 set_turn_stream_eligible
         self._turn_progress_gate = None   # L3③ 并发路径修复:chat() 每轮重建,见该方法文档
+        # 触达前情:chat() 每轮反查后覆盖。先在这里置空,不靠 getattr 兜——
+        # _build_system_prompt 也可能在 chat() 之外被调用(测试直接建实例读
+        # prompt),那时属性不存在就是一次 AttributeError。
+        self._outreach: Optional[dict] = None
+        self._outreach_awaiting = False
 
     def set_turn_stream_eligible(self, eligible: bool) -> None:
         """E1:streaming.py 每轮在调 chat() 前对着总控注入(它才是
@@ -101,6 +106,13 @@ class MultiAgentOrchestrator:
         # _build_messages 里拼进 system prompt 的。每轮显式设置、不依赖上一轮
         # 残留——与 set_turn_kb_prefetch_future/clear 同姿态。
         set_current_actor(ACTOR_BUYER)
+        # 触达前情:每轮**反查一次**并暂存。路由(下面)与 prompt 组装
+        # (_build_system_prompt)都要用它,查两次会多一次库读,而且理论上能拿到
+        # 两份不同结果——承接窗口边界正好落在两次读之间时。整段 fail-soft。
+        from app.multi_agent.outreach_context import awaiting_reply, recent_outreach
+        self._outreach = recent_outreach(getattr(self.engine, "user_id", "") or "")
+        self._outreach_awaiting = bool(self._outreach) and awaiting_reply(
+            self.engine.raw_messages)
         self._turn_progress_gate = ProgressStageGate()
         self.engine.set_turn_progress_gate(self._turn_progress_gate)
         # 统一查询理解(默认):一次调用出 domain/intent/need_kb/kb_query,
@@ -127,14 +139,31 @@ class MultiAgentOrchestrator:
             # token/延迟完整入账;engine.client 在下面才被覆盖,用它会漏记首轮。
             # 这次调用本身就在"当前"线程同步执行——KB 预取(如果提交了)已经在
             # 另一个线程独立跑着,不需要为了"并发"额外把这次调用也挪到线程里。
-            qu = understanding.understand(user_input, self.engine.raw_messages,
-                                          self.client, self.engine.model)
-            key = qu.domain or self._last_key or DEFAULT_AGENT
+            # 触达前情必须喂给**这一步**,不能只留在下面的回落里:understand() 只看
+            # 最近 5 条 user 消息,而触达是 assistant 消息——对它完全不可见。实测
+            # 一条催付款触达之后买家回「好啊,帮我看看」,这一步判成 aftersale,而
+            # aftersale 没有 query_coupons/place_order:券讲不清、款也付不了。
+            from app.multi_agent.outreach_context import router_hint
+            qu = understanding.understand(
+                user_input, self.engine.raw_messages, self.client,
+                self.engine.model,
+                outreach_hint=(router_hint(self._outreach)
+                               if self._outreach_awaiting else ""))
+            # 回落顺序:LLM 判出了明确域就听它的(买家完全可以对一条催付款触达
+            # 回"我要退款",那时必须去售后);判不出来时,**拿商机类型猜比拿粘性
+            # 上一轮猜准**——而粘性那一轮可能是触达之前几小时的另一个话题。
+            # 触达偏好只在"上一条 assistant 就是这条触达"时参与(见
+            # outreach_context.awaiting_reply),话题走开之后就不再干扰路由。
+            key = (qu.domain or self._outreach_preferred()
+                   or self._last_key or DEFAULT_AGENT)
         else:
             qu = None
             kb_future = None
             kb_query = None
-            key = self.router.route(user_input, self.engine.raw_messages)
+            from app.multi_agent.outreach_context import router_hint
+            key = self.router.route(user_input, self.engine.raw_messages,
+                                    outreach_hint=router_hint(self._outreach)
+                                    if self._outreach_awaiting else "")
         self._last_key = key
         if qu is not None and qu.domain is None:
             qu.domain = key          # 粘性解析结果回填:检索过滤拿到确定域
@@ -278,7 +307,11 @@ class MultiAgentOrchestrator:
             from app.prompts.agents import build_profile_prompt
             style_block = render_style_block(load_profile())
             return (build_profile_prompt(profile["base_prompt"], style_block)
-                    + self._buyer_hints_block())
+                    + self._buyer_hints_block()
+                    # 触达前情跟在诊断提示后面。顺序有意义:诊断提示是"回答这个
+                    # 商品时注意什么"(长期经验),触达前情是"这一轮是怎么开始的"
+                    # (本次会话),后者更贴近当下,放在更靠后=更靠近用户消息。
+                    + self._outreach_context_block())
         except Exception:  # noqa: BLE001 配置读取/拼接失败不能让买家会话失败
             logging.getLogger(__name__).warning(
                 "店铺语气组装失败,回落默认语气 prompt", exc_info=True)
@@ -308,6 +341,57 @@ class MultiAgentOrchestrator:
             return render_buyer_hints(entries, get_current_item())
         except Exception:  # noqa: BLE001 提示注入失败不该让买家会话失败
             logging.getLogger(__name__).warning("买家侧应答提示注入失败(本轮跳过)",
+                                                exc_info=True)
+            return ""
+
+    def _outreach_preferred(self) -> Optional[str]:
+        """本轮该由哪个画像承接这条触达;不适用返回 None(由调用方继续回落)。
+
+        两个前提都要成立:窗口内有已投递触达,**且**上一条 assistant 消息就是它
+        (`awaiting_reply`)。少了后一条,买家在 24 小时窗口内聊了三轮别的事之后,
+        路由仍会被拽回催付款。
+
+        fail-soft 返回 None:映射表读不出来就退回既有回落链,不影响这一轮。
+        """
+        if not self._outreach_awaiting:
+            return None
+        try:
+            from app.multi_agent.outreach_context import preferred_profile
+            key = preferred_profile(self._outreach)
+            # 只认真实存在的画像:映射表里写错一个名字(或将来删掉某个画像)时,
+            # 返回一个不存在的 key 会让下面 profiles.get(key) 落到
+            # `next(iter(...))` —— 那是**字典序第一个**画像,与意图毫无关系,
+            # 而且不报错。
+            return key if key in self.profiles else None
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).warning("触达画像偏好解析失败(本轮忽略)",
+                                                exc_info=True)
+            return None
+
+    def _outreach_context_block(self) -> str:
+        """营销触达 → 买家侧前情提示(补上"营销发完就走"那一跳)。
+
+        修的是一个实测缺陷:触达投递走 `_append_agent_reply(intent=
+        "growth_outreach")`,把消息追加进买家会话,然后营销退场。那条消息常常以
+        问句结尾(draft 41:「需要帮您看看是卡在哪儿了吗?」),买家回一句"好啊",
+        接手的画像能看到那句话,却不知道它是店铺主动发的、带了哪张券、关联哪一单。
+
+        **没有新建"营销承接画像"。** presale 手上早就有 query_coupons /
+        query_product / place_order / add_to_cart——回答营销问题、推动付款本来就
+        是它的活;新建一个只读画像等于做一个功能更弱的 presale 副本。缺的从头到尾
+        只是把上下文带过去。
+
+        **本轮触达对象复用 `self._outreach`**(chat() 每轮开头反查一次并暂存):
+        路由器和 prompt 组装都要用它,查两次会有两次库读,而且理论上可能拿到两份
+        不同的结果(窗口边界正好在两次读之间过期)。
+
+        fail-soft 同 `_buyer_hints_block`:任何一步出错返回空串。
+        """
+        try:
+            from app.multi_agent.outreach_context import render_outreach_context
+            return render_outreach_context(getattr(self, "_outreach", None))
+        except Exception:  # noqa: BLE001 提示注入失败不该让买家会话失败
+            logging.getLogger(__name__).warning("触达前情注入失败(本轮跳过)",
                                                 exc_info=True)
             return ""
 

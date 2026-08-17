@@ -1988,6 +1988,48 @@ class Database:
         finally:
             conn.close()
 
+    def recent_sent_outreach(self, user_id: str,
+                             within_hours: float) -> Optional[dict]:
+        """该买家最近一条**仍在承接窗口内**的已投递触达;没有则 None。
+
+        为什么是"反查"而不是"存一份会话上下文":触达投递走的是
+        `_append_agent_reply`——把消息追加进买家自己的客服会话。买家下一轮回复时,
+        需要的全部信息(商机类型、关联订单、券码)都已经在 `outreach_drafts` 那一行
+        里了,再复制一份到会话状态里只会多出一个会漂移的副本。
+
+        `within_hours` 是**承接窗口**,不是频次下限(那是
+        `outreach_min_interval_hours`,两个数各管一件事):过了这个窗口,买家这一轮
+        大概率是新问题而不是对那条触达的回应,继续把触达情境注进 prompt 会让客服
+        莫名其妙地提起一件顾客早就忘了的事。
+
+        时间比较用字符串(与 `last_outreach_sent_at` 同一理由:两边都是
+        `%Y-%m-%d %H:%M:%S`,字典序等于时间序)。
+        """
+        uid = (user_id or "").strip()
+        if not uid or float(within_hours) <= 0:
+            return None
+        from datetime import datetime, timedelta
+        earliest = (datetime.now() - timedelta(hours=float(within_hours))
+                    ).strftime("%Y-%m-%d %H:%M:%S")
+        conn = self.connect()
+        try:
+            row = conn.execute(
+                "SELECT * FROM outreach_drafts WHERE user_id = ? "
+                "AND status = 'sent' AND sent_at IS NOT NULL AND sent_at > ? "
+                "ORDER BY sent_at DESC LIMIT 1", (uid, earliest)).fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            # offer 是 JSON 文本列;坏 JSON 退成空 dict 而不是抛——这条读在买家
+            # 会话热路径上,一条脏数据不该让买家这一轮失败。
+            try:
+                item["offer"] = json.loads(item["offer"]) if item.get("offer") else {}
+            except (json.JSONDecodeError, TypeError):
+                item["offer"] = {}
+            return item
+        finally:
+            conn.close()
+
     def last_outreach_sent_at(self, user_id: str) -> Optional[str]:
         """该买家最近一条**已投递**营销消息的时间;从未发过返回 None。
 
