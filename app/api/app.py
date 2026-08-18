@@ -3175,6 +3175,21 @@ def create_app(session_manager: Optional[SessionManager] = None,
     def eval_status():
         return eval_runner.status()
 
+    @app.get("/api/eval/business", dependencies=[Depends(admin_auth)])
+    def eval_business(days: int = 0):
+        """真实流量上的业务效果报表:自助解决率 / 转人工率 / 平均轮次 / 差评率。
+
+        **与 `/api/eval/*` 那三个端点是两类东西,刻意放在一起以示对比。** 上面三个
+        跑的是沙箱里 10 条固定用例,回答"改了 Prompt 之后能力有没有退步";这一个读
+        生产数据,回答"这套系统在真实流量上到底好不好用"。沙箱里没有真实用户,算不出
+        转人工率——详见 `app/evaluation/business_metrics.py` 顶部。
+
+        `days=0` 表示全时段。响应里同时带全量对照与失真幅度:按来源过滤不是一句方法论
+        主张,它会改变结论,而改变了多少应当是个能被看见的数字。
+        """
+        from app.evaluation.business_metrics import business_report
+        return business_report(window_days=days or None)
+
     # 单页 SPA（web/dist）；/ 与 /dashboard 都进这个应用（前端按路径定位到看板 Tab）
     _spa_index = _DIST_DIR / "index.html"
     if _spa_index.exists():
