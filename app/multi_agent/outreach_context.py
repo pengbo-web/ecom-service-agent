@@ -161,11 +161,42 @@ def _kind_label(kind) -> str:
         return ""
 
 
-def render_outreach_context(outreach: Optional[dict]) -> str:
+#: 查券规则要用的工具名。单独具名:下面两支措辞的分岔全靠它,而字面量散在
+#: 判断和文案两处迟早会分家(改了工具名却忘了改文案,那句指令就指向一个不存在的工具)。
+COUPON_TOOL = "query_coupons"
+
+
+def render_outreach_context(outreach: Optional[dict],
+                            available_tools=None) -> str:
     """渲染成买家侧 system prompt 片段。没有触达/认不出情境返回空串。
 
     认不出商机类型时返回空,而不是给一段泛化的"顾客刚收到过一条消息"——一条说不清
     情境的前情会让客服的开场莫名其妙地变成在追问一件它自己也不知道是什么的事。
+
+    ---
+
+    **`available_tools` = 本轮被路由到的那个画像的工具名集合。** 必须按它分岔,
+    因为注入是追加在**当轮画像**的 system prompt 上的,而三个画像的工具集不同:
+
+        presale    query_coupons ✅
+        midsale    query_coupons ❌
+        aftersale  query_coupons ❌
+
+    实测可达的路径:买家对一条带券的催付款触达回「我要退款」→ 路由(正确地)去
+    aftersale → 它拿到一句"必须用 query_coupons 查",而它没有这个工具。后果两种都
+    不好:模型忽略它(这句是噪声),或者真去调它(工具不在 tool list 里,白耗一步
+    ReAct 预算——买家侧只有 3 步)。
+
+    这与本项目自己的纪律直接冲突:prompt 里的**要求**不能指向一个当轮不存在的工具,
+    和"prompt 里的禁令不能用来守硬边界"是同一条(见 buyer_hints 模块 docstring)。
+
+    **拿不到工具时不是删掉这一行,而是换措辞。** 券规则的反编造保护在**没有**查券
+    工具时更需要——它连查都查不了,凭印象说门槛的风险反而更高。所以两支都有护栏,
+    只是行动指引不同:能查的让它查,不能查的让它别说、并指出正确的下一步。
+
+    `available_tools=None` 走**保守那一支**(不说面额门槛),不是宽松那一支:漏传的
+    代价是少一次主动查券;而默认宣称一个可能不存在的工具的代价是一条无法执行的指令。
+    默认值放在漏配代价最小的那一侧。
     """
     if not outreach:
         return ""
@@ -185,11 +216,23 @@ def render_outreach_context(outreach: Optional[dict]) -> str:
     coupon = str((outreach.get("offer") or {}).get("coupon_code") or "").strip()
     if coupon:
         # 券码本身是**已经发给买家**的(投递前 issue_for_draft 已发放),告诉画像
-        # 不构成任何泄露。但**规则必须查**:面额、门槛、有效期都在库里,凭印象
-        # 说明的后果是顾客照着一个编出来的门槛去下单。
-        lines.append(f"- 随这条消息发放了优惠券 `{coupon}`。顾客问它怎么用/能不能叠加时,"
-                     "**必须用 query_coupons 查实际规则再回答**,不得凭印象说明面额、"
-                     "门槛或有效期。")
+        # 不构成任何泄露。但**规则不能凭印象说**:面额、门槛、有效期都在库里,
+        # 编一个门槛出来的后果是顾客照着它下单。
+        #
+        # 两支的分岔见本函数 docstring:按**当轮画像**有没有查券工具决定措辞,
+        # 而不是决定要不要出这一行。
+        can_query = (available_tools is not None
+                     and COUPON_TOOL in set(available_tools))
+        if can_query:
+            lines.append(
+                f"- 随这条消息发放了优惠券 `{coupon}`。顾客问它怎么用/能不能叠加时,"
+                f"**必须用 {COUPON_TOOL} 查实际规则再回答**,不得凭印象说明面额、"
+                "门槛或有效期。")
+        else:
+            lines.append(
+                f"- 随这条消息发放了优惠券 `{coupon}`。**本轮没有查券规则的工具**,"
+                "所以**不要说明它的面额、门槛或有效期**——一个编出来的门槛会让顾客"
+                "照着它下单。顾客问起时如实说明可在卡包查看,或提出转由售前同事协助。")
 
     return ("\n\n## 本次对话的前情(内部提示,**不要向顾客复述这段话本身**)\n"
             + "\n".join(lines))

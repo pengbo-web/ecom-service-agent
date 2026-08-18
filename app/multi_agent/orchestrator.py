@@ -311,7 +311,7 @@ class MultiAgentOrchestrator:
                     # 触达前情跟在诊断提示后面。顺序有意义:诊断提示是"回答这个
                     # 商品时注意什么"(长期经验),触达前情是"这一轮是怎么开始的"
                     # (本次会话),后者更贴近当下,放在更靠后=更靠近用户消息。
-                    + self._outreach_context_block())
+                    + self._outreach_context_block(profile))
         except Exception:  # noqa: BLE001 配置读取/拼接失败不能让买家会话失败
             logging.getLogger(__name__).warning(
                 "店铺语气组装失败,回落默认语气 prompt", exc_info=True)
@@ -368,7 +368,7 @@ class MultiAgentOrchestrator:
                                                 exc_info=True)
             return None
 
-    def _outreach_context_block(self) -> str:
+    def _outreach_context_block(self, profile: Optional[dict] = None) -> str:
         """营销触达 → 买家侧前情提示(补上"营销发完就走"那一跳)。
 
         修的是一个实测缺陷:触达投递走 `_append_agent_reply(intent=
@@ -385,11 +385,29 @@ class MultiAgentOrchestrator:
         路由器和 prompt 组装都要用它,查两次会有两次库读,而且理论上可能拿到两份
         不同的结果(窗口边界正好在两次读之间过期)。
 
-        fail-soft 同 `_buyer_hints_block`:任何一步出错返回空串。
+        **必须把 `profile` 传下去**:注入是追加在**当轮画像**的 system prompt 上的,
+        而三个画像的工具集不同(只有 presale 有 `query_coupons`)。不传的后果是
+        aftersale 也会拿到一句"必须用 query_coupons 查",而它没有这个工具——一条
+        无法执行的指令,要么是噪声要么白耗一步 ReAct 预算。取工具名走
+        `tool_manager.tool_names()`,不去猜 `AGENT_CONFIGS` 里声明了什么:MCP 开启时
+        真正可用的那一套来自远端,与本地声明不是同一份。
+
+        fail-soft 同 `_buyer_hints_block`:任何一步出错返回空串。取工具名这一步单独
+        兜一层——它拿不到时应当退到"保守措辞"(不说券的面额门槛),而不是让整段前情
+        消失:情境与订单那两行与工具无关,丢掉它们才是真的损失。
         """
         try:
             from app.multi_agent.outreach_context import render_outreach_context
-            return render_outreach_context(getattr(self, "_outreach", None))
+            tools = None
+            try:
+                tm = (profile or {}).get("tool_manager")
+                if tm is not None:
+                    tools = set(tm.tool_names())
+            except Exception:  # noqa: BLE001 取不到工具名 → 走保守措辞,不丢整段
+                logging.getLogger(__name__).warning(
+                    "取当轮画像工具名失败,券规则改用保守措辞", exc_info=True)
+            return render_outreach_context(getattr(self, "_outreach", None),
+                                           available_tools=tools)
         except Exception:  # noqa: BLE001 提示注入失败不该让买家会话失败
             logging.getLogger(__name__).warning("触达前情注入失败(本轮跳过)",
                                                 exc_info=True)
