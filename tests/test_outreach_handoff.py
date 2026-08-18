@@ -229,13 +229,66 @@ def test_render_never_leaks_the_approval_reason():
         assert leaked not in txt
 
 
-def test_render_forbids_answering_coupon_rules_from_memory():
+_COUPON_DRAFT = {"opportunity_type": "unpaid_order", "order_id": "",
+                 "offer": {"coupon_code": "SHOE30"}}
+
+
+def _coupon_line(txt: str) -> str:
+    return next((ln for ln in txt.splitlines() if "SHOE30" in ln), "")
+
+
+def test_render_tells_a_capable_profile_to_look_the_coupon_up():
     """券码本身已经发给买家了(投递前 issue_for_draft 已发放),告诉画像不构成泄露。
     但**规则必须查**——凭印象说明门槛的后果是顾客照着一个编出来的门槛去下单。"""
-    txt = oc.render_outreach_context(
-        {"opportunity_type": "unpaid_order", "order_id": "", "offer":
-            {"coupon_code": "SHOE30"}})
-    assert "query_coupons" in txt
+    from app.multi_agent.agents import AGENT_CONFIGS
+    txt = oc.render_outreach_context(_COUPON_DRAFT,
+                                     available_tools=AGENT_CONFIGS["presale"]["tools"])
+    assert oc.COUPON_TOOL in _coupon_line(txt)
+
+
+@pytest.mark.parametrize("profile", ["midsale", "aftersale"])
+def test_render_never_names_a_tool_the_profile_does_not_have(profile):
+    """**实测可达的缺陷。** 买家对一条带券的催付款触达回「我要退款」→ 路由(正确地)
+    去 aftersale → 它拿到一句"必须用 query_coupons 查",而它没有这个工具。
+
+    后果两种都不好:模型忽略它(这句是噪声),或者真去调它(工具不在 tool list 里,
+    白耗一步 ReAct 预算——买家侧只有 3 步)。而且它与本项目自己的纪律冲突:prompt 里
+    的**要求**不能指向一个当轮不存在的工具,和"prompt 里的禁令不能守硬边界"是同一条。
+    """
+    from app.multi_agent.agents import AGENT_CONFIGS
+    tools = AGENT_CONFIGS[profile]["tools"]
+    assert oc.COUPON_TOOL not in tools           # 前提:这个画像确实没有
+    line = _coupon_line(oc.render_outreach_context(_COUPON_DRAFT,
+                                                  available_tools=tools))
+    assert oc.COUPON_TOOL not in line
+
+
+@pytest.mark.parametrize("profile", ["midsale", "aftersale"])
+def test_incapable_profile_still_gets_the_anti_fabrication_guard(profile):
+    """**拿不到工具时不是删掉这一行,而是换措辞。** 反编造保护在没有查券工具时
+    更需要——它连查都查不了,凭印象说门槛的风险反而更高。"""
+    from app.multi_agent.agents import AGENT_CONFIGS
+    line = _coupon_line(oc.render_outreach_context(
+        _COUPON_DRAFT, available_tools=AGENT_CONFIGS[profile]["tools"]))
+    assert "SHOE30" in line                       # 券码仍然告知
+    assert "不要说明" in line and "面额" in line   # 但明确禁止说规则
+
+
+def test_unknown_capability_takes_the_conservative_branch():
+    """漏传 `available_tools` 走保守那一支,不是宽松那一支:漏传的代价是少一次主动
+    查券,而默认宣称一个可能不存在的工具的代价是一条无法执行的指令。"""
+    line = _coupon_line(oc.render_outreach_context(_COUPON_DRAFT))
+    assert oc.COUPON_TOOL not in line
+    assert "不要说明" in line
+
+
+def test_capability_branch_does_not_affect_the_other_lines():
+    """情境与订单两行与工具无关,不该被这个分岔影响。"""
+    draft = dict(_COUPON_DRAFT, order_id="ORD-9")
+    capable = oc.render_outreach_context(draft, available_tools={oc.COUPON_TOOL})
+    blind = oc.render_outreach_context(draft, available_tools=set())
+    for txt in (capable, blind):
+        assert "下单未支付" in txt and "ORD-9" in txt
 
 
 def test_render_omits_the_order_line_when_there_is_no_order():
@@ -272,6 +325,42 @@ def test_orchestrator_injects_the_block_into_the_system_prompt(db, monkeypatch):
                       "offer": {"coupon_code": "SHOE30"}}
     block = orch._outreach_context_block()
     assert "下单未支付" in block and "ORD-9" in block
+
+
+def test_orchestrator_passes_the_routed_profile_capability(db, monkeypatch):
+    """钉住接线:注入是追加在**当轮画像**的 prompt 上的,所以必须按那个画像的
+    工具集分岔。不传 profile 的后果就是上面那条实测缺陷。"""
+    from app.multi_agent.orchestrator import MultiAgentOrchestrator
+    orch = MultiAgentOrchestrator.__new__(MultiAgentOrchestrator)
+    orch._outreach = dict(_COUPON_DRAFT)
+
+    class FakeTM:
+        def __init__(self, names):
+            self._n = names
+
+        def tool_names(self):
+            return list(self._n)
+
+    capable = orch._outreach_context_block({"tool_manager": FakeTM([oc.COUPON_TOOL])})
+    blind = orch._outreach_context_block({"tool_manager": FakeTM(["query_order"])})
+    assert oc.COUPON_TOOL in capable
+    assert oc.COUPON_TOOL not in blind and "不要说明" in blind
+
+
+def test_orchestrator_falls_back_to_conservative_when_tool_names_fail(db):
+    """取工具名失败时退到保守措辞,**不丢整段前情**——情境与订单那两行与工具无关,
+    丢掉它们才是真的损失。"""
+    from app.multi_agent.orchestrator import MultiAgentOrchestrator
+    orch = MultiAgentOrchestrator.__new__(MultiAgentOrchestrator)
+    orch._outreach = dict(_COUPON_DRAFT, order_id="ORD-9")
+
+    class BoomTM:
+        def tool_names(self):
+            raise RuntimeError("mcp down")
+
+    txt = orch._outreach_context_block({"tool_manager": BoomTM()})
+    assert "下单未支付" in txt and "ORD-9" in txt      # 整段没丢
+    assert oc.COUPON_TOOL not in txt                   # 券走保守措辞
 
 
 def test_orchestrator_block_is_empty_without_outreach():
