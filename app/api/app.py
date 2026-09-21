@@ -1350,7 +1350,7 @@ def create_app(session_manager: Optional[SessionManager] = None,
         with background_trace("consolidate_memory", session_id=session_id,
                               user_id=user_id,
                               input={"session_id": session_id, "trigger": "manual"}):
-            mm.consolidate_to_long_term(msgs, summ)
+            mm.consolidate_to_long_term(msgs, summ, session_id=session_id)
         facts = [
             {"content": f.content, "category": f.category, "created_at": f.created_at}
             for f in mm.ltm.facts

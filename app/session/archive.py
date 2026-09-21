@@ -22,12 +22,19 @@ class SqliteSessionArchiver:
     def archive(self, session_id: str, agent) -> None:
         try:
             from app.db import get_db
-            get_db().archive_session_if_changed(
+            db = get_db()
+            messages = list(getattr(agent, "raw_messages", []) or [])
+            summary = getattr(agent, "summary", None)
+            db.archive_session_if_changed(
                 session_id=session_id,
                 user_id=getattr(agent, "user_id", "default"),
-                messages=list(getattr(agent, "raw_messages", []) or []),
-                summary=getattr(agent, "summary", None),
+                messages=messages,
+                summary=summary,
             )
+            # WS2:旁路增量索引进归档 FTS(门禁用例第三采样源)。fail-soft:
+            # 索引坏了只影响采样面,归档与合成主流程照跑(archive_fts 内部自吞)。
+            from app.agent.skills import archive_fts
+            archive_fts.index_session(db, session_id, messages, summary)
         except Exception:  # noqa: BLE001 归档 best-effort,失败不影响会话回收
             pass
 

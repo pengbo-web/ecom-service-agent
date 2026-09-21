@@ -1,16 +1,19 @@
 """长期记忆：跨会话持久化用户知识。
 
-将用户在多次会话中表现出的偏好、身份、行为模式等提取并持久化为 JSON，
+将用户在多次会话中表现出的偏好、身份、行为模式等提取并持久化到 SQLite
+(`app/agent/memory/memory_store.py`:事实 + 摘要 + 全文索引同库、单事务写入),
 在新会话启动时加载并注入 prompt，让 Agent 具备"记住老客户"的能力。
+
+历史包袱:早期按用户落 `{user_id}.json`,现由 `load()` 做一次性迁移——库里
+没有该用户数据且旧 JSON 存在时,把 JSON 读入库,并把文件改名为
+`*.json.migrated` 留痕(不删除:记忆不可逆,留原件可人工回查;损坏的 JSON
+解析不了就原样不动,不破坏现场)。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 import threading
-import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -19,7 +22,7 @@ from typing import Optional
 from openai import OpenAI
 
 from app.agent.memory.extraction import extract_long_term_facts
-from app.agent.memory.fts_store import MemoryFtsStore
+from app.agent.memory.memory_store import MemoryStore
 from app.config.settings import settings
 
 
@@ -48,7 +51,7 @@ class LongTermMemory:
         self.curate_enabled = curate_enabled
         self.facts: list[MemoryFact] = []
         self.interaction_summaries: list[dict] = []
-        self._fts: MemoryFtsStore | None = None
+        self._store: MemoryStore | None = None
         # 后台记忆线程(extract_and_save)、主线程工具(save_user_memory)、主线程读(build_prompt_section)
         # 会并发触碰 self.facts;用可重入锁串行化所有 facts 变更/落盘/遍历,防
         # "list changed size during iteration" 崩溃与事实丢失。RLock 容忍
@@ -59,76 +62,89 @@ class LongTermMemory:
     def memory_path(self) -> Path:
         return self.memory_dir / f"{self.user_id}.json"
 
-    def _ensure_fts(self) -> MemoryFtsStore | None:
-        """按 settings.memory_fts_enabled 门控懒建 FTS 索引存储。
+    @property
+    def legacy_migrated_path(self) -> Path:
+        """存量 JSON 迁移后改名留痕的路径(`*.json.migrated`)。
 
-        关闭时恒返回 None,不建库、不落任何多余文件,行为与改造前完全一致。
+        不用 `with_suffix(".migrated")`——那会把 `.json` 当后缀吃掉,
+        `u1.json` 变 `u1.migrated`,看不出原名;这里要的是纯改名。"""
+        return self.memory_path.parent / (self.memory_path.name + ".migrated")
+
+    def _ensure_store(self) -> MemoryStore:
+        """懒建 SQLite 存储(事实 + 摘要 + 索引同库)。
+
+        不受 memory_fts_enabled 门控:规范数据必须始终落库,该开关只管
+        "建不建搜索索引"(关=recall 恒空、注入回退全量,与改造前语义一致),
+        门控判断在 store 内部。
         """
-        if not settings.memory_fts_enabled:
-            return None
-        if self._fts is None:
+        if self._store is None:
             self.memory_dir.mkdir(parents=True, exist_ok=True)
-            # 共享单例:同一 db 文件全进程共用一个连接+锁,消除多实例并发写的 "database is locked"
-            from app.agent.memory.fts_store import get_fts_store
-            self._fts = get_fts_store(str(self.memory_dir / "memory_fts.db"))
-        return self._fts
+            # 共享单例:同一 db 文件全进程共用一个连接+锁,消除多实例并发写的
+            # "database is locked"。
+            from app.agent.memory.memory_store import get_memory_store
+            self._store = get_memory_store(str(self.memory_dir / "memory.db"))
+        return self._store
 
     def load(self) -> None:
-        """从 JSON 文件加载用户的长期记忆。"""
+        """加载用户的长期记忆(SQLite 为唯一事实源;存量 JSON 一次性迁移)。"""
+        store = self._ensure_store()
+        facts, summaries = store.load_user(self.user_id)
+
+        if not facts and not summaries:
+            # 库里没有该用户的数据,但存量 JSON 还在 → 一次性迁入库并改名留痕。
+            # load() 是每个新会话启动的必经路径,迁移只在首次发生时产生写操作。
+            self._migrate_legacy_json(store)
+            facts, summaries = store.load_user(self.user_id)
+
+        with self._lock:
+            self.facts = [MemoryFact(
+                content=f["content"],
+                category=f.get("category", "other"),
+                created_at=f.get("created_at", ""),
+                source_session=f.get("source_session", ""),
+            ) for f in facts]
+            self.interaction_summaries = list(summaries)
+
+            # 索引自愈:条数与事实不符(门控刚打开/索引被清/历史库升级)→ 全量重建。
+            # 单事务写入在结构上不会产生失同步,这层是给历史库与异常兜底。
+            if settings.memory_fts_enabled and self.facts:
+                if store.count(self.user_id) != len(self.facts):
+                    store.reindex_user(self.user_id)
+
+    def _migrate_legacy_json(self, store: MemoryStore) -> None:
+        """存量 `{user_id}.json` 一次性迁入 SQLite(仅库里无该用户数据时)。
+
+        - 解析成功且非空 → save_user_snapshot 入库,然后原文件改名
+          `*.json.migrated`(不删除,留人工回查;改名失败如并发被抢先,忽略即可——
+          入库本身是幂等替换,不会造成双写或数据错)。
+        - 解析失败(损坏/截断)→ 原样不动:读不出来就不破坏现场。
+        """
         if not self.memory_path.exists():
             return
         try:
-            with self.memory_path.open("r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = json.loads(self.memory_path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             return
-
-        with self._lock:
-            for item in data.get("facts", []):
-                self.facts.append(MemoryFact(
-                    content=item["content"],
-                    category=item.get("category", "other"),
-                    created_at=item.get("created_at", ""),
-                    source_session=item.get("source_session", ""),
-                ))
-            self.interaction_summaries = data.get("interaction_summaries", [])
+        facts = data.get("facts") or []
+        summaries = data.get("interaction_summaries") or []
+        if facts or summaries:
+            store.save_user_snapshot(self.user_id, facts, summaries)
+        try:
+            self.memory_path.replace(self.legacy_migrated_path)  # 原子改名
+        except OSError:
+            pass
 
     def save(self) -> None:
-        """持久化到 JSON 文件（原子写入）。"""
-        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        """持久化到 SQLite:事实 + 摘要 + 索引在 store 单事务里整体替换。
 
+        不再落 JSON——此前"先原子写 JSON、再全量重同步索引"是两步,两步之间
+        崩溃会留下"文件新、索引旧"的漂移;现在一个事务要么全成要么全回滚,
+        漂移在结构上不可能发生。
+        """
         with self._lock:
-            payload = {
-                "version": 1,
-                "user_id": self.user_id,
-                "updated_at": datetime.now().isoformat(timespec="seconds"),
-                "facts": [asdict(f) for f in self.facts],
-                "interaction_summaries": self.interaction_summaries,
-            }
-            facts_snapshot = list(self.facts)
-
-        # tmp 名带唯一后缀:同一用户多个实例/线程并发 save 时各写各的 tmp,
-        # 避免同名 tmp 内容交错被 os.replace 提升成损坏文件(→ 下次 load 解析失败=记忆清零)。
-        tmp_path = self.memory_path.with_suffix(f".{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-        try:
-            with tmp_path.open("w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-            os.replace(tmp_path, self.memory_path)   # 原子替换,last-writer-wins(不损坏)
-        finally:
-            try:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-            except OSError:
-                pass
-
-        # 全量重同步 FTS 索引:facts 列表可能被 curate 整体替换,增量同步易漂移,
-        # n<=max_facts(<=50)时全量重建成本可忽略。
-        fts = self._ensure_fts()
-        if fts is not None:
-            fts.clear(self.user_id)
-            for fact in facts_snapshot:
-                fact_id = hashlib.md5(fact.content.encode("utf-8")).hexdigest()[:12]
-                fts.index(self.user_id, fact_id, fact.content)
+            facts = [asdict(f) for f in self.facts]
+            summaries = [dict(s) for s in self.interaction_summaries]
+        self._ensure_store().save_user_snapshot(self.user_id, facts, summaries)
 
     def add_facts(self, new_facts: list[MemoryFact]) -> int:
         """添加新事实，自动去重并裁剪到 max_facts;返回真实新增条数。
@@ -199,14 +215,34 @@ class LongTermMemory:
         model: str,
         messages: list[dict],
         summary: Optional[str],
+        session_id: str = "",
+        skill_name: str = "",
+        piggyback_hint: Optional[bool] = None,
     ) -> None:
-        """从会话消息中提取长期记忆事实并保存。"""
+        """从会话消息中提取长期记忆事实并保存。
+
+        `piggyback_hint`(WS1):None=读 `settings.skill_hint_piggyback_enabled`
+        (默认关)。开启时本次抽取顺带产出 skill_gap_note,落 skill_memory_hints
+        ——只标记不判定;写入失败吞掉,绝不影响巩固主流程。
+        """
         if not messages and not summary:
             return
 
-        new_facts, interaction_summary = extract_long_term_facts(
+        if piggyback_hint is None:
+            from app.config.settings import settings
+            piggyback_hint = bool(settings.skill_hint_piggyback_enabled)
+        new_facts, interaction_summary, skill_gap_note = extract_long_term_facts(
             client, model, messages, summary, self.facts,
+            piggyback_hint=piggyback_hint,
         )
+        if skill_gap_note and session_id:
+            try:
+                from app.agent.skills import memory_hints
+                memory_hints.record_hint(
+                    session_id, skill_name, memory_hints.KIND_PIGGYBACK_NOTE,
+                    source=memory_hints.SOURCE_LLM_PIGGYBACK, detail=skill_gap_note)
+            except Exception:  # noqa: BLE001 标记失败绝不影响巩固
+                pass
 
         if new_facts:
             self._merge_facts(client, model, new_facts)
@@ -237,16 +273,13 @@ class LongTermMemory:
         self.add_facts(new_facts)
 
     def recall(self, query: str, top_k: int = 5) -> list[str]:
-        """按 query 通过 FTS 索引召回相关事实 content 列表。
+        """按 query 通过全文索引召回相关事实 content 列表。
 
-        FTS 不可用(门控关闭/未建库)或 query 为空时返回 []。
+        索引门控关闭或 query 为空时返回 [](store.search 对门控关闭自返回 [])。
         """
         if not query:
             return []
-        fts = self._ensure_fts()
-        if fts is None:
-            return []
-        return fts.search(self.user_id, query, top_k)
+        return self._ensure_store().search(self.user_id, query, top_k)
 
     def owned_facts(self, facts=None) -> list:
         """筛掉提到**别人订单**的 fact,只留可以念给本画像属主听的。
@@ -379,12 +412,14 @@ class LongTermMemory:
         return header + "\n" + "\n\n".join(parts)
 
     def reset(self) -> None:
-        """清空该用户的长期记忆（文件也删除，FTS 索引也清空）。"""
+        """清空该用户的长期记忆（DB 行 + 索引;存量 JSON 与迁移留痕一并删除）。"""
         with self._lock:
             self.facts = []
             self.interaction_summaries = []
-        if self.memory_path.exists():
-            self.memory_path.unlink()
-        fts = self._ensure_fts()
-        if fts is not None:
-            fts.clear(self.user_id)
+        self._ensure_store().delete_user(self.user_id)
+        for path in (self.memory_path, self.legacy_migrated_path):
+            if path.exists():
+                try:
+                    path.unlink()
+                except OSError:
+                    pass

@@ -152,13 +152,19 @@ class MemoryManager:
 
     def consolidate_to_long_term(
         self, messages: list[dict], summary: Optional[str],
+        session_id: str = "", skill_name: str = "",
     ) -> None:
-        """会话结束时，将本次对话的关键事实巩固到长期记忆。"""
+        """会话结束时，将本次对话的关键事实巩固到长期记忆。
+
+        `session_id`/`skill_name` 仅供 WS1 piggyback 标记归位(开关默认关);
+        不传则巩固行为与改造前逐字节一致。
+        """
         if not self.memory_enabled:
             return
         with self._bg_lock:
             self.ltm.extract_and_save(
                 self.client, self.model, messages[self._extract_cursor:], summary,
+                session_id=session_id, skill_name=skill_name,
             )
             self._extract_cursor = len(messages)
 

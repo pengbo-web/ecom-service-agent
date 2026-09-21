@@ -18,7 +18,7 @@ class _MM:
         self.ltm = _LTM()
         self.consolidated = None
 
-    def consolidate_to_long_term(self, messages, summary):
+    def consolidate_to_long_term(self, messages, summary, session_id="", skill_name=""):
         self.consolidated = (list(messages), summary)
         # 模拟策展后的干净结果
         self.ltm.facts = [type("F", (), {"content": "偏好红色系", "category": "preference",

@@ -87,7 +87,8 @@ class Settings(BaseSettings):
     memory_user_id: str = "default"
     max_ltm_facts: int = 50
     memory_curation_enabled: bool = False   # Phase 5:长期记忆 LLM 策展(合并/纠正/按重要性淘汰);关则用 add_facts
-    memory_fts_enabled: bool = True         # H2 FTS 记忆全文索引召回;关闭回退全量注入
+    memory_fts_enabled: bool = True         # H2 记忆全文索引召回;只控"建不建搜索索引",关闭=召回恒空、注入回退全量,规范数据仍落 SQLite
+    memory_fts_segmented_enabled: bool = True  # FTS5+jieba 分词检索召回;关闭回退改造前的子串计数(行为与改造前完全一致)
     memory_profile_enabled: bool = True     # H2/G2 结构化用户档案(base/标签/工单)注入与落库;关闭即完全禁用
     stm_update_every_n_turns: int = 3     # 短期记忆每 N 轮更新一次(1=每轮,旧行为);省 token 且中间轮原始消息本就在上下文
     memory_checkpoint_every_n_turns: int = 10   # 长会话中途每 N 轮触发隐式记忆抽取归档(0=关);与会话末巩固双通道,策展去重
@@ -106,6 +107,11 @@ class Settings(BaseSettings):
     # 语义路径由专项测试打桩验证。
     skill_semantic_clustering_enabled: bool = True
     skill_trace_enabled: bool = True   # G2:记录每轮 skill 执行轨迹(旁路埋点,异常不影响回复)
+    # WS1 生产者③(技术方案 §2):会话末 LTM 巩固那次 LLM 调用**捎带**输出可选字段
+    # skill_gap_note(零额外 round trip),落 skill_memory_hints 供采样排序与看板报数。
+    # 默认关:先离线复算与规则源的重合度,观察一周再开——捎带字段是模型自报,
+    # 噪声未核之前不进任何链路。标记只标记不判定,判定权在 attribution 规则表。
+    skill_hint_piggyback_enabled: bool = False
     skill_gate_tolerance: float = 0.05  # G4:候选灰度评测允许的最大掉点,超过即拒绝转正
     skill_canary_enabled: bool = True   # 灰度路由总开关(关=永远只加载正式版本)
     skill_preload_enabled: bool = True   # 服务端确定性预加载匹配的 skill(模型不自发调 load_skill)

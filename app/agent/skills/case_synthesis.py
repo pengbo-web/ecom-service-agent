@@ -77,6 +77,9 @@ SYNTH_ID_PREFIX = "synth-"
 #: 采样源。强弱不同,必须分开记(见模块 docstring)。
 SOURCE_TRACE = "trace"
 SOURCE_KEYWORD = "keyword"
+# WS2 第三采样源(弱):归档会话 FTS5 全文召回。与关键词源同纪律——只挑会话,
+# 不参与任何断言;强弱分开报数(stats.from_fts / fts_state)。
+SOURCE_FTS = "fts"
 
 #: 一个 skill 最多合成多少条。`MIN_TRUSTWORTHY_CASES` 是 3,给到 5 留一点余量;
 #: 再多不会让门禁更准,只会让每次门禁多跑两遍 LLM(两侧各跑一次)。
@@ -331,7 +334,10 @@ def case_from_turn(skill_name: str, turn: Turn, *, known_tools: set[str],
 def synthesize_gate_cases(skill_name: str, *, traces: list[dict],
                           archives: list[dict], skill_md: str = "",
                           known_tools: set[str] | None = None,
-                          max_cases: int = DEFAULT_MAX_CASES) -> tuple[list[dict], dict]:
+                          max_cases: int = DEFAULT_MAX_CASES,
+                          fts_sids: list[str] | None = None,
+                          fts_state: str = "", fts_reason: str = "",
+                          ) -> tuple[list[dict], dict]:
     """为一个 skill 合成门禁用例。返回 `(cases, stats)`,不落盘、不碰 DB、不调 LLM。
 
     纯函数式(全部输入由调用方注入)是刻意的:门禁用例是裁判尺,它的生成过程
@@ -370,24 +376,45 @@ def synthesize_gate_cases(skill_name: str, *, traces: list[dict],
         keyword_sids = [s for s in sessions_from_keywords(keywords, archives or [])
                         if s not in trace_sids]
 
+    # FTS 路(WS2 第三采样源):与关键词路同级的弱证据,只挑会话不做断言。
+    # 卖家侧与关键词路同款硬隔离:归档语料只有买家会话,全文捞会捞到买家提问,
+    # 据此合成的用例是**错的**而不只是弱的(refund-attribution 实测教训)。
+    fts_blocked = ""
+    if actor != ACTOR_BUYER:
+        fts_blocked = ("归档语料目前只有买家会话,全文召回源与关键词源同样"
+                       "不用于卖家侧 skill(跨 actor 误捞风险)。")
+        fts_sids_eff: list[str] = []
+    else:
+        taken = set(trace_sids) | set(keyword_sids)
+        fts_sids_eff = [s for s in (fts_sids or [])
+                        if s in by_session and s not in taken]
+
     cases: list[dict] = []
     provenance: list[dict] = []
     seen_ids: set[str] = set()
     dropped_no_assertion = 0
     dropped_too_short = 0
 
-    for source, sids in ((SOURCE_TRACE, trace_sids), (SOURCE_KEYWORD, keyword_sids)):
+    for source, sids in ((SOURCE_TRACE, trace_sids), (SOURCE_KEYWORD, keyword_sids),
+                         (SOURCE_FTS, fts_sids_eff)):
         for sid in sids:
             if len(cases) >= max_cases:
                 break
             archive = by_session[sid]
             human_reply = _human_reply(archive)
+            first_user_done = False
             for turn in split_turns(archive.get("messages")):
                 if len(cases) >= max_cases:
                     break
                 if source == SOURCE_KEYWORD and keywords and not any(
                         kw in turn.user for kw in keywords):
                     continue      # 关键词路只取**命中的那一轮**,不把整段会话铺开
+                if source == SOURCE_FTS:
+                    # FTS 命中的是会话的"首句 + summary"(被索引的内容就这两段),
+                    # 所以只取首个 user 轮——与索引面严格对齐,不铺整段会话。
+                    if first_user_done:
+                        continue
+                    first_user_done = True
                 if len((turn.user or "").strip()) < MIN_TURN_CHARS:
                     dropped_too_short += 1
                     continue
@@ -410,6 +437,10 @@ def synthesize_gate_cases(skill_name: str, *, traces: list[dict],
         "sessions_scanned": len(by_session),
         "from_trace": sum(1 for p in provenance if p["source"] == SOURCE_TRACE),
         "from_keyword": sum(1 for p in provenance if p["source"] == SOURCE_KEYWORD),
+        "from_fts": sum(1 for p in provenance if p["source"] == SOURCE_FTS),
+        "fts_state": fts_state,
+        "fts_reason": fts_reason,
+        "fts_blocked": fts_blocked,
         "keywords": keywords,
         "keyword_blocked": keyword_blocked,
         "dropped_no_assertion": dropped_no_assertion,
@@ -550,9 +581,17 @@ def synthesize_and_save(skill_name: str, *, db=None, skills_dir: str | None = No
                                   sources=sources)
     archives = db.list_recent_archives(limit=archive_limit, sources=sources)
 
+    # WS2:第三采样源(归档 FTS 全文)。查询词=声明关键词拼接(采样启发式,不做
+    # 断言);state/reason 写进 stats 披露——**unavailable 与"没命中"必须可区分**,
+    # 否则"FTS 坏了"在看板上长得像"线上就这点素材"。卖家侧硬隔离在 synthesize 内。
+    from app.agent.skills import archive_fts
+    fts_sids, fts_state, fts_reason = archive_fts.search_sessions_with_state(
+        db, " ".join(skill_keywords(skill_md)), top_k=50)
+
     cases, stats = synthesize_gate_cases(
         skill_name, traces=traces, archives=archives, skill_md=skill_md,
-        max_cases=max_cases)
+        max_cases=max_cases, fts_sids=fts_sids, fts_state=fts_state,
+        fts_reason=fts_reason)
     stats["skill_md_found"] = bool(skill_md)
     if not cases:
         # 一条都合不出来时**不写空文件**:留着上一次的结果比用一份空文件把它

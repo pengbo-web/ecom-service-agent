@@ -68,14 +68,23 @@ def _report(stats: dict) -> None:
             why.append("卖家侧 skill:归档语料目前只有买家会话")
         if not stats.get("keywords"):
             why.append("frontmatter 未声明关键词(无法走关键词采样)")
+        if stats.get("fts_state") == "unavailable":
+            # 三态纪律:FTS 索引坏了与"没命中"必须可区分,否则"0 条"会把
+            # 基础设施故障伪装成"线上没这类会话"。
+            why.append(f"全文源不可用({stats.get('fts_reason') or '索引构建失败'})")
         if stats.get("dropped_no_assertion"):
             why.append(f"{stats['dropped_no_assertion']} 轮断不出任何期望")
         if not why:
             why.append(f"扫了 {stats.get('sessions_scanned', 0)} 个归档会话,没有命中的轮次")
         print(f"  {skill:<32} 0 条  ({'; '.join(why)})")
         return
+    fts_note = ""
+    if stats.get("fts_state") == "unavailable":
+        fts_note = f"  ⚠ 全文源不可用:{stats.get('fts_reason') or '索引构建失败'}"
     print(f"  {skill:<32} {kept} 条  "
-          f"(轨迹 {stats.get('from_trace', 0)} / 关键词 {stats.get('from_keyword', 0)})"
+          f"(轨迹 {stats.get('from_trace', 0)} / 关键词 {stats.get('from_keyword', 0)}"
+          f" / 全文 {stats.get('from_fts', 0)})"
+          + fts_note
           + (f"  → {stats['saved']}" if stats.get("saved") else "  [dry-run 未落盘]"))
 
 

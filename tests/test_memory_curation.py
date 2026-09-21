@@ -101,7 +101,7 @@ def test_curate_strips_code_fence():
 # ---- extract_and_save 接线 + 降级 ----
 def _patch_extraction(monkeypatch, new_facts):
     monkeypatch.setattr(ltm_mod, "extract_long_term_facts",
-                        lambda *a, **k: (new_facts, "本次交互摘要"))
+                        lambda *a, **k: (new_facts, "本次交互摘要", ""))
 
 
 def test_extract_and_save_uses_curation_when_enabled(monkeypatch, tmp_path):

@@ -88,8 +88,17 @@ def extract_long_term_facts(
     messages: list[dict],
     summary: str | None,
     existing_facts: list,
-) -> tuple[list[MemoryFact], str]:
-    """从完整会话中提取长期记忆事实 + 交互摘要。"""
+    piggyback_hint: bool = False,
+) -> tuple[list, str, str]:
+    """从完整会话中提取长期记忆事实 + 交互摘要(+ 可选 skill 缺口笔记)。
+
+    返回 `(facts, interaction_summary, skill_gap_note)`。第三元素恒为字符串:
+    `piggyback_hint=False` 或解析不到时是 ""。
+
+    `piggyback_hint`(WS1 生产者③,技术方案 §2,开关默认关):让这次**本来就要
+    付的** LLM 调用顺带输出一个可选字段 `skill_gap_note`——零额外 round trip。
+    它只是"标记":落 skill_memory_hints 供采样排序与看板报数,不进任何判定。
+    """
     from app.agent.memory.long_term import MemoryFact
 
     parts = []
@@ -101,7 +110,7 @@ def extract_long_term_facts(
         parts.append(f"【对话内容】\n{transcript}")
 
     if not parts:
-        return [], ""
+        return [], "", ""
 
     existing_text = (
         "\n".join(f"- [{f.category}] {f.content}" for f in existing_facts)
@@ -110,12 +119,21 @@ def extract_long_term_facts(
     )
     prompt = LTM_EXTRACTION_PROMPT.format(existing_ltm=existing_text)
 
+    user_content = "\n\n".join(parts)
+    if piggyback_hint:
+        # 捎带而非单开一次调用:巩固这条路本来就要付一次 LLM,顺带问一句零边际
+        # 成本;问不到/解析不到都当没有,绝不为此多付一次 round trip。
+        user_content += (
+            "\n\n【附加输出要求】请在同一份 JSON 里增加一个可选字段 "
+            "skill_gap_note(不超过 80 字,可省略):若本次会话暴露了客服流程的"
+            "缺口或错误说法(例如答错了政策、该查没查),用一句话描述;否则省略该字段。")
+
     response = client.chat.completions.create(
         model=model,
         temperature=0.0,
         messages=[
             {"role": "system", "content": prompt},
-            {"role": "user", "content": "\n\n".join(parts)},
+            {"role": "user", "content": user_content},
         ],
     )
     raw = (response.choices[0].message.content or "").strip()   # 兼容模型返回 None content
@@ -123,7 +141,7 @@ def extract_long_term_facts(
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
-        return [], "（提取失败）"
+        return [], "（提取失败）", ""
 
     now = datetime.now().isoformat(timespec="seconds")
     new_facts = []
@@ -138,4 +156,10 @@ def extract_long_term_facts(
             ))
 
     interaction_summary = data.get("interaction_summary", "")
-    return new_facts, interaction_summary
+    skill_gap_note = ""
+    if piggyback_hint:
+        # 只信字符串、截断兜底:模型多写的不进标记(标记进看板,噪声会稀释信号)。
+        note_raw = data.get("skill_gap_note")
+        if isinstance(note_raw, str):
+            skill_gap_note = note_raw.strip()[:80]
+    return new_facts, interaction_summary, skill_gap_note
