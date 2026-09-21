@@ -3,74 +3,117 @@
     {
       "id": "order_query_basic",
       "description": "查询已发货订单详情",
-      "turns": ["帮我查一下订单 ORD-20240115-001 的状态"],
+      "turns": [
+        "帮我查一下订单 ORD-20240115-001 的状态"
+      ],
       "expected_intent": "order_query",
-      "expected_keywords": ["Nike", "899"],
+      "expected_keywords": [
+        "Nike",
+        "899"
+      ],
       "expected_requires_human": false,
-      "expected_tools": ["query_order"],
+      "expected_tools": [
+        "query_order"
+      ],
       "min_tool_calls": 1,
       "max_tokens": 6000
     },
     {
       "id": "logistics_track",
       "description": "查询物流轨迹",
-      "turns": ["我的订单 ORD-20240115-001 现在到哪了？"],
+      "turns": [
+        "我的订单 ORD-20240115-001 现在到哪了？"
+      ],
       "expected_intent": "order_query",
-      "expected_keywords": ["顺丰"],
+      "expected_keywords": [
+        "顺丰"
+      ],
       "expected_requires_human": false,
-      "expected_tools": ["query_logistics"],
+      "expected_tools": [
+        "query_logistics"
+      ],
       "min_tool_calls": 1,
       "max_tokens": 6000,
-      "related_skills": ["track-order"]
+      "related_skills": [
+        "track-order"
+      ]
     },
     {
       "id": "logistics_no_tracking",
       "description": "查询未发货订单的物流（边界：无运单号）",
-      "turns": ["订单 ORD-20240120-002 的快递到哪了？"],
+      "turns": [
+        "订单 ORD-20240120-002 的快递到哪了？"
+      ],
       "expected_intent": "order_query",
-      "expected_keywords": ["发货"],
+      "expected_keywords": [
+        "发货"
+      ],
       "expected_requires_human": false,
-      "expected_tools": ["query_logistics"],
+      "expected_tools": [
+        "query_logistics"
+      ],
       "min_tool_calls": 1,
       "max_tokens": 6000
     },
     {
       "id": "product_out_of_stock",
       "description": "咨询缺货商品（Levi's 501 库存为 0，是否售罄交给质量/幻觉 judge 判定）",
-      "turns": ["Levi's 501 牛仔裤还有货吗？"],
+      "turns": [
+        "Levi's 501 牛仔裤还有货吗？"
+      ],
       "expected_intent": "product_consult",
-      "expected_keywords": ["Levi"],
+      "expected_keywords": [
+        "Levi"
+      ],
       "expected_requires_human": false,
-      "expected_tools": ["query_product"],
+      "expected_tools": [
+        "query_product"
+      ],
       "min_tool_calls": 1,
       "max_tokens": 6000,
-      "related_skills": ["product-recommend"]
+      "related_skills": [
+        "product-recommend"
+      ]
     },
     {
       "id": "return_request",
       "description": "申请退款（敏感操作：先确认再退是正确行为，故不强制调用工具）",
-      "turns": ["我买的 Levi's 牛仔裤尺码不合适，订单号 ORD-20240118-004，想退款"],
+      "turns": [
+        "我买的 Levi's 牛仔裤尺码不合适，订单号 ORD-20240118-004，想退款"
+      ],
       "expected_intent": "return_request",
-      "expected_keywords": ["退款"],
+      "expected_keywords": [
+        "退款"
+      ],
       "expected_requires_human": false,
       "expected_tools": [],
       "max_tokens": 8000,
-      "related_skills": ["process-return"]
+      "related_skills": [
+        "process-return"
+      ]
     },
     {
       "id": "knowledge_policy",
       "description": "询问退换货政策（RAG 知识检索；是否转人工取决于检索是否命中，故不校验）",
-      "turns": ["你们支持七天无理由退货吗？"],
+      "turns": [
+        "你们支持七天无理由退货吗？"
+      ],
       "expected_intent": "return_request",
-      "expected_keywords": ["七天"],
-      "expected_tools": ["search_knowledge"],
+      "expected_keywords": [
+        "七天"
+      ],
+      "expected_tools": [
+        "search_knowledge"
+      ],
       "min_tool_calls": 1,
       "max_tokens": 6000
     },
     {
       "id": "complaint_to_human",
       "description": "强烈投诉，应识别为投诉并倾向转人工",
-      "turns": ["你们这什么破服务！东西质量太差了，我要投诉！必须给我个说法，不然就去消协告你们！"],
+      "turns": [
+        "你们这什么破服务！东西质量太差了，我要投诉！必须给我个说法，不然就去消协告你们！"
+      ],
       "expected_intent": "complaint",
       "expected_keywords": [],
       "expected_requires_human": true,
@@ -80,7 +123,9 @@
     {
       "id": "greeting_no_tool",
       "description": "纯问候，不应调用任何工具",
-      "turns": ["你好呀"],
+      "turns": [
+        "你好呀"
+      ],
       "expected_intent": "greeting",
       "expected_keywords": [],
       "expected_requires_human": false,
@@ -91,24 +136,121 @@
     {
       "id": "multi_turn_followup",
       "description": "多轮：先表达意图，再补订单号",
-      "turns": ["我想查一下我的订单", "订单号是 ORD-20240110-003"],
+      "turns": [
+        "我想查一下我的订单",
+        "订单号是 ORD-20240110-003"
+      ],
       "expected_intent": "order_query",
-      "expected_keywords": ["小米"],
+      "expected_keywords": [
+        "小米"
+      ],
       "expected_requires_human": false,
-      "expected_tools": ["query_order"],
+      "expected_tools": [
+        "query_order"
+      ],
       "min_tool_calls": 1,
       "max_tokens": 9000
     },
     {
       "id": "list_orders",
       "description": "未提供订单号，列出用户全部订单",
-      "turns": ["我都买过哪些东西？帮我看下我的订单"],
+      "turns": [
+        "我都买过哪些东西？帮我看下我的订单"
+      ],
       "expected_intent": "order_query",
       "expected_keywords": [],
       "expected_requires_human": false,
-      "expected_tools": ["list_user_orders"],
+      "expected_tools": [
+        "list_user_orders"
+      ],
       "min_tool_calls": 1,
       "max_tokens": 6000
+    },
+    {
+      "id": "seed_mt_policy_hold_under_pushback",
+      "description": "人工种子·多轮:买家追问施压时仍须持守真实运费政策(论文型失败模式:第一轮说反规则但答案自洽)",
+      "turns": [
+        "收到货不合适可以退吗?",
+        "可是你们上次客服说退货运费是免费的啊?"
+      ],
+      "expected_intent": null,
+      "expected_keywords": [
+        "由您承担"
+      ],
+      "expected_requires_human": false,
+      "expected_tools": [
+        "search_knowledge"
+      ],
+      "max_tokens": 8000,
+      "related_skills": [
+        "process-return"
+      ]
+    },
+    {
+      "id": "seed_mt_anaphora_logistics",
+      "description": "人工种子·多轮:指代型追问(那它)须消解到上一轮订单并查物流",
+      "turns": [
+        "帮我查下订单 ORD-20240115-001",
+        "那它现在到哪儿了?"
+      ],
+      "expected_intent": "order_query",
+      "expected_keywords": [
+        "浦东"
+      ],
+      "expected_requires_human": false,
+      "expected_tools": [
+        "query_order",
+        "query_logistics"
+      ],
+      "min_tool_calls": 2,
+      "max_tokens": 8000
+    },
+    {
+      "id": "seed_mt_repeat_escalation",
+      "description": "人工种子·多轮:同一问题重复三次应转人工(会话级判据在单条用例内可复现)",
+      "turns": [
+        "你们几点上班?",
+        "你们几点上班?",
+        "你们几点上班?"
+      ],
+      "expected_intent": null,
+      "expected_keywords": [],
+      "expected_requires_human": true,
+      "expected_tools": [],
+      "max_tokens": 6000
+    },
+    {
+      "id": "seed_mt_domain_switch_refund",
+      "description": "人工种子·多轮:售前咨询中途切到退换流程,路由与技能须跟上",
+      "turns": [
+        "这款 Nike 鞋是什么材质?",
+        "收到了但想退,流程怎么走?"
+      ],
+      "expected_intent": null,
+      "expected_keywords": [],
+      "expected_requires_human": false,
+      "expected_tools": [
+        "search_knowledge"
+      ],
+      "max_tokens": 8000,
+      "related_skills": [
+        "process-return"
+      ]
+    },
+    {
+      "id": "seed_mt_anaphora_coupon",
+      "description": "人工种子·多轮:券指代追问(那张券)须绑定上一轮查到的券与当前商品",
+      "turns": [
+        "有没有优惠券可以领?",
+        "那张券买 Nike Air Max 270 运动鞋能用吗?"
+      ],
+      "expected_intent": null,
+      "expected_keywords": [],
+      "expected_requires_human": false,
+      "expected_tools": [
+        "query_coupons"
+      ],
+      "max_tokens": 8000
     }
   ]
 }

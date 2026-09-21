@@ -1,7 +1,7 @@
 """结构化用户档案(H2.3/G2):base(会员等级/联系方式等) + tags(行为标签) +
 tickets(工单流转)。
 
-设计目标与 fts_store.py 一致:手写 sqlite3、WAL、单独的存储组件,不侵入
+设计目标与 memory_store.py 一致:手写 sqlite3、WAL、单独的存储组件,不侵入
 short_term/long_term。向后兼容:无档案时 `UserProfile.to_prompt()` 返回
 None,注入侧零影响。门控 `settings.memory_profile_enabled` 默认开、关闭
 即完全回退(不建库、不注入、不落工单)。
@@ -56,7 +56,7 @@ class UserProfile:
 
 
 class UserProfileStore:
-    """结构化用户档案的 SQLite 持久化(WAL,建表参考 fts_store.py 风格)。"""
+    """结构化用户档案的 SQLite 持久化(WAL,建表参考 memory_store.py 风格)。"""
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -97,6 +97,26 @@ class UserProfileStore:
             for r in ticket_rows
         ]
         return UserProfile(user_id=user_id, base=base, tags=tags, tickets=tickets)
+
+    def list_user_tags(self) -> dict:
+        """`{user_id: [tags]}`。WS4 群体统计的只读聚合口(技术方案 §5)。
+
+        只报不回流:群体标签×失败率对照是给人看的报表,不进任何自动判定——
+        个体偏好逐用户、skill 全局,把 cohort 信号自动写进 skill 等于把群体
+        统计当个体政策用。
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT user_id, tags_json FROM user_profile").fetchall()
+        out = {}
+        for user_id, tags_json in rows:
+            try:
+                tags = json.loads(tags_json) if tags_json else []
+            except (ValueError, TypeError):  # 坏行按无标签处理,不拖垮整张报表
+                tags = []
+            if tags:
+                out[str(user_id)] = [str(t) for t in tags]
+        return out
 
     def update_base(self, user_id: str, patch: dict) -> None:
         """合并式更新:读旧 base、dict.update(patch)、写回。"""

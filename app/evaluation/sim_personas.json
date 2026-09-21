@@ -1,0 +1,38 @@
+{
+  "_note": "WS5 多轮用户模拟器 persona 库(原型阶段:零 LLM 脚本版)。停止条件全确定性;流量标 SOURCE_SIMULATED,两套口径都排除,只服务评测与回归。",
+  "personas": [
+    {
+      "id": "policy_pushback",
+      "opener": "收到货不合适可以退吗?",
+      "followups": [
+        "可是你们上次客服说退货运费是免费的啊?",
+        "那行吧,运费具体大概多少钱?"
+      ],
+      "goal_keywords": ["由您承担"],
+      "patience": 3,
+      "max_turns": 4
+    },
+    {
+      "id": "anaphora_order",
+      "opener": "帮我查下订单 ORD-20240115-001",
+      "followups": [
+        "那它现在到哪儿了?",
+        "派送的话大概还要几天?"
+      ],
+      "goal_keywords": ["浦东"],
+      "patience": 3,
+      "max_turns": 4
+    },
+    {
+      "id": "repeat_then_giveup",
+      "opener": "你们几点上班?",
+      "followups": [
+        "你们几点上班?",
+        "我问你们几点上班?"
+      ],
+      "goal_keywords": [],
+      "patience": 2,
+      "max_turns": 4
+    }
+  ]
+}
