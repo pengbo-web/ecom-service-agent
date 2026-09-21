@@ -260,6 +260,21 @@ class Database:
                 );
                 CREATE INDEX IF NOT EXISTS idx_skill_canaries_active
                     ON skill_canaries(skill_name, status);
+                -- WS1 skill 记忆两层化:在线零决策标记通道(技术方案 §2)。
+                -- 只记"这一轮似乎值得学"的标记,**不参与归因判定**(判定权在
+                -- attribution 规则表),只供失败样本采样优先级与进化循环看板报数。
+                CREATE TABLE IF NOT EXISTS skill_memory_hints (
+                    hint_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    skill_name TEXT NOT NULL DEFAULT '',
+                    kind TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'rule',
+                    traffic TEXT NOT NULL DEFAULT 'unknown',
+                    detail TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_hints_skill
+                    ON skill_memory_hints(skill_name, kind);
                 CREATE TABLE IF NOT EXISTS agent_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_type TEXT NOT NULL,

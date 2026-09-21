@@ -67,6 +67,7 @@ class EcomAgent:
         self._turn_item_ctx = None   # (item_id, 商品块) 每轮缓存:同商品不重复请求 hmdp
         self._turn_skill_ctx = None   # (skill_name, instructions) 本轮预加载的技能流程
         self._turn_qu = None       # 查询理解结果(orchestrator 每轮注入;引擎独立运行时 None=老行为)
+        self._last_skill_name = ""  # WS1:上一轮加载的 skill,供"买家纠正"hint 归到被纠正的那一轮
         # L3①:orchestrator 每轮注入的 KB 并发预取结果——(用于预取的 query, rows, backend)。
         # 只有当 _build_messages 里最终要用的检索 query 与预取时的 query **完全相同**才会被
         # 复用(见下方 _build_messages);不同则原地丢弃,回退成一次新的现场检索,不冒充。
@@ -415,6 +416,7 @@ class EcomAgent:
         self._status = "complete"
         self.store.save(self.session_path, self._session_state())   # 回合结束:完整落盘(必落)
         self._write_snapshot()
+        self._record_memory_hints(user_input)
         self._record_skill_turn(result)
         self._record_turn_signal(result)
         return result
@@ -500,15 +502,49 @@ class EcomAgent:
         except Exception:  # noqa: BLE001 埋点失败绝不影响本轮回复
             pass
 
+    def _record_memory_hints(self, user_input: str) -> None:
+        """WS1:在线零决策标记(技术方案 §2)——只标记,不判定。
+
+        两个零 LLM 规则源:① 买家纠正(归到**上一轮**的 skill,被纠正的是它);
+        ② 门控说要检索、走了统一召回却零命中、意图是政策类(归本轮 skill)。
+        hint 不参与归因判定,只供采样排序与循环看板报数;判定权在 attribution
+        规则表(41 条归属拦截实证换来的纪律)。
+
+        旁路埋点:任何异常吞掉,绝不能因为标记失败影响本轮回复。必须在
+        `_record_skill_turn` **之前**调用——那里会刷新 `_last_skill_name`。
+        """
+        try:
+            from app.agent.skills import memory_hints
+            name = memory_hints.detect_user_correction(user_input)
+            if name and getattr(self, "_last_skill_name", ""):
+                memory_hints.record_hint(
+                    self.session_id, self._last_skill_name,
+                    memory_hints.KIND_USER_CORRECTION, detail=name)
+            qu = getattr(self, "_turn_qu", None)
+            cached = getattr(self, "_turn_recall", None)
+            turn = getattr(self, "_skill_turn", None)
+            if (qu is not None and turn is not None and turn.has_skill
+                    and memory_hints.detect_kb_miss_policy(
+                        qu, cached[1] if cached else None)):
+                memory_hints.record_hint(
+                    self.session_id, turn.skill_name,
+                    memory_hints.KIND_KB_MISS_POLICY,
+                    detail=getattr(cached[1], "kb_backend", "") or "none")
+        except Exception:  # noqa: BLE001 埋点失败绝不影响本轮回复
+            pass
+
     def _record_skill_turn(self, result: CustomerServiceResponse) -> None:
         """G2:本轮若加载过 skill,把执行轨迹落库(供 G3 失败采集 / G4 门禁分析)。
 
         旁路埋点:开关关闭、未加载 skill、或落库失败都直接返回,绝不影响回复。
         """
-        if not settings.skill_trace_enabled:
-            return
         turn = getattr(self, "_skill_turn", None)
         if turn is None or not turn.has_skill:
+            return
+        # WS1:记住"上一轮跑的是哪个 skill",供下一轮"买家纠正"hint 归到被纠正
+        # 的那一轮。与轨迹开关无关:轨迹不落盘时标记通道照常工作。
+        self._last_skill_name = turn.skill_name
+        if not settings.skill_trace_enabled:
             return
         try:
             from app.db import get_db
@@ -570,7 +606,12 @@ class EcomAgent:
             pass
 
     def close(self):
-        self.memory_manager.consolidate_to_long_term(self.raw_messages, self.summary)
+        # WS1:巩固顺带的 skill_gap_note 标记要能归到会话与最近一轮的 skill 上;
+        # 开关默认关,不传也不影响任何既有行为。
+        self.memory_manager.consolidate_to_long_term(
+            self.raw_messages, self.summary,
+            session_id=self.session_id,
+            skill_name=getattr(self, "_last_skill_name", ""))
         self.tool_manager.close()
 
     # 空回复重试兜底文案(重试仍空时用,避免给用户一片空白)
